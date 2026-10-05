@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 // Step 1 of refresh-token flow. Open https://drive.eiden-group.com/api/auth/google
 // while logged in as Admin/Manager -> redirects to Google consent (fileos@eiden-group.com).
 // Google returns to /api/auth/google/callback?code=... which shows the refresh token ONCE.

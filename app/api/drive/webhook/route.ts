@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { createClient } from "@/lib/supabase-server";
 
 // Drive change webhook (Google push notifications). Verifies channel headers, enqueues reindex job.

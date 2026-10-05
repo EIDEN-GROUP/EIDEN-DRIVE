@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase-server";
 import { Card } from "@/components/ui/primitives";
 
+export const dynamic = "force-dynamic";
+
 export default async function ActivityPage() {
   const supa = createClient();
   const { data } = await supa.from("audit_logs").select("*").order("ts", { ascending: false }).limit(50);

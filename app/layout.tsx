@@ -1,13 +1,21 @@
 import "./globals.css";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 
 export const metadata: Metadata = {
   title: "Eiden-Drive — Eiden Group FileOS",
   description: "Unified Google Shared Drives + Router-USB dashboard with audit, vault, and AI MCP.",
   manifest: "/manifest.json",
-  viewport: "width=device-width, initial-scale=1, viewport-fit=cover",
   icons: { icon: "/logo.png" }
 };
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover"
+};
+
+// Dashboard app: everything is per-user (auth cookies, Supabase RLS) — never prerender.
+export const dynamic = "force-dynamic";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

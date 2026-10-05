@@ -2,6 +2,8 @@ import { createClient } from "@/lib/supabase-server";
 import { Card, Pill } from "@/components/ui/primitives";
 import { classify, formatBytes, badge } from "@/lib/files";
 
+export const dynamic = "force-dynamic";
+
 export default async function FilePage({ params }: { params: { id: string } }) {
   const supa = createClient();
   const { data: f } = await supa.from("file_index").select("*").eq("id", params.id).single();

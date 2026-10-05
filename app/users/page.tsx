@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase-server";
 import { Card, Pill } from "@/components/ui/primitives";
 
+export const dynamic = "force-dynamic";
+
 export default async function UsersPage() {
   const supa = createClient();
   const { data } = await supa.from("profiles").select("username,role,department_tag").order("username").limit(100);

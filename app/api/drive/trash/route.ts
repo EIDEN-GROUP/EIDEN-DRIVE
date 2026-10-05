@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
 import { trashDriveFile } from "@/lib/google-drive";

@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 // Step 2: Google redirects here with ?code=... — we exchange it for tokens and
 // display the refresh_token ONCE so you can paste it into Vercel env.
 // Tokens are NEVER logged or stored in the DB by this route.

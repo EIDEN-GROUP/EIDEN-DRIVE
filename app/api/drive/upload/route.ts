@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { createClient } from "@/lib/supabase-server";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
