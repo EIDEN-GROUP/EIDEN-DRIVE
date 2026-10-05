@@ -1,5 +1,6 @@
 import "./globals.css";
 import type { Metadata, Viewport } from "next";
+import Logo from "@/components/ui/Logo";
 
 export const metadata: Metadata = {
   title: "Eiden-Drive — Eiden Group FileOS",
@@ -25,9 +26,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <div className="app-shell min-h-screen md:grid md:grid-cols-[260px_1fr]">
           <aside className="hidden md:block p-5 border-r border-[var(--e-line)]">
             <div className="flex items-center gap-2 font-extrabold tracking-widest text-sm">
-              {/* Your monogram: save the image you sent as public/logo.png — PNG wins, SVG fallback */}
-              <img src="/logo.png" alt="Eiden-Drive logo" width={28} height={28} className="rounded-lg"
-                onError={(e) => { (e.target as HTMLImageElement).src = "/logo.svg"; }} />
+              <Logo />
               EIDEN-DRIVE
             </div>
             <nav className="mt-6 flex flex-col gap-1 text-sm" aria-label="Primary">
