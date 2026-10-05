@@ -1,0 +1,8 @@
+{
+  "name": "eiden-local-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Outbound-only agent: indexes router-USB SMB share, hashes files, serves controlled ops to cloud",
+  "scripts": { "start": "node src/index.js" },
+  "dependencies": { "ws": "^8.17.0" }
+}

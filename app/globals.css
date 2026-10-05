@@ -1,0 +1,25 @@
+@import url('https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700;800&family=Besley:ital,wght@0,400;0,500;1,400;1,500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* EIDEN brand — presentation HTMLs */
+  --e-green-950: #0E1B17; --e-green-900: #122620; --e-green-800: #16302F;
+  --e-teal-700: #1C5C58; --e-teal-600: #0C5752; --e-teal-500: #0E7A73; --e-teal-300: #6FA9A4;
+  --e-gold-500: #CFC292; --e-gold-600: #B7A97B; --e-gold-300: #DFD6AC;
+  --e-cream-200: #F4EBD0; --e-cream-50: #FEFFF8;
+  --e-line: rgba(207,194,146,.16); --e-line-strong: rgba(207,194,146,.32);
+  /* Design.md functional */
+  --color-primary-500: #0d6efd; --color-success: #198754;
+  --color-warning: #ffc107; --color-error: #dc3545;
+  --font-size-base: 1.125rem;
+}
+
+body { font-family: Inter, system-ui, sans-serif; background: var(--e-cream-50); color: var(--e-green-900); }
+.app-shell { background: var(--e-green-900); color: var(--e-cream-50); }
+.card { border-radius: 1rem; border: 1px solid var(--e-line); }
+.pill { border-radius: 9999px; font-size: 9px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+:focus-visible { outline: 2px solid var(--e-teal-500); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
