@@ -10,3 +10,4 @@
 8. `08-alerts-notifications.md` — alert catalog + channels
 9. `09-phases-checklist.md` — P0→P3 + acceptance
 10. `10-google-oauth-refresh-token.md` — refresh-token click tutorial + 3 unfilled vars
+11. `11-project-journal.md` — master record: convo log, decisions, file map, env names, runbooks, test log

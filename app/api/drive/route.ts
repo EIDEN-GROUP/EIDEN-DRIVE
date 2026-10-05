@@ -12,7 +12,7 @@ export async function GET(req: Request) {
   const me = await getProfile();
 
   // 1) indexed files (Google + Local + Backup badges)
-  const { data: rows } = await supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at").ilike("name", `%${q}%`).limit(50);
+  const { data: rows } = await supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id").ilike("name", `%${q}%`).limit(50);
   // 2) live Google fallback
   const g = await listDriveFiles(q);
   const indexed = (rows ?? []).map((r: { id: string; name: string; mime: string; size: number; backends: string[] }) => ({ ...r, updated: (r as { updated_at?: string }).updated_at }));

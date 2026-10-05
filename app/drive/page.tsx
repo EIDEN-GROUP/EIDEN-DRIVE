@@ -1,5 +1,5 @@
-import DriveBrowser from "@/components/drive/DriveBrowser";
+import Explorer from "@/components/drive/Explorer";
 
 export default function DrivePage() {
-  return <DriveBrowser />;
+  return <Explorer />;
 }

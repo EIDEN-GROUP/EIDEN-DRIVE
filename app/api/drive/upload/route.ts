@@ -9,12 +9,13 @@ import { getProfile } from "@/lib/roles";
 export async function POST(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
-  const body = await req.json() as { name: string; mime?: string; size?: number; hash?: string; backends?: string[]; folder?: string };
+  const body = await req.json() as { name: string; mime?: string; size?: number; hash?: string; backends?: string[]; folder?: string; storage_path?: string };
   if (!body.name) return Response.json({ error: "name required" }, { status: 400 });
   const supa = createClient();
   const { data, error } = await supa.from("file_index").insert({
     name: body.name, mime: body.mime ?? "application/octet-stream", size: body.size ?? 0,
-    hash: body.hash ?? null, backends: body.backends ?? ["google"], owner: me.id, folder: body.folder ?? null
+    hash: body.hash ?? null, backends: body.backends ?? ["google"], owner: me.id, folder: body.folder ?? null,
+    storage_path: body.storage_path ?? null
   }).select("id").single();
   if (error) return Response.json({ error: error.message }, { status: 500 });
   await supa.from("versions").insert({ file_id: data.id, v: 1, hash: body.hash ?? "", actor: me.id });
