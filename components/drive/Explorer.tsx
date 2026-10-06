@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
-  Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink
+  Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -86,6 +86,10 @@ export default function Explorer() {
   const [confirmTrash, setConfirmTrash] = useState<FileRow | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newName, setNewName] = useState("");
+  const [renameTarget, setRenameTarget] = useState<{ kind: "file" | "folder"; id: string; name: string } | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [confirmFolderDelete, setConfirmFolderDelete] = useState<Folder | null>(null);
+  const [syncing, setSyncing] = useState(false);
   const [uploading, setUploading] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -270,6 +274,48 @@ export default function Explorer() {
     navigator.clipboard?.writeText(url).then(() => toast({ text: "Link copied.", tone: "ok" }), () => toast({ text: "Couldn't copy link.", tone: "err" }));
   }
 
+  function openRename(kind: "file" | "folder", id: string, name: string) {
+    setRenameTarget({ kind, id, name });
+    setRenameValue(name);
+    setCtx(null);
+  }
+
+  async function doRename(e: React.FormEvent) {
+    e.preventDefault();
+    if (!renameTarget) return;
+    const name = renameValue.trim();
+    if (!name || name === renameTarget.name) { setRenameTarget(null); return; }
+    const url = renameTarget.kind === "folder" ? "/api/folders" : "/api/drive/rename";
+    const body = renameTarget.kind === "folder"
+      ? { folder_id: renameTarget.id, name }
+      : { file_id: renameTarget.id, name };
+    const r = await fetch(url, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) { toast({ text: `Renamed to "${name}".`, tone: "ok" }); setRenameTarget(null); load(q); }
+    else toast({ text: d.error ?? "Couldn't rename.", tone: "err" });
+  }
+
+  async function deleteFolder() {
+    if (!confirmFolderDelete) return;
+    const r = await fetch("/api/folders", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ folder_id: confirmFolderDelete.id }) });
+    const d = await r.json().catch(() => ({}));
+    setConfirmFolderDelete(null);
+    if (r.ok) { toast({ text: `Folder "${confirmFolderDelete.name}" deleted.`, tone: "ok" }); setSelKey(null); load(q); }
+    else toast({ text: d.error ?? "Couldn't delete folder.", tone: "err" });
+  }
+
+  async function syncGoogle() {
+    setSyncing(true);
+    try {
+      const r = await fetch("/api/drive/sync", { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) { toast({ text: `Google sync done: ${d.inserted} new, ${d.updated} updated.`, tone: "ok" }); load(q); }
+      else toast({ text: d.error ?? "Sync failed.", tone: "err" });
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   // ── view helpers ──
   const title = nav.kind === "recent" ? "Recent" : nav.kind === "docs" ? "Documents" : nav.kind === "bin" ? "Recovery Bin"
     : curFolder ? folderById.get(curFolder)?.name ?? "Folder" : "Root";
@@ -301,7 +347,7 @@ export default function Explorer() {
       {/* ── Favorites / Tags pane ── */}
       <aside aria-label="Favorites and tags"
         className={`${pane === null ? "hidden md:flex" : pane ? "flex" : "hidden"} absolute md:static inset-y-0 left-0 z-20 w-[232px] shrink-0 flex-col bg-soft border-r border-line px-3 py-3 overflow-y-auto shadow-pop md:shadow-none`}>
-        <button onClick={() => setFavOpen((o) => !o)} aria-expanded={favOpen} className="flex items-center justify-between px-2 min-h-[36px] text-[13px] text-muted">
+        <button onClick={() => setFavOpen((o) => !o)} aria-expanded={favOpen} className="flex items-center justify-between px-2 min-h-[44px] text-[13px] text-muted">
           Favorites {favOpen ? <ChevronDown size={16} className="text-brand" /> : <ChevronRight size={16} className="text-brand" />}
         </button>
         {favOpen && (
@@ -312,7 +358,7 @@ export default function Explorer() {
             {favItem(nav.kind === "root" && !tagFilter, () => go({ kind: "root", path: [] }), <House size={19} strokeWidth={1.6} />, "Root")}
           </div>
         )}
-        <button onClick={() => setTagsOpen((o) => !o)} aria-expanded={tagsOpen} className="mt-2 flex items-center justify-between px-2 min-h-[36px] text-[13px] text-muted">
+        <button onClick={() => setTagsOpen((o) => !o)} aria-expanded={tagsOpen} className="mt-2 flex items-center justify-between px-2 min-h-[44px] text-[13px] text-muted">
           Tags {tagsOpen ? <ChevronDown size={16} className="text-brand" /> : <ChevronRight size={16} className="text-brand" />}
         </button>
         {tagsOpen && (
@@ -334,7 +380,7 @@ export default function Explorer() {
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Toolbar */}
         <div className="shrink-0 min-h-[56px] px-3 flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
-          <button onClick={() => setPane((p) => !(p ?? true))} aria-label="Toggle favorites pane" className="size-9 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={21} strokeWidth={1.6} /></button>
+          <button onClick={() => setPane((p) => !(p ?? true))} aria-label="Toggle favorites pane" className="size-11 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={21} strokeWidth={1.6} /></button>
           <span className="h-5 border-l border-line mx-1" />
           <button onClick={back} disabled={hi === 0} aria-label="Back" className="size-8 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronLeft size={18} /></button>
           <button onClick={forward} disabled={hi >= hist.length - 1} aria-label="Forward" className="size-8 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronRight size={18} /></button>
@@ -344,11 +390,11 @@ export default function Explorer() {
             <div className="relative">
               <Search size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
               <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search" aria-label="Search files"
-                className="w-32 sm:w-52 min-h-[36px] pl-8 pr-2 rounded-md border border-line bg-surface text-[13px] placeholder:text-muted focus:border-brand focus:outline-none" />
+                className="w-32 sm:w-52 min-h-[44px] pl-8 pr-2 rounded-md border border-line bg-surface text-[13px] placeholder:text-muted focus:border-brand focus:outline-none" />
             </div>
             <div role="group" aria-label="View" className="flex rounded-md overflow-hidden">
-              <button onClick={() => setView("list")} aria-pressed={view === "list"} aria-label="List view" className={`size-9 grid place-items-center ${view === "list" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutList size={19} strokeWidth={1.6} /></button>
-              <button onClick={() => setView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-9 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
+              <button onClick={() => setView("list")} aria-pressed={view === "list"} aria-label="List view" className={`size-11 grid place-items-center ${view === "list" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutList size={19} strokeWidth={1.6} /></button>
+              <button onClick={() => setView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
             </div>
             <span className="h-5 border-l border-line mx-0.5" />
             <Menu label="Sort and filter" align="right" active={`${sort.key}:${sort.dir}`}
@@ -367,6 +413,7 @@ export default function Explorer() {
                 { label: uploading ? `Uploading ${uploading}…` : "Upload file", icon: <Upload size={14} />, onSelect: () => fileRef.current?.click() },
                 { label: "New folder", icon: <FolderPlus size={14} />, onSelect: () => setShowNewFolder(true), hidden: nav.kind !== "root" },
                 "sep",
+                { label: syncing ? "Syncing from Google…" : "Sync from Google", icon: <CloudDownload size={14} />, onSelect: syncGoogle },
                 { label: "Refresh", icon: <RefreshCw size={14} />, onSelect: () => load(q) }
               ]} />
             <input ref={fileRef} type="file" className="hidden" aria-label="Choose file to upload" onChange={(e) => uploadPicked(e.target.files)} />
@@ -404,7 +451,7 @@ export default function Explorer() {
                             <FileGlyph kind={kindOf(classify(fi?.name ?? ""))} size={22} />
                             <span className="flex-1 truncate">{fi?.name}</span>
                             <span className="text-[11px] text-muted hidden sm:block">purges {fmtDate(b.purge_at)}</span>
-                            <button onClick={(e) => { e.stopPropagation(); restore(b.file_id, fi?.name ?? "?"); }} className="min-h-[36px] px-2 text-[12px] text-brand flex items-center gap-1 hover:underline"><Undo2 size={14} /> Restore</button>
+                            <button onClick={(e) => { e.stopPropagation(); restore(b.file_id, fi?.name ?? "?"); }} className="min-h-[44px] px-2 text-[12px] text-brand flex items-center gap-1 hover:underline"><Undo2 size={14} /> Restore</button>
                           </li>
                         );
                       })}
@@ -540,9 +587,14 @@ export default function Explorer() {
           {[
             { label: "Open", on: () => open(ctx.row), show: !(ctx.row.kind === "file" && ctx.row.id.startsWith("g:")) },
             { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(ctx.row.key); setInfoOpen(true); }, show: true },
+            { label: "Rename", icon: <Pencil size={14} />, on: () => ctx.row.kind === "folder" && ctx.row.folder
+              ? openRename("folder", ctx.row.folder.id, ctx.row.folder.name)
+              : ctx.row.file && openRename("file", ctx.row.id, ctx.row.file.name),
+              show: ctx.row.kind === "folder" || (ctx.row.kind === "file" && !ctx.row.id.startsWith("g:")) },
             { label: "Download", icon: <Download size={14} />, on: () => { window.location.href = `/api/drive/download?file_id=${ctx.row.id}`; }, show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") },
             { label: "Copy link", icon: <Link2 size={14} />, on: () => copyLink(ctx.row), show: !ctx.row.id.startsWith("g:") && ctx.row.kind === "file" },
-            { label: "Delete", icon: <Trash2 size={14} />, danger: true, on: () => ctx.row.file && setConfirmTrash(ctx.row.file), show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") }
+            { label: "Delete", icon: <Trash2 size={14} />, danger: true, on: () => ctx.row.file && setConfirmTrash(ctx.row.file), show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") },
+            { label: "Delete folder", icon: <Trash2 size={14} />, danger: true, on: () => ctx.row.folder && setConfirmFolderDelete(ctx.row.folder), show: ctx.row.kind === "folder" }
           ].filter((i) => i.show).map((i) => (
             <button key={i.label} role="menuitem" onClick={() => { const fn = i.on; setCtx(null); fn(); }}
               className={`w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint ${"danger" in i && i.danger ? "text-danger" : "text-ink"}`}>
@@ -582,6 +634,24 @@ export default function Explorer() {
       <ConfirmDialog open={!!confirmTrash} title="Move to Recovery Bin?"
         body={`"${confirmTrash?.name}" stays recoverable for 90 days. Members can never delete permanently.`}
         confirmLabel="Move to Bin" onClose={() => setConfirmTrash(null)} onConfirm={() => confirmTrash && trash(confirmTrash)} />
+
+      <Modal open={!!renameTarget} title={renameTarget?.kind === "folder" ? "Rename folder" : "Rename file"} onClose={() => setRenameTarget(null)} labelId="rn-title" width={400}>
+        <form onSubmit={doRename} className="flex flex-col gap-4">
+          <div>
+            <label htmlFor="rn-name" className="block text-[13px] text-muted">New name</label>
+            <input id="rn-name" autoFocus value={renameValue} onChange={(e) => setRenameValue(e.target.value)} maxLength={255}
+              className="w-full min-h-[44px] mt-1 bg-transparent border-0 border-b border-[#8f8f9a] focus:border-b-2 focus:border-brand focus:outline-none rounded-none px-0 text-[16px]" />
+          </div>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setRenameTarget(null)} className="min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint">Cancel</button>
+            <button disabled={!renameValue.trim()} className="min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50">Rename</button>
+          </div>
+        </form>
+      </Modal>
+
+      <ConfirmDialog open={!!confirmFolderDelete} title="Delete folder?"
+        body={`"${confirmFolderDelete?.name}" is deleted only if it is empty. Files must be trashed individually first — managers only.`}
+        confirmLabel="Delete" onClose={() => setConfirmFolderDelete(null)} onConfirm={deleteFolder} />
     </section>
   );
 }

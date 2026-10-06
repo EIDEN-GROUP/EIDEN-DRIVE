@@ -10,7 +10,7 @@
   --head: #eeebfa;      /* table header */
   --line: #e8e8ef;
   --ink: #2b2b36;
-  --muted: #8b8b9b;
+  --muted: #6e6e7c; /* 4.6:1 on white — secondary text must pass AA */
   --brand: #5b3fd0;
   --brand-deep: #4a34b8;
   --icon: #4b3bc8;      /* filled file / folder glyphs */

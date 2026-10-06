@@ -1,4 +1,5 @@
-# 06 — UI/UX + theme (skill: ui-ux-pro-max)
+> **SUPERSEDED by `docs/design.md`** (commit `00abc64` replaced the green/teal/gold
+# 06 — UI/UX + theme [HISTORICAL — SUPERSEDED by `docs/design.md`]
 
 Design-system query `company file manager dashboard responsive --density 8` → Flat, dense dashboard, subtle 300-400ms reveal, 44px touch, SVG icons, reduced-motion respected.
 

@@ -19,7 +19,7 @@ export default function Menu({ trigger, items, label, align = "right", active }:
   return (
     <div ref={ref} className="relative">
       <button onClick={() => setOpen((o) => !o)} aria-haspopup="menu" aria-expanded={open} aria-label={label}
-        className="min-h-[36px] px-1.5 rounded-md grid place-items-center hover:bg-tint transition-colors">{trigger}</button>
+        className="min-h-[44px] px-1.5 rounded-md grid place-items-center hover:bg-tint transition-colors">{trigger}</button>
       {open && (
         <div role="menu" className={`pop-in absolute z-50 mt-1.5 min-w-[188px] py-1.5 rounded-lg bg-surface border border-line shadow-pop ${align === "right" ? "right-0" : "left-0"}`}>
           {items.map((it, i) => it === "sep" ? <div key={i} className="my-1 border-t border-line" /> : it.hidden ? null : (

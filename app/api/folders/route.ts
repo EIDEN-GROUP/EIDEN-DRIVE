@@ -2,7 +2,8 @@ export const dynamic = "force-dynamic";
 
 import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
-import { getProfile } from "@/lib/roles";
+import { adminClient } from "@/lib/supabase-admin";
+import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { parseJson } from "@/lib/http";
 
@@ -36,4 +37,47 @@ export async function POST(req: Request) {
   if (error) return Response.json({ error: error.message }, { status: 500 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "add", req, detail: { folder: body.name } });
   return Response.json({ ok: true, id: data.id }, { status: 201 });
+}
+
+const Rename = z.object({
+  folder_id: z.string().uuid(),
+  name: z.string().trim().min(1).max(120)
+});
+
+// Any signed-in member can rename (it's an edit). Audited.
+export async function PATCH(req: Request) {
+  const me = await getProfile();
+  if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const p = await parseJson(req, Rename);
+  if (p.error) return p.error;
+  const db = adminClient();
+  const { data: f } = await db.from("folders").select("id,name").eq("id", p.data.folder_id).maybeSingle();
+  if (!f) return Response.json({ error: "not found" }, { status: 404 });
+  const { error } = await db.from("folders").update({ name: p.data.name }).eq("id", p.data.folder_id);
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+  await logAudit({ actor: me.id, actor_name: me.username, action: "rename", req, detail: { folder: p.data.folder_id, from: f.name, to: p.data.name } });
+  return Response.json({ ok: true });
+}
+
+const Remove = z.object({ folder_id: z.string().uuid() });
+
+// Managers+: delete a folder, but ONLY when empty (no subfolders, no files).
+// Files must be trashed individually first — never bulk-destroyed by accident.
+export async function DELETE(req: Request) {
+  const me = await getProfile();
+  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  const p = await parseJson(req, Remove);
+  if (p.error) return p.error;
+  const db = adminClient();
+  const { count: kids } = await db.from("folders").select("id", { count: "exact", head: true }).eq("parent", p.data.folder_id);
+  const { count: files } = await db.from("file_index").select("id", { count: "exact", head: true }).eq("folder", p.data.folder_id);
+  if ((kids ?? 0) > 0 || (files ?? 0) > 0) {
+    return Response.json({ error: "folder is not empty — move or trash its contents first" }, { status: 400 });
+  }
+  const { data: f } = await db.from("folders").select("name").eq("id", p.data.folder_id).maybeSingle();
+  if (!f) return Response.json({ error: "not found" }, { status: 404 });
+  const { error } = await db.from("folders").delete().eq("id", p.data.folder_id);
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+  await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { folder: p.data.folder_id, name: f.name } });
+  return Response.json({ ok: true });
 }

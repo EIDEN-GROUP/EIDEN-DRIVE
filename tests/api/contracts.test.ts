@@ -14,11 +14,23 @@ describe("API contracts (anonymous)", () => {
     const r = await get("/api/drive?q=");
     expect([401, 307]).toContain(r.status);
   });
-  it("rejects trash/restore/upload/folders/vault without session", async () => {
-    for (const [p, m] of [["/api/drive/trash", "POST"], ["/api/drive/restore", "POST"], ["/api/drive/upload", "POST"], ["/api/folders", "POST"]] as const) {
+  it("rejects trash/restore/upload/rename/sync/folders/vault/users/bin/download without session", async () => {
+    for (const [p, m] of [
+      ["/api/drive/trash", "POST"], ["/api/drive/restore", "POST"], ["/api/drive/upload", "POST"],
+      ["/api/drive/upload-url", "POST"], ["/api/drive/rename", "PATCH"], ["/api/drive/sync", "POST"],
+      ["/api/folders", "POST"], ["/api/folders", "PATCH"], ["/api/folders", "DELETE"],
+      ["/api/users", "PATCH"], ["/api/users", "DELETE"], ["/api/users/invite", "POST"],
+      ["/api/storage", "POST"]
+    ] as const) {
       const r = await fetch(`${BASE}${p}`, { method: m, headers: { "content-type": "application/json" }, body: "{}" });
       expect([400, 401, 307]).toContain(r.status);
     }
+    for (const p of ["/api/users", "/api/drive/bin", "/api/activity", "/api/storage", "/api/notifications"]) {
+      const r = await get(p);
+      expect([401, 307]).toContain(r.status);
+    }
+    const dl = await get("/api/drive/download?file_id=00000000-0000-0000-0000-000000000000");
+    expect([400, 401, 307, 404]).toContain(dl.status);
   });
   it("gates the Google OAuth start route", async () => {
     const r = await get("/api/auth/google", false);

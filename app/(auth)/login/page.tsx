@@ -15,8 +15,24 @@ function LoginForm() {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
+  // Resend cooldown: Supabase rate-limits OTP emails (429 "email rate limit exceeded").
+  // One send per 60 s per browser + a clear message keeps users out of the limit.
+  const COOLDOWN = 60;
+  const [cool, setCool] = useState(0);
+  useEffect(() => {
+    const left = COOLDOWN - Math.floor((Date.now() - Number(localStorage.getItem("eiden-otp-at") ?? 0)) / 1000);
+    if (left <= 0) return;
+    setCool(left);
+    const t = setInterval(() => setCool((c) => {
+      if (c <= 1) { clearInterval(t); return 0; }
+      return c - 1;
+    }), 1000);
+    return () => clearInterval(t);
+  }, []);
+
   async function magicLink(e: React.FormEvent) {
     e.preventDefault();
+    if (cool > 0) return;
     setState("sending");
     setError("");
     const supa = browserClient();
@@ -25,11 +41,19 @@ function LoginForm() {
       options: { shouldCreateUser: false, emailRedirectTo: `${window.location.origin}/api/auth/callback?next=${encodeURIComponent(next)}` }
     });
     if (error) {
-      // shouldCreateUser:false → unknown emails are rejected ("Signups not allowed for otp"): invite-only.
-      setError(/signups? not allowed|not found|invalid login/i.test(error.message) ? "No account for this email yet. Ask a manager to invite you." : error.message);
+      const m = error.message;
+      if (/rate|too many|429|exceeded|after a while/i.test(m)) {
+        setError("Too many sign-in emails sent — wait a few minutes, then try exactly once. Check spam too.");
+      } else if (/signups? not allowed|not found|invalid login/i.test(m)) {
+        setError("No account for this email yet. Ask a manager to invite you.");
+      } else setError(m);
       setState("error");
     }
-    else setState("sent");
+    else {
+      localStorage.setItem("eiden-otp-at", String(Date.now()));
+      setCool(COOLDOWN);
+      setState("sent");
+    }
   }
 
   async function google() {
@@ -64,10 +88,10 @@ function LoginForm() {
 
           {error && <p className="text-[14px] text-danger mt-4" role="alert">{error}</p>}
 
-          <button disabled={state === "sending"}
-            className="mt-9 min-h-[44px] py-3 w-full rounded-[6px] bg-[var(--login)] text-white text-[17px] tracking-wide uppercase hover:brightness-110 active:brightness-95 transition disabled:opacity-60 shadow-[0_1px_2px_rgba(60,30,120,.25)]">
-            {state === "sending" ? "Sending…" : "Sign in"}
-          </button>
+            <button disabled={state === "sending" || cool > 0}
+              className="mt-9 min-h-[44px] py-3 w-full rounded-[6px] bg-[var(--login)] text-white text-[17px] tracking-wide uppercase hover:brightness-110 active:brightness-95 transition disabled:opacity-60 shadow-[0_1px_2px_rgba(60,30,120,.25)]">
+              {state === "sending" ? "Sending…" : cool > 0 ? `Resend in ${cool}s` : "Sign in"}
+            </button>
 
           <div className="flex items-center gap-3 my-6 text-[13px] text-muted" aria-hidden="true">
             <span className="flex-1 border-t border-line" /><span>or</span><span className="flex-1 border-t border-line" />

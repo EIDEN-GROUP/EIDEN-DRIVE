@@ -47,10 +47,10 @@ export async function GET(req: Request) {
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Eiden — refresh token</title>
-<style>body{font-family:system-ui;background:#122620;color:#FEFFF8;display:grid;place-items:center;min-height:100vh;margin:0}
-.card{max-width:640px;background:#0E1B17;border:1px solid #CFC292;padding:28px;border-radius:16px}
-code{display:block;background:#000;color:#CFC292;padding:14px;border-radius:10px;word-break:break-all;user-select:all}
-.warn{color:#ffc107;font-size:13px}</style></head><body><div class="card">
+<style>body{font-family:system-ui;background:#f4f4f7;color:#2b2b36;display:grid;place-items:center;min-height:100vh;margin:0}
+.card{max-width:640px;background:#fff;border:1px solid #e8e8ef;padding:28px;border-radius:16px}
+code{display:block;background:#16161e;color:#8f7bff;padding:14px;border-radius:10px;word-break:break-all;user-select:all}
+.warn{color:#b45309;font-size:13px}button{min-height:44px;padding:0 20px;border-radius:12px;background:#5b3fd0;color:#fff;border:0}</style></head><body><div class="card">
 <h2>Copy this into Vercel env as GOOGLE_REFRESH_TOKEN</h2>
 <p class="warn">Shown ONCE. Never share it in chat/email. After saving, redeploy and re-opening this URL will stop working once you remove APP_SETUP_KEY.</p>
 <code id="t">${tok.refresh_token.replace(/</g, "&lt;")}</code>

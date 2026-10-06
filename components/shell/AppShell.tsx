@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Pin, ChevronDown, Menu as MenuIcon, FolderClosed, Activity, ShieldCheck, KeyRound, Users, HardDrive,
+  ChevronDown, Menu as MenuIcon, FolderClosed, Activity, ShieldCheck, KeyRound, Users, HardDrive,
   Moon, Sun, ChevronsRight, ChevronsLeft, Bell, CircleCheck, CalendarDays, Zap, LogOut, X
 } from "lucide-react";
 import Logo from "../ui/Logo";
@@ -39,6 +39,12 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
   }, []);
   useEffect(() => setDrawer(false), [path]);
   useEffect(() => {
+    if (!drawer) return;
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") setDrawer(false); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [drawer]);
+  useEffect(() => {
     if (!userMenu) return;
     const d = (e: MouseEvent) => { if (!menuRef.current?.contains(e.target as Node)) setUserMenu(false); };
     document.addEventListener("mousedown", d);
@@ -69,7 +75,7 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
     <div className="h-screen flex bg-surface text-ink overflow-hidden">
       {/* ── Sidebar ── */}
       {drawer && <div className="lg:hidden fixed inset-0 z-30 bg-black/30" onClick={() => setDrawer(false)} aria-hidden="true" />}
-      <aside aria-label="Primary"
+      <aside aria-label="Primary" role={drawer ? "dialog" : undefined} aria-modal={drawer ? true : undefined}
         className={`fixed lg:static z-40 inset-y-0 left-0 w-[248px] shrink-0 bg-surface flex flex-col transition-transform duration-200
           ${drawer ? "translate-x-0 shadow-pop" : "-translate-x-full"} ${collapsed ? "lg:hidden" : "lg:translate-x-0"}`}>
         <div className="h-[72px] px-5 flex items-center justify-between">
@@ -77,15 +83,10 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
             <Logo size={34} />
             <span className="font-brand text-[22px] font-semibold tracking-tight">Eiden</span>
           </Link>
-          <button className="lg:hidden size-9 grid place-items-center rounded-md hover:bg-tint" onClick={() => setDrawer(false)} aria-label="Close menu"><X size={18} /></button>
+          <button className="lg:hidden size-11 grid place-items-center rounded-md hover:bg-tint" onClick={() => setDrawer(false)} aria-label="Close menu"><X size={18} /></button>
         </div>
         <div className="mx-4 border-t border-line" />
-        <div className="mx-4 mt-3 mb-1 h-11 px-3 flex items-center justify-between text-[15px] text-ink/90">
-          <span className="flex items-center gap-3"><Pin size={18} className="text-muted" strokeWidth={1.6} /> Pinned</span>
-          <ChevronDown size={17} className="text-brand" />
-        </div>
-        <div className="mx-4 border-t border-line" />
-        <nav className="mt-2 px-4 flex flex-col gap-1 overflow-y-auto">
+        <nav className="mt-2 px-4 flex flex-col gap-1 overflow-y-auto" aria-label="Sections">
           {NAV.map((n) => {
             const on = current?.href === n.href;
             const Icon = n.icon;
@@ -112,8 +113,8 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
                 </div>
               </div>
               <div className="mt-2 flex justify-between text-[13px]">
-                <button className="text-muted hover:text-ink px-1 min-h-[32px]" onClick={() => { setPromo(false); try { localStorage.setItem("eiden-promo", "0"); } catch { /* ignore */ } }}>Dismiss</button>
-                <Link href="/storage" className="text-brand font-medium px-1 min-h-[32px] inline-flex items-center">Open</Link>
+                <button className="text-muted hover:text-ink px-2 min-h-[44px]" onClick={() => { setPromo(false); try { localStorage.setItem("eiden-promo", "0"); } catch { /* ignore */ } }}>Dismiss</button>
+                <Link href="/storage" className="text-brand font-medium px-2 min-h-[44px] inline-flex items-center">Open</Link>
               </div>
             </div>
           )}
@@ -129,7 +130,7 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
       <div className="flex-1 min-w-0 flex flex-col">
         <header className="h-[72px] shrink-0 px-4 sm:px-6 flex items-center justify-between gap-3">
           <div className="flex items-center gap-4 min-w-0">
-            <button onClick={toggleSidebar} aria-label="Toggle sidebar" className="size-10 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={22} strokeWidth={1.6} /></button>
+            <button onClick={toggleSidebar} aria-label="Toggle sidebar" className="size-11 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={22} strokeWidth={1.6} /></button>
             <span className="hidden sm:block h-5 border-l border-line" />
             <h1 className="text-[16px] text-ink/90 truncate">{title}</h1>
           </div>
@@ -150,10 +151,10 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
                 </div>
               )}
             </div>
-            <button onClick={toggleTheme} aria-label={dark ? "Switch to light theme" : "Switch to dark theme"} className="size-10 grid place-items-center rounded-md hover:bg-tint">
+            <button onClick={toggleTheme} aria-label={dark ? "Switch to light theme" : "Switch to dark theme"} className="size-11 grid place-items-center rounded-md hover:bg-tint">
               {dark ? <Sun size={21} strokeWidth={1.6} /> : <Moon size={21} strokeWidth={1.6} />}
             </button>
-            <button onClick={() => setRail((r) => !r)} aria-label={rail ? "Hide side rail" : "Show side rail"} className="hidden lg:grid size-10 place-items-center rounded-md hover:bg-tint">
+            <button onClick={() => setRail((r) => !r)} aria-label={rail ? "Hide side rail" : "Show side rail"} className="hidden lg:grid size-11 place-items-center rounded-md hover:bg-tint">
               {rail ? <ChevronsRight size={21} strokeWidth={1.6} /> : <ChevronsLeft size={21} strokeWidth={1.6} />}
             </button>
           </div>
@@ -163,9 +164,9 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
           <main className="flex-1 min-w-0 min-h-0 overflow-auto px-3 sm:px-4 pb-4">{children}</main>
           {rail && (
             <aside aria-label="Quick links" className="hidden lg:flex w-[56px] shrink-0 border-l border-line flex-col items-center gap-2 pt-4">
-              <Link href="/activity" aria-label="Activity feed" className="size-10 grid place-items-center rounded-md hover:bg-tint text-[#22c32e]"><Bell size={20} strokeWidth={1.7} /></Link>
-              <Link href="/security" aria-label="Security approvals" className="size-10 grid place-items-center rounded-md hover:bg-tint text-brand"><CircleCheck size={20} strokeWidth={1.7} /></Link>
-              <Link href="/storage" aria-label="Backups schedule" className="size-10 grid place-items-center rounded-md hover:bg-tint text-muted"><CalendarDays size={20} strokeWidth={1.7} /></Link>
+              <Link href="/activity" aria-label="Activity feed" className="size-11 grid place-items-center rounded-md hover:bg-tint text-[#22c32e]"><Bell size={20} strokeWidth={1.7} /></Link>
+              <Link href="/security" aria-label="Security approvals" className="size-11 grid place-items-center rounded-md hover:bg-tint text-brand"><CircleCheck size={20} strokeWidth={1.7} /></Link>
+              <Link href="/storage" aria-label="Backups schedule" className="size-11 grid place-items-center rounded-md hover:bg-tint text-muted"><CalendarDays size={20} strokeWidth={1.7} /></Link>
             </aside>
           )}
         </div>

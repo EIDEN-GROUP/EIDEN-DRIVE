@@ -11,7 +11,10 @@ export const metadata: Metadata = {
   title: "Eiden",
   description: "Eiden — your team's files in one place: Google Shared Drives and local storage, with audit and a secure vault.",
   manifest: "/manifest.json",
-  icons: { icon: "/logo.svg", apple: "/icons/apple-touch-icon.png" }
+  icons: {
+    icon: [{ url: "/favicon.svg", type: "image/svg+xml" }, { url: "/favicon.ico", sizes: "48x48" }],
+    apple: "/icons/apple-touch-icon.png"
+  }
 };
 
 export const viewport: Viewport = { width: "device-width", initialScale: 1, viewportFit: "cover" };
