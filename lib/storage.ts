@@ -14,3 +14,10 @@ export async function signedUploadUrl(path: string, mime: string) {
   if (error) throw new Error(error.message);
   return { ...data, mime };
 }
+
+// 5-minute signed download link (same reasoning as above).
+export async function signedDownloadUrl(path: string, seconds = 300) {
+  const { data, error } = await adminClient().storage.from(UPLOAD_BUCKET).createSignedUrl(path, seconds);
+  if (error) throw new Error(error.message);
+  return data.signedUrl;
+}

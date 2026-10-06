@@ -4,7 +4,7 @@ import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { UPLOAD_BUCKET } from "@/lib/storage";
+import { signedDownloadUrl } from "@/lib/storage";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ file_id: z.string().uuid() });
@@ -22,9 +22,8 @@ export async function GET(req: Request) {
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "download", file_id, req });
   if (f.storage_path) {
-    const { data, error } = await supa.storage.from(UPLOAD_BUCKET).createSignedUrl(f.storage_path, 300);
-    if (error) return Response.json({ error: error.message }, { status: 500 });
-    return Response.redirect(data.signedUrl, 302);
+    try { return Response.redirect(await signedDownloadUrl(f.storage_path), 302); }
+    catch (e) { return Response.json({ error: e instanceof Error ? e.message : "could not sign download" }, { status: 500 }); }
   }
   if (f.google_file_id) {
     return Response.redirect(`https://drive.google.com/file/d/${f.google_file_id}/view`, 302);
