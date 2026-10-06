@@ -342,10 +342,20 @@ export default function Explorer() {
   async function syncGoogle() {
     setSyncing(true);
     try {
-      const r = await fetch("/api/drive/sync", { method: "POST" });
-      const d = await r.json().catch(() => ({}));
-      if (r.ok) { toast({ text: `Google sync done: ${d.inserted} new, ${d.updated} updated.`, tone: "ok" }); load(q); }
-      else toast({ text: d.error ?? "Sync failed.", tone: "err" });
+      // Server syncs ONE page per request; chain here until done (avoids the old
+      // single-shot full-drive request that timed out as HTTP 502 on big drives).
+      let token: string | null = null, ins = 0, upd = 0, pages = 0;
+      for (;;) {
+        const r: Response = await fetch("/api/drive/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pageToken: token }) });
+        const d: { inserted?: number; updated?: number; done?: boolean; nextPageToken?: string | null; error?: string } = await r.json().catch(() => ({}));
+        if (!r.ok) { toast({ text: d.error ?? "Sync failed.", tone: "err" }); return; }
+        ins += d.inserted ?? 0; upd += d.updated ?? 0; pages++;
+        if (d.done) break;
+        token = d.nextPageToken ?? null;
+        if (!token || pages > 50) break; // safety cap: 50 pages ≈ 10k files
+      }
+      toast({ text: `Google sync done: ${ins} new, ${upd} updated (${pages} page${pages === 1 ? "" : "s"}).`, tone: "ok" });
+      load(q);
     } finally {
       setSyncing(false);
     }

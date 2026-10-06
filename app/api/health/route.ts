@@ -5,6 +5,7 @@ import { cookies } from "next/headers";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { UPLOAD_BUCKET } from "@/lib/storage";
+import { driveClient, SHARED_DRIVE_ID } from "@/lib/google-drive";
 
 // Managers+: "check everything" in one call. Reports NAMES and booleans only —
 // never secret values. Pinpoint which setup step is missing instead of guessing.
@@ -54,11 +55,42 @@ export async function GET() {
     sync = { last: lastSync?.created_at ?? null, status: lastSync?.status ?? null };
   }
 
+  // Live Google probe: token valid? Shared Drive visible to the token identity?
+  // Distinguishes the three real failures: dead token (invalid_grant), wrong ID /
+  // unshared drive (404), and quota/network errors.
+  let drive: Record<string, unknown> = { reachable: null as boolean | null };
+  if (google.ready) {
+    try {
+      const g = driveClient();
+      const id = SHARED_DRIVE_ID();
+      if (id && g) {
+        await g.drives.get({ driveId: id, fields: "id,name" });
+        drive = { reachable: true, drive_id_prefix: `${id.slice(0, 6)}…` };
+      } else if (g) {
+        await g.about.get({ fields: "user" });
+        drive = { reachable: true, drive_id_prefix: null };
+      }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : "google probe failed";
+      drive = {
+        reachable: false,
+        cause: /invalid_grant/i.test(m) ? "refresh-token-rejected"
+          : /not.?found|404/i.test(m) ? "drive-not-found-or-unshared" : "network-or-quota",
+        hint: /invalid_grant/i.test(m)
+          ? "Re-run /api/auth/google as admin, save the new GOOGLE_REFRESH_TOKEN, redeploy."
+          : /not.?found|404/i.test(m)
+            ? "GOOGLE_SHARED_DRIVE_ID is wrong, or the drive was never shared with fileos@eiden-group.com (share as Manager)."
+            : m
+      };
+    }
+  }
+
   const fix: string[] = [];
   if (!google.refresh_token) fix.push("Google sync: open /api/auth/google as admin to mint GOOGLE_REFRESH_TOKEN (docs/10).");
+  if (drive.reachable === false) fix.push(`Google Drive: ${typeof drive.hint === "string" ? drive.hint : "unreachable — see drive.hint."}`);
   if (identity.match === false) fix.push("Identity mismatch: your profiles.id differs from your auth user id — re-invite the account (delete + invite) so the trigger creates a matching profile.");
   if (storage.configured === false) fix.push("Uploads: create the private eiden-uploads bucket in Supabase → Storage.");
   if (!agent.online) fix.push("Agent: start local-agent on the office PC with the same AGENT_TOKEN.");
 
-  return Response.json({ ok: fix.length === 0, google, identity, storage, agent, sync, fix });
+  return Response.json({ ok: fix.length === 0, google, drive, identity, storage, agent, sync, fix });
 }

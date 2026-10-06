@@ -68,6 +68,25 @@ export async function getAboutQuota(): Promise<{ usage: number; limit: number } 
 
 export interface GFile { id?: string | null; name?: string | null; mimeType?: string | null; size?: string | null; modifiedTime?: string | null; parents?: string[] | null }
 
+// Single page pull (pageSize 200). The sync route calls this in a loop and the
+// BROWSER chains requests — one Vercel invocation must never walk a whole drive,
+// or large drives blow past the serverless timeout (HTTP 502).
+export async function listDrivePage(pageToken?: string): Promise<{ files: GFile[]; nextPageToken?: string; note?: string }> {
+  const drive = driveClient();
+  if (!drive) return { files: [], note: "google-not-configured" };
+  const res = await drive.files.list({
+    q: "trashed=false",
+    fields: "files(id,name,mimeType,size,modifiedTime,parents),nextPageToken",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: SHARED_DRIVE_ID() ? "drive" : "user",
+    ...(SHARED_DRIVE_ID() ? { driveId: SHARED_DRIVE_ID() } : {}),
+    pageSize: 200,
+    pageToken
+  });
+  return { files: res.data.files ?? [], nextPageToken: res.data.nextPageToken ?? undefined };
+}
+
 // Full pull: pages through EVERYTHING (up to `cap`) so the index mirrors Google,
 // not just the top-10 live fallback. Used by POST /api/drive/sync.
 export async function listAllDriveFiles(cap = 2000): Promise<{ files: GFile[]; note?: string }> {
