@@ -1,9 +1,28 @@
 # 10 — Google + Supabase URL configuration (click tutorial)
 
+## Which Google account connects the Drive? ANY Gmail.
+
+There is no fixed service account. Whoever (as admin) opens `/api/auth/google`,
+clicks through consent, and saves the resulting `GOOGLE_REFRESH_TOKEN` becomes the
+Drive link — a personal Gmail works fine. `/api/health` (manager+) shows
+`drive.connected_as` so you can always verify which account is live.
+
+## What GOOGLE_SHARED_DRIVE_ID accepts
+
+Either of these (the app auto-detects which one it is):
+* a **Shared Drive ID** (Google Workspace) — the account above must be a member of it, or
+* a regular **My Drive folder ID** (personal Gmail friendly) — e.g. a folder named
+  `eiden-drive`. The app walks that folder tree as its root, so personal files
+  outside it never leak into FileOS.
+* empty = whole My Drive of the connected account (not recommended for personal inboxes).
+
+Copy the ID from the browser URL: Shared Drives show `drive.google.com/drive/<ID>`,
+folders show `drive.google.com/drive/folders/<ID>` — paste only the `<ID>` part.
+A *file* ID or a typo gives "not visible to the connected account".
+
 Your setup (already correct):
 * Domain: `https://drive.eiden-group.com`
 * Authorized redirect URI in Google Cloud Console: `https://drive.eiden-group.com/api/auth/google/callback` — must match EXACTLY (no trailing slash).
-* Login account for consent: `fileos@eiden-group.com` (must have access to the Shared Drive).
 
 ## OTP / invite links must point at the DOMAIN, never localhost
 

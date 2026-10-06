@@ -29,7 +29,7 @@ export async function GET(req: Request) {
     google_error = /invalid_grant/i.test(m)
       ? "Google rejected the refresh token — re-run /api/auth/google as admin, save the new token, redeploy."
       : /not.?found|404/i.test(m)
-        ? "Shared Drive not found or not shared with the connected Google account — verify GOOGLE_SHARED_DRIVE_ID and share the drive with fileos@eiden-group.com (Manager). Showing indexed files."
+        ? "Google can't open the configured Drive ID — it must be a Shared Drive (shared with the connected account) or a My Drive folder ID. See /api/health for the connected account. Showing indexed files."
         : `Google Drive unreachable right now (${m}). Showing indexed files.`;
   }
   const indexed = (rows ?? []).map((r: { id: string; name: string; mime: string; size: number; backends: string[] }) => ({ ...r, updated: (r as { updated_at?: string }).updated_at }));

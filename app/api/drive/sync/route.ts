@@ -29,7 +29,7 @@ export async function POST(req: Request) {
       return Response.json({ error: "Google rejected the refresh token — re-run /api/auth/google as admin, save the new token, redeploy." }, { status: 502 });
     }
     if (/not.?found|404/i.test(m)) {
-      return Response.json({ error: "Shared Drive not found or not shared with the connected Google account — check GOOGLE_SHARED_DRIVE_ID and share the drive with fileos@eiden-group.com." }, { status: 502 });
+      return Response.json({ error: "Google can't open that ID as a Shared Drive or folder visible to the connected account — check GOOGLE_SHARED_DRIVE_ID and /api/health to see which account is connected." }, { status: 502 });
     }
     return Response.json({ error: `Google Drive unreachable right now (${m}).` }, { status: 502 });
   }

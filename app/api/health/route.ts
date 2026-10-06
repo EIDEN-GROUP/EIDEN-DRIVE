@@ -5,7 +5,7 @@ import { cookies } from "next/headers";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { UPLOAD_BUCKET } from "@/lib/storage";
-import { driveClient, SHARED_DRIVE_ID } from "@/lib/google-drive";
+import { driveClient, resolveRoot } from "@/lib/google-drive";
 
 // Managers+: "check everything" in one call. Reports NAMES and booleans only —
 // never secret values. Pinpoint which setup step is missing instead of guessing.
@@ -55,32 +55,33 @@ export async function GET() {
     sync = { last: lastSync?.created_at ?? null, status: lastSync?.status ?? null };
   }
 
-  // Live Google probe: token valid? Shared Drive visible to the token identity?
-  // Distinguishes the three real failures: dead token (invalid_grant), wrong ID /
-  // unshared drive (404), and quota/network errors.
+  // Live Google probe: token valid? Which account consented? Is the configured
+  // ID a visible Shared Drive, a My Drive folder, or nothing at all?
+  // Any Gmail can connect — whoever completes /api/auth/google owns the link.
   let drive: Record<string, unknown> = { reachable: null as boolean | null };
   if (google.ready) {
     try {
       const g = driveClient();
-      const id = SHARED_DRIVE_ID();
-      if (id && g) {
-        await g.drives.get({ driveId: id, fields: "id,name" });
-        drive = { reachable: true, drive_id_prefix: `${id.slice(0, 6)}…` };
-      } else if (g) {
-        await g.about.get({ fields: "user" });
-        drive = { reachable: true, drive_id_prefix: null };
+      const about = await g!.about.get({ fields: "user(emailAddress,displayName)" });
+      const email = about.data.user?.emailAddress ?? null;
+      let root: unknown = "mydrive";
+      try {
+        root = (await resolveRoot()).root;
+      } catch (e) {
+        drive = { reachable: false, connected_as: email, cause: "root-unresolvable", hint: e instanceof Error ? e.message : "root check failed" };
+      }
+      if (drive.reachable !== false) {
+        const kind = (root as { kind?: string })?.kind ?? "mydrive";
+        drive = { reachable: true, connected_as: email, root: kind };
       }
     } catch (e) {
       const m = e instanceof Error ? e.message : "google probe failed";
       drive = {
         reachable: false,
-        cause: /invalid_grant/i.test(m) ? "refresh-token-rejected"
-          : /not.?found|404/i.test(m) ? "drive-not-found-or-unshared" : "network-or-quota",
+        cause: /invalid_grant/i.test(m) ? "refresh-token-rejected" : "network-or-quota",
         hint: /invalid_grant/i.test(m)
-          ? "Re-run /api/auth/google as admin, save the new GOOGLE_REFRESH_TOKEN, redeploy."
-          : /not.?found|404/i.test(m)
-            ? "GOOGLE_SHARED_DRIVE_ID is wrong, or the drive was never shared with fileos@eiden-group.com (share as Manager)."
-            : m
+          ? "Re-run /api/auth/google as admin (any Gmail works), save the new GOOGLE_REFRESH_TOKEN, redeploy."
+          : m
       };
     }
   }
