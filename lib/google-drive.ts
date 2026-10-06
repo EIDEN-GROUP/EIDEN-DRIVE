@@ -22,7 +22,7 @@ export async function listDriveFiles(q = "", pageToken?: string) {
   const drive = driveClient();
   if (!drive) return { files: [], note: "google-not-configured" };
   const res = await drive.files.list({
-    q: q ? `name contains '${q.replace(/'/g, "")}' and trashed=false` : "trashed=false",
+    q: q ? `name contains '${q.replace(/[\\']/g, "")}' and trashed=false` : "trashed=false",
     fields: "files(id,name,mimeType,size,modifiedTime,owners),nextPageToken",
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,

@@ -1,16 +1,16 @@
 "use client";
 import { useState } from "react";
 
-// Your monogram: save the image you sent as public/logo.png — PNG wins, SVG fallback.
+// PNG first, SVG fallback if the PNG 404s.
 export default function Logo({ size = 28 }: { size?: number }) {
   const [src, setSrc] = useState("/logo.png");
   return (
     <img
       src={src}
-      alt="Eiden-Drive logo"
+      alt="Eiden logo"
       width={size}
       height={size}
-      className="rounded-lg"
+      className="rounded-[22%]"
       onError={() => { if (src !== "/logo.svg") setSrc("/logo.svg"); }}
     />
   );

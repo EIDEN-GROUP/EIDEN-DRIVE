@@ -1,4 +1,5 @@
 import { createClient } from "./supabase-server";
+import { adminClient, hasAdminClient } from "./supabase-admin";
 
 export type AlertKind =
   | "storage-80" | "storage-95" | "backup-stale" | "backup-fail" | "agent-offline"
@@ -7,7 +8,7 @@ export type AlertKind =
 
 export async function notify(user_id: string | null, kind: AlertKind, title: string, body: string) {
   try {
-    const supa = createClient();
+    const supa = hasAdminClient() ? adminClient() : createClient();
     await supa.from("notifications").insert({ user_id, kind, title, body });
   } catch { /* never break */ }
 }

@@ -30,7 +30,15 @@ export async function GET(req: Request) {
   auth.searchParams.set("scope", GOOGLE_SCOPES.join(" "));
   auth.searchParams.set("access_type", "offline"); // <-- this makes Google issue a refresh_token
   auth.searchParams.set("prompt", "consent"); // <-- forces re-consent so token is returned even if granted before
-  auth.searchParams.set("state", crypto.randomUUID());
+  const state = crypto.randomUUID();
+  auth.searchParams.set("state", state);
 
-  return Response.redirect(auth.toString(), 302);
+  // State is bound to this browser by an httpOnly cookie; the callback refuses anything without it.
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: auth.toString(),
+      "set-cookie": `eiden_oauth_state=${state}; Path=/api/auth/google; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
+    }
+  });
 }

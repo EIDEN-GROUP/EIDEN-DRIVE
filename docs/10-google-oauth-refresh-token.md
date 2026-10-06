@@ -27,7 +27,11 @@ Google never shows the refresh token in the Console. Your app must ask Google fo
 |---|---|
 | `GOOGLE_REFRESH_TOKEN` | Steps above. One value, ~200 chars, starts with `1//`. Never commit to git. |
 | `AGENT_TOKEN` | Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` → paste SAME value in Vercel env AND office-PC env (`local-agent/.env`), then `node src/index.js`. |
-| `VAULT_KEK_ID` | Supabase Dashboard → Vault → New secret → name `eiden-vault-kek`, value: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` → use its id/secret name here. P2 decryptor reads it server-side only. Until then vault UI runs in stub-accept mode. |
+| `VAULT_KEK_ID` | Supabase Dashboard → Vault → New secret → name `eiden-vault-kek`, value: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` → use its id/secret name here. P2 decryptor reads it server-side only. Vault unlock uses per-user TOTP (`/api/vault/enroll`), independent of this key. |
+
+## Security notes
+* The start route sets an httpOnly `eiden_oauth_state` cookie; the callback only works in the **same browser** within 10 minutes and rejects a missing/mismatched `state`.
+* For the Drive push-notification webhook also set `GOOGLE_WEBHOOK_TOKEN` (random hex) and register the watch channel with the same value as its `token`.
 
 ## Troubleshooting
 

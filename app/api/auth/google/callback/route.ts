@@ -14,6 +14,13 @@ export async function GET(req: Request) {
   if (err) return new Response(`Google refused: ${err}. See docs/10-google-oauth-refresh-token.md § troubleshooting.`, { status: 400 });
   if (!code) return new Response("Missing ?code= — open /api/auth/google first.", { status: 400 });
 
+  // CSRF / unauthorised-callback guard: only the browser that started the flow (cookie set by the gated start route) may finish it.
+  const cookieState = /(?:^|;\s*)eiden_oauth_state=([^;]+)/.exec(req.headers.get("cookie") ?? "")?.[1];
+  const urlState = url.searchParams.get("state");
+  if (!cookieState || !urlState || cookieState !== urlState) {
+    return new Response("Invalid or expired OAuth state. Start again from /api/auth/google (sign in as Admin/Manager).", { status: 400 });
+  }
+
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -39,7 +46,7 @@ export async function GET(req: Request) {
 
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EIDEN-DRIVE — refresh token</title>
+<title>Eiden — refresh token</title>
 <style>body{font-family:system-ui;background:#122620;color:#FEFFF8;display:grid;place-items:center;min-height:100vh;margin:0}
 .card{max-width:640px;background:#0E1B17;border:1px solid #CFC292;padding:28px;border-radius:16px}
 code{display:block;background:#000;color:#CFC292;padding:14px;border-radius:10px;word-break:break-all;user-select:all}
@@ -50,6 +57,10 @@ code{display:block;background:#000;color:#CFC292;padding:14px;border-radius:10px
 <p><button onclick="navigator.clipboard.writeText(document.getElementById('t').textContent)">Copy</button></p>
 <p>Next: Vercel → drive.eiden-group.com project → Settings → Environment Variables → add GOOGLE_REFRESH_TOKEN → Redeploy. Then delete this test or keep it admin-gated. Full steps: docs/10-google-oauth-refresh-token.md</p>
 </div></body></html>`,
-    { headers: { "content-type": "text/html" } }
+    { headers: {
+      "content-type": "text/html",
+      "cache-control": "no-store",
+      "set-cookie": "eiden_oauth_state=; Path=/api/auth/google; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
+    } }
   );
 }

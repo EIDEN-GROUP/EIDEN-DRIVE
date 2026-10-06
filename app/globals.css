@@ -1,25 +1,64 @@
-@import url('https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700;800&family=Besley:ital,wght@0,400;0,500;1,400;1,500&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  /* EIDEN brand — presentation HTMLs */
-  --e-green-950: #0E1B17; --e-green-900: #122620; --e-green-800: #16302F;
-  --e-teal-700: #1C5C58; --e-teal-600: #0C5752; --e-teal-500: #0E7A73; --e-teal-300: #6FA9A4;
-  --e-gold-500: #CFC292; --e-gold-600: #B7A97B; --e-gold-300: #DFD6AC;
-  --e-cream-200: #F4EBD0; --e-cream-50: #FEFFF8;
-  --e-line: rgba(207,194,146,.16); --e-line-strong: rgba(207,194,146,.32);
-  /* Design.md functional */
-  --color-primary-500: #0d6efd; --color-success: #198754;
-  --color-warning: #ffc107; --color-error: #dc3545;
-  --font-size-base: 1.125rem;
+  --canvas: #f4f4f7;
+  --surface: #ffffff;
+  --soft: #f9f9fc;      /* favorites pane */
+  --tint: #f1effc;      /* selected / active lavender */
+  --head: #eeebfa;      /* table header */
+  --line: #e8e8ef;
+  --ink: #2b2b36;
+  --muted: #8b8b9b;
+  --brand: #5b3fd0;
+  --brand-deep: #4a34b8;
+  --icon: #4b3bc8;      /* filled file / folder glyphs */
+  --danger: #e5322d;
+  --login: #6a3db8;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --canvas: #0e0e14;
+  --surface: #16161e;
+  --soft: #1a1a23;
+  --tint: #26224a;
+  --head: #201e3a;
+  --line: #2a2a37;
+  --ink: #ececf4;
+  --muted: #9c9cb0;
+  --brand: #8f7bff;
+  --brand-deep: #a594ff;
+  --icon: #8f7bff;
+  --login: #a594ff;
+  color-scheme: dark;
 }
 
-body { font-family: Inter, system-ui, sans-serif; background: var(--e-cream-50); color: var(--e-green-900); }
-.app-shell { background: var(--e-green-900); color: var(--e-cream-50); }
-.card { border-radius: 1rem; border: 1px solid var(--e-line); }
-.pill { border-radius: 9999px; font-size: 9px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
-:focus-visible { outline: 2px solid var(--e-teal-500); outline-offset: 2px; }
+html, body { background: var(--canvas); color: var(--ink); }
+body { font-family: var(--font-poppins), system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+
+.card { border-radius: 12px; border: 1px solid var(--line); background: var(--surface); }
+.pill { border-radius: 9999px; font-size: 10px; font-weight: 600; letter-spacing: .04em; }
+.page-title { font-size: 1.5rem; font-weight: 600; letter-spacing: -.01em; }
+
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 6px; }
+::selection { background: var(--tint); }
+
+/* Explorer table grid — Name wide, metadata columns tiny (as in the reference). */
+.frow {
+  display: grid; align-items: center; column-gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 118px 64px;
+}
+@media (min-width: 768px) {
+  .frow { grid-template-columns: minmax(0, 1fr) 70px 130px 190px 84px 96px; }
+}
+.frow-hide { display: none; }
+@media (min-width: 768px) { .frow-hide { display: block; } }
+
+/* Thin, quiet scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+
+@keyframes pop-in { from { opacity: 0; transform: translateY(4px) scale(.98); } to { opacity: 1; transform: none; } }
+.pop-in { animation: pop-in .14s ease-out; }
+
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

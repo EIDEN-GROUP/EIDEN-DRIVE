@@ -2,8 +2,8 @@ import { SecurityOverview } from "@/components/drive/SecurityWidgets";
 
 export default function SecurityPage() {
   return (
-    <section>
-      <h1 className="font-display text-3xl uppercase mb-3">Security Center</h1>
+    <section className="px-1 pt-1">
+      <h1 className="page-title mb-4">Security Center</h1>
       <SecurityOverview />
     </section>
   );

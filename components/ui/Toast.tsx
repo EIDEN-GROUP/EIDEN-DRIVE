@@ -20,9 +20,9 @@ export function ToastHost() {
     return () => { pushFn = null; };
   }, []);
   return (
-    <div className="fixed bottom-16 md:bottom-6 right-4 z-[100] flex flex-col gap-2" aria-live="polite" role="status">
+    <div className="fixed bottom-5 right-5 z-[100] flex flex-col gap-2" aria-live="polite" role="status">
       {items.map((t) => (
-        <div key={t.id} className={`px-4 py-3 rounded-2xl shadow-lg text-sm text-white ${t.tone === "err" ? "bg-red-700" : t.tone === "ok" ? "bg-teal-700" : "bg-neutral-900"}`}>
+        <div key={t.id} className={`pop-in px-4 py-3 rounded-lg shadow-pop text-[13px] text-white ${t.tone === "err" ? "bg-danger" : t.tone === "ok" ? "bg-brand" : "bg-[#2b2b36]"}`}>
           {t.text}
         </div>
       ))}

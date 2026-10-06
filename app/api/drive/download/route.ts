@@ -5,17 +5,20 @@ import { createClient } from "@/lib/supabase-server";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { UPLOAD_BUCKET } from "@/lib/storage";
+import { parseQuery } from "@/lib/http";
 
-const Q = z.object({ file_id: z.string().min(1) });
+const Q = z.object({ file_id: z.string().uuid() });
 
 // Real download: Supabase-hosted bytes get a 5-min signed URL; Google-hosted files
 // redirect to the Drive viewer (bytes stay in Google, permissions enforced there too).
 export async function GET(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
-  const { file_id } = Q.parse(Object.fromEntries(new URL(req.url).searchParams));
+  const p = parseQuery(req, Q);
+  if (p.error) return p.error;
+  const { file_id } = p.data;
   const supa = createClient();
-  const { data: f } = await supa.from("file_index").select("id,name,storage_path,google_file_id").eq("id", file_id).single();
+  const { data: f } = await supa.from("file_index").select("id,name,storage_path,google_file_id").eq("id", file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "download", file_id, req });
   if (f.storage_path) {

@@ -1,35 +1,42 @@
 import type { Config } from "tailwindcss";
 
+// Design tokens live in app/globals.css as CSS variables (light + dark).
+// Legacy names (teal / cream / gold / eiden) are re-pointed at the new violet system
+// so any leftover class keeps working while pages are migrated.
 const config: Config = {
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
+  darkMode: ["selector", '[data-theme="dark"]'],
   theme: {
     extend: {
       colors: {
-        // EIDEN brand (from presentation HTMLs — verified eiden-group.com)
-        eiden: {
-          950: "#0E1B17",
-          900: "#122620",
-          800: "#16302F"
-        },
-        teal: { 700: "#1C5C58", 600: "#0C5752", 500: "#0E7A73", 300: "#6FA9A4" },
-        gold: { 600: "#B7A97B", 500: "#CFC292", 300: "#DFD6AC" },
-        cream: { 200: "#F4EBD0", 50: "#FEFFF8" },
-        // Design.md functional tokens
-        primary: {
-          50: "#f1f6fe", 100: "#e2edfd", 200: "#bcd5fb", 300: "#86b6fe",
-          400: "#3d8bff", 500: "#0d6efd", 600: "#0256d4", 700: "#0146ac",
-          800: "#013584", 900: "#082a5e", 950: "#051c3d"
-        },
-        success: "#198754",
-        warning: "#ffc107",
-        error: "#dc3545"
+        canvas: "var(--canvas)",
+        surface: "var(--surface)",
+        soft: "var(--soft)",
+        tint: "var(--tint)",
+        head: "var(--head)",
+        line: "var(--line)",
+        ink: "var(--ink)",
+        muted: "var(--muted)",
+        brand: { DEFAULT: "var(--brand)", deep: "var(--brand-deep)", icon: "var(--icon)" },
+        danger: "var(--danger)",
+        teal: { 700: "var(--brand-deep)", 600: "var(--brand)", 500: "var(--brand)", 300: "var(--tint)" },
+        cream: { 200: "var(--tint)", 50: "#ffffff" },
+        gold: { 600: "var(--muted)", 500: "var(--line)", 300: "var(--line)" },
+        success: "#22c32e",
+        warning: "#f59e0b",
+        error: "#e5322d"
       },
       fontFamily: {
-        body: ["Inter", "system-ui", "sans-serif"],
-        display: ["Anton", "Impact", "sans-serif"],
-        serif: ["Besley", "Georgia", "serif"]
+        body: ["var(--font-poppins)", "system-ui", "sans-serif"],
+        display: ["var(--font-poppins)", "system-ui", "sans-serif"],
+        brand: ["var(--font-comfortaa)", "var(--font-poppins)", "sans-serif"],
+        material: ["var(--font-roboto)", "system-ui", "sans-serif"]
       },
-      borderRadius: { "2xl": "1rem", full: "9999px" }
+      borderRadius: { "2xl": "1rem", full: "9999px" },
+      boxShadow: {
+        pop: "0 12px 32px -8px rgba(30,20,80,.22), 0 2px 8px rgba(30,20,80,.08)",
+        win: "0 30px 80px -30px rgba(30,20,80,.25)"
+      }
     }
   },
   plugins: []

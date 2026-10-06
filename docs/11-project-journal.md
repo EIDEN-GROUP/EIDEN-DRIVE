@@ -96,3 +96,15 @@ See `.env.example` — the only env file in git.
 ## 10. Left / next (P2+)
 
 Real TOTP/WebAuthn verification in unlock route; Google Docs/OnlyOffice in-place edit; PDF/DOCX text extraction for search; Drive→local scheduled mirror + integrity monitor; push notifications; second-admin dual approval UI; UX checklist sign-off row above.
+
+## 11. Pass 3 — frontend redesign + bug-fix sweep (2026-10-06)
+
+| # | User asked | Outcome |
+|---|-----------|---------|
+| 9 | "update the full frontend design UI/UX, mirror the image exactly (dashboard + login), no generic design; use any library; tell me first if Next.js" | Stayed on Next.js 14 + Tailwind; added `lucide-react`. New tokens, shell, Explorer (list/grid/details/context menu/tags/history), sign-in split card, dark mode. See `docs/frontend/01-redesign.md`. |
+| 10 | "review the project, list the bugs" → "auto-fix any bug you found" | 26 items fixed (RLS migration 0004, audit writes, real TOTP vault, agent/webhook auth, OAuth state, validation 400s, atomic trash, …). `docs/frontend/02-bugfix-log.md` — **apply checklist at the top** (run migration 0004, set `GOOGLE_WEBHOOK_TOKEN`, redeploy). |
+| 11 | "put all md files into docs/frontend/" | New docs live in `docs/frontend/`; older docs 00–11 untouched except factual corrections. |
+
+Test log: `npm test` 23/23 · live (local) 14/14 · `tsc` 0 errors · `npm run build` passes (2026-10-06). Not run: live-Supabase RLS/TOTP end-to-end, prod deploy.
+
+**Pass 3b —** "how do I see the admin role? / build the invite form and add the profile trigger" Migration `0005` (auto profile, always member), `POST /api/users/invite`, Invite member form on `/users`, `/welcome` landing, sign-up closed (`shouldCreateUser:false`). See `docs/frontend/03-invites-and-profiles.md` — **Supabase dashboard steps required**.

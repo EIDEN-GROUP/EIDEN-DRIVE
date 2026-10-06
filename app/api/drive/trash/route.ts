@@ -6,23 +6,46 @@ import { trashDriveFile } from "@/lib/google-drive";
 import { logAudit } from "@/lib/audit";
 import { getProfile, needsApproval } from "@/lib/roles";
 import { notify } from "@/lib/alerts";
+import { parseJson } from "@/lib/http";
 
-const Body = z.object({ file_id: z.string().min(1) });
+const Body = z.object({ file_id: z.string().uuid() });
 
-// Safe-delete: members go to Recovery Bin (90d). Sensitive folders need approval. Google trashed in parallel.
+// Safe-delete: members go to Recovery Bin (90d). Sensitive folders also need approval. DB first, then Google,
+// so a Google failure can never leave a file trashed in Drive but missing from the Bin.
 export async function POST(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
-  const { file_id } = Body.parse(await req.json());
-  const supa = createClient();
-  const { data: f } = await supa.from("file_index").select("id,name,google_file_id,folder").eq("id", file_id).single();
+  const p = await parseJson(req, Body);
+  if (p.error) return p.error;
+  const { file_id } = p.data;
 
-  if (f?.google_file_id) await trashDriveFile(String(f.google_file_id));
-  await supa.from("recovery_bin").upsert({ file_id, deleted_by: me.id });
-  if (f && needsApproval("Contracts", "delete")) {
+  const supa = createClient();
+  const { data: f, error: fe } = await supa.from("file_index").select("id,name,google_file_id,folder").eq("id", file_id).maybeSingle();
+  if (fe) return Response.json({ error: fe.message }, { status: 500 });
+  if (!f) return Response.json({ error: "file not found" }, { status: 404 });
+
+  let classification = "Internal";
+  if (f.folder) {
+    const { data: fol } = await supa.from("folders").select("classification").eq("id", f.folder).maybeSingle();
+    classification = fol?.classification ?? "Internal";
+  }
+
+  const { error: be } = await supa.from("recovery_bin").upsert({ file_id, deleted_by: me.id });
+  if (be) return Response.json({ error: `could not move to bin: ${be.message}` }, { status: 500 });
+
+  if (f.google_file_id) {
+    try { await trashDriveFile(String(f.google_file_id)); }
+    catch (e) {
+      await supa.from("recovery_bin").delete().eq("file_id", file_id); // roll back so DB and Drive agree
+      return Response.json({ error: `Google trash failed: ${e instanceof Error ? e.message : "unknown"}` }, { status: 502 });
+    }
+  }
+
+  const needsOk = needsApproval(classification, "delete");
+  if (needsOk) {
     await supa.from("approvals").insert({ action: "delete", file_id, requester: me.id });
     await notify(null, "approval-pending", "Delete needs approval", `${me.username} requested delete of ${f.name}`);
   }
-  await logAudit({ actor: me.id, actor_name: me.username, action: "trash", file_id, req });
-  return Response.json({ ok: true, recovery_bin: true, purge_in_days: 90 });
+  await logAudit({ actor: me.id, actor_name: me.username, action: "trash", file_id, req, detail: { classification, approval: needsOk } });
+  return Response.json({ ok: true, recovery_bin: true, purge_in_days: 90, approval_required: needsOk });
 }

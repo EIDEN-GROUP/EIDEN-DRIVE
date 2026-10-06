@@ -19,10 +19,9 @@ describe("e2e anonymous flow", () => {
     const r = await get("/login");
     expect(r.status).toBe(200);
     const html = await r.text();
-    expect(html).toContain("Eiden-Drive");
-    expect(html).toContain('for="email"');
-    expect(html).toContain("Continue with Google");
-    expect(html).toContain('alt="Eiden-Drive logo"');
+    expect(html).toContain("Eiden");
+    expect(html).toContain("Sign In Account"); // fields render after mount (see tests/ui/render.test.ts)
+    expect(html).toContain('alt="Eiden logo"');
   });
   it("unknown file id shows the not-found page (after auth wall)", async () => {
     const r = await get("/drive/does-not-exist", false);

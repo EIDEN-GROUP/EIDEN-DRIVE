@@ -3,8 +3,8 @@ import { StorageBar } from "@/components/ui/primitives";
 
 export default function StoragePage() {
   return (
-    <section>
-      <h1 className="font-display text-3xl uppercase mb-3">Storage & Backups</h1>
+    <section className="px-1 pt-1">
+      <h1 className="page-title mb-4">Storage & Backups</h1>
       <div className="grid md:grid-cols-2 gap-4">
         <Card label="Capacity (alerts at 80 / 95%)">
           <div className="mt-1 flex flex-col gap-3">

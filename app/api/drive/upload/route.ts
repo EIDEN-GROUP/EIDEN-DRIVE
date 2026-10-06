@@ -1,16 +1,32 @@
 export const dynamic = "force-dynamic";
 
+import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
+import { parseJson } from "@/lib/http";
 
-// Metadata-only upload endpoint (bytes go direct to Google via signed flow in P2).
-// Agent USB→Google jobs land here to create file_index + version + audit.
+// Metadata-only: bytes already went to Supabase Storage via a signed URL (or the agent staged them).
+// Registers file_index + version + audit. storage_path must live under the caller's own prefix.
+const Body = z.object({
+  name: z.string().trim().min(1).max(255),
+  mime: z.string().max(127).optional(),
+  size: z.number().int().nonnegative().max(1024 ** 4).optional(),
+  hash: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+  backends: z.array(z.enum(["google", "local", "backup"])).min(1).max(3).optional(),
+  folder: z.string().uuid().nullable().optional(),
+  storage_path: z.string().max(600).nullable().optional()
+});
+
 export async function POST(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
-  const body = await req.json() as { name: string; mime?: string; size?: number; hash?: string; backends?: string[]; folder?: string; storage_path?: string };
-  if (!body.name) return Response.json({ error: "name required" }, { status: 400 });
+  const p = await parseJson(req, Body);
+  if (p.error) return p.error;
+  const body = p.data;
+  if (body.storage_path && (!body.storage_path.startsWith(`${me.id}/`) || body.storage_path.includes(".."))) {
+    return Response.json({ error: "storage_path must be inside your own upload folder" }, { status: 403 });
+  }
   const supa = createClient();
   const { data, error } = await supa.from("file_index").insert({
     name: body.name, mime: body.mime ?? "application/octet-stream", size: body.size ?? 0,

@@ -1,19 +1,33 @@
-const CACHE = "eiden-drive-v1";
-const CORE = ["/", "/drive", "/activity", "/manifest.json"];
+// Offline shell. NETWORK-FIRST so a deploy is never masked by a stale cache; the cache is only an offline fallback.
+// (v1 was cache-first for everything, which pinned users to old HTML/CSS/JS after every release.)
+const CACHE = "eiden-drive-v2";
 
-self.addEventListener("install", (e) => {
-  // @ts-ignore
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(CORE)).then(() => self.skipWaiting()));
+self.addEventListener("install", () => { self.skipWaiting(); });
+
+self.addEventListener("activate", (e) => {
+  e.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
 });
+
 self.addEventListener("fetch", (e) => {
-  // @ts-ignore
   const { request } = e;
-  if (request.method !== "GET" || !request.url.startsWith(self.location.origin)) return;
-  // @ts-ignore
-  e.respondWith(caches.match(request).then((hit) => hit ?? fetch(request).then((res) => {
-    const copy = res.clone();
-    // @ts-ignore
-    caches.open(CACHE).then((c) => c.put(request, copy));
-    return res;
-  }).catch(() => caches.match("/drive"))));
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.origin !== self.location.origin) return;
+  // Never intercept API calls or Next build assets (hashed, already HTTP-cached) — avoids stale data/code.
+  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/_next/")) return;
+
+  e.respondWith(
+    fetch(request)
+      .then((res) => {
+        if (res.ok && request.mode === "navigate") {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(request, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(request).then((hit) => hit ?? caches.match("/drive")))
+  );
 });

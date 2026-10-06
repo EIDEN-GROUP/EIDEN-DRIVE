@@ -1,4 +1,5 @@
 import { createClient } from "./supabase-server";
+import { adminClient, hasAdminClient } from "./supabase-admin";
 
 export type AuditAction =
   | "view" | "add" | "edit" | "rename" | "move" | "trash" | "restore"
@@ -41,7 +42,7 @@ export function getRequestMeta(req: Request): { ip: string; user_agent: string; 
 // and is stored in detail.mac / detail.hostname. Web events carry device_id (enrolled PWA).
 export async function logAudit(e: AuditEvent & { req?: Request; mac?: string; hostname?: string }) {
   try {
-    const supa = createClient();
+    const supa = hasAdminClient() ? adminClient() : createClient();
     const meta = e.req ? getRequestMeta(e.req) : { ip: e.ip ?? "unknown", user_agent: e.user_agent ?? "", browser: "", os: "" };
     await supa.from("audit_logs").insert({
       actor: e.actor ?? null,
