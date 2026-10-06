@@ -36,6 +36,12 @@ describe("API contracts (anonymous)", () => {
     const r = await get("/api/auth/google", false);
     expect([302, 403]).toContain(r.status);
   });
+  it("validates access requests without a session (no account enumeration)", async () => {
+    const bad = await fetch(`${BASE}/api/access-requests`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(bad.status).toBe(400);
+    const get = await fetch(`${BASE}/api/access-requests`);
+    expect(get.status).toBe(405);
+  });
   it("serves PWA + brand assets publicly", async () => {
     expect((await get("/manifest.json")).status).toBe(200);
     expect((await get("/logo.png")).status).toBe(200);

@@ -148,6 +148,7 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
                     <p className="text-[11px] text-muted capitalize">{user?.role ?? "member"}{user?.dept ? ` · ${user.dept}` : ""}</p>
                   </div>
                   <button role="menuitem" onClick={signOut} className="w-full text-left px-4 py-2.5 text-[13px] hover:bg-tint flex items-center gap-2"><LogOut size={15} /> Sign out</button>
+                  <Link role="menuitem" href="/account/password" className="w-full text-left px-4 py-2.5 text-[13px] hover:bg-tint flex items-center gap-2"><KeyRound size={15} /> Set password</Link>
                 </div>
               )}
             </div>

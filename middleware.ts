@@ -8,6 +8,7 @@ import { createMiddlewareClient } from "@supabase/auth-helpers-nextjs";
 const PUBLIC = [
   "/login",
   "/welcome",                  // invite landing; reads the session from the URL hash in the browser
+  "/api/access-requests",      // public "request access" form on the login page
   "/api/auth/callback",
   "/api/auth/google",          // start route self-gates (admin/manager session or setup key)
   "/api/agent",                // bearer AGENT_TOKEN (POST); GET self-gates with session
