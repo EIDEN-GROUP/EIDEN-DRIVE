@@ -3,12 +3,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
-  Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload
+  Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload,
+  Eye, Copy, ClipboardPaste
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import Modal from "../ui/Modal";
 import Menu from "../ui/Menu";
+import FileViewer, { type ViewFile } from "./FileViewer";
+import FileEditor from "./FileEditor";
+import { editable } from "./filetext";
 import { FileGlyph, kindOf } from "../ui/Glyphs";
 import { badge, classify, formatBytes } from "@/lib/files";
 
@@ -83,6 +87,10 @@ export default function Explorer() {
   const [favOpen, setFavOpen] = useState(true);
   const [tagsOpen, setTagsOpen] = useState(true);
   const [ctx, setCtx] = useState<{ x: number; y: number; row: Row } | null>(null);
+  const [canvasCtx, setCanvasCtx] = useState<{ x: number; y: number } | null>(null);
+  const [clip, setClip] = useState<{ id: string; name: string } | null>(null);
+  const [viewFile, setViewFile] = useState<ViewFile | null>(null);
+  const [editFile, setEditFile] = useState<ViewFile | null>(null);
   const [confirmTrash, setConfirmTrash] = useState<FileRow | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newName, setNewName] = useState("");
@@ -97,14 +105,17 @@ export default function Explorer() {
   const PAGE = 50;
   const [uploading, setUploading] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Clipboard survives reloads; silent 60s auto-refresh (no skeleton flash).
+  const qRef = useRef(q);
+  qRef.current = q;
   const lastGoogleError = useRef<string | null>(null);
 
   const nav = hist[hi];
   const curFolder = nav.kind === "root" ? nav.path[nav.path.length - 1] ?? null : null;
 
-  const load = useCallback(async (query: string, from = 0, append = false) => {
+  const load = useCallback(async (query: string, from = 0, append = false, silent = false) => {
     if (append) setLoadingMore(true);
-    else setLoading(true);
+    else if (!silent) setLoading(true);
     try {
       const [fr, dr, br] = await Promise.all([
         append ? null : fetch("/api/folders").then(async (r) => {
@@ -145,6 +156,19 @@ export default function Explorer() {
     load(q, indexed, true);
   }
 
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("eiden-clip");
+      if (raw) setClip(JSON.parse(raw));
+    } catch { /* ignore */ }
+    // Auto-refresh every 60s, silently: same call as manual Refresh but without
+    // the skeleton flash (silent=true skips setLoading).
+    const t = setInterval(() => loadRef.current(qRef.current, 0, false, true), 60000);
+    return () => clearInterval(t);
+  }, []);
+
   useEffect(() => {
     const t = setTimeout(() => load(q), q ? 350 : 0);
     return () => clearTimeout(t);
@@ -152,12 +176,12 @@ export default function Explorer() {
 
   useEffect(() => { setPane(window.matchMedia("(min-width: 768px)").matches); }, []);
   useEffect(() => {
-    if (!ctx) return;
-    const close = () => setCtx(null);
+    if (!ctx && !canvasCtx) return;
+    const close = () => { setCtx(null); setCanvasCtx(null); };
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
     window.addEventListener("click", close); window.addEventListener("scroll", close, true); window.addEventListener("keydown", esc);
     return () => { window.removeEventListener("click", close); window.removeEventListener("scroll", close, true); window.removeEventListener("keydown", esc); };
-  }, [ctx]);
+  }, [ctx, canvasCtx]);
 
   // ── derived: folders / tags ──
   const folderById = useMemo(() => new Map(folders.map((f) => [f.id, f])), [folders]);
@@ -361,6 +385,29 @@ export default function Explorer() {
     }
   }
 
+  function copyFile(f: FileRow) {
+    const c = { id: f.id, name: f.name };
+    setClip(c);
+    try { localStorage.setItem("eiden-clip", JSON.stringify(c)); } catch { /* ignore */ }
+    toast({ text: `Copied "${f.name}" — right-click → Paste to duplicate it.`, tone: "ok" });
+  }
+
+  async function pasteClip() {
+    if (!clip) return;
+    const r = await fetch("/api/drive/copy", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file_id: clip.id, folder: curFolder })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast({ text: d.error ?? "Couldn't paste.", tone: "err" }); return; }
+    toast({ text: `Pasted as "${d.name}".`, tone: "ok" });
+    load(q);
+  }
+
+  function toViewFile(f: FileRow): ViewFile {
+    return { id: f.id, name: f.name, mime: f.mime, size: f.size, backends: f.backends };
+  }
+
   // ── view helpers ──
   const title = nav.kind === "recent" ? "Recent" : nav.kind === "docs" ? "Documents" : nav.kind === "bin" ? "Recovery Bin"
     : curFolder ? folderById.get(curFolder)?.name ?? "Folder" : "Root";
@@ -479,7 +526,14 @@ export default function Explorer() {
         {/* Body */}
         <div className="flex-1 min-h-0 flex">
           <div className="flex-1 min-w-0 flex flex-col">
-            <div className="flex-1 min-h-0 overflow-auto" onClick={() => { setSelKey(null); setInfoOpen(false); }}>
+            <div className="flex-1 min-h-0 overflow-auto"
+              onClick={() => { setSelKey(null); setInfoOpen(false); }}
+              onContextMenu={(e) => {
+                // Canvas menu — rows stop propagation and show the file menu instead.
+                e.preventDefault();
+                setSelKey(null); setInfoOpen(false); setCtx(null);
+                setCanvasCtx({ x: Math.min(e.clientX, window.innerWidth - 220), y: Math.min(e.clientY, window.innerHeight - 220) });
+              }}>
               {loading ? (
                 <div aria-busy="true" aria-label="Loading files" className="p-4 flex flex-col gap-2">
                   {Array.from({ length: 8 }).map((_, i) => (
@@ -649,6 +703,11 @@ export default function Explorer() {
           className="pop-in fixed z-[70] w-[184px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
           {[
             { label: "Open", on: () => open(ctx.row), show: !(ctx.row.kind === "file" && ctx.row.id.startsWith("g:")) },
+            { label: "View", icon: <Eye size={14} />, on: () => ctx.row.file && setViewFile(toViewFile(ctx.row.file)), show: ctx.row.kind === "file" },
+            { label: "Edit", icon: <Pencil size={14} />, on: () => ctx.row.file && setEditFile(toViewFile(ctx.row.file)),
+              show: ctx.row.kind === "file" && !!ctx.row.file && editable(ctx.row.file.name, ctx.row.file.mime) },
+            { label: "Copy", icon: <Copy size={14} />, on: () => ctx.row.file && copyFile(ctx.row.file),
+              show: ctx.row.kind === "file" && !!ctx.row.file && !ctx.row.id.startsWith("g:") },
             { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(ctx.row.key); setInfoOpen(true); }, show: true },
             { label: "Rename", icon: <Pencil size={14} />, on: () => ctx.row.kind === "folder" && ctx.row.folder
               ? openRename("folder", ctx.row.folder.id, ctx.row.folder.name)
@@ -678,6 +737,36 @@ export default function Explorer() {
           )}
         </div>
       )}
+
+      {/* Canvas menu (right-click on empty space) */}
+      {canvasCtx && (
+        <div role="menu" style={{ left: canvasCtx.x, top: canvasCtx.y }} onClick={(e) => e.stopPropagation()}
+          className="pop-in fixed z-[70] w-[200px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
+          <button role="menuitem" onClick={() => { setCanvasCtx(null); load(q); }}
+            className="w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint">
+            <span>Refresh</span><span className="text-muted"><RefreshCw size={14} /></span>
+          </button>
+          <button role="menuitem" onClick={() => { setCanvasCtx(null); fileRef.current?.click(); }}
+            className="w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint">
+            <span>Upload file</span><span className="text-muted"><Upload size={14} /></span>
+          </button>
+          {nav.kind === "root" && (
+            <button role="menuitem" onClick={() => { setCanvasCtx(null); setShowNewFolder(true); }}
+              className="w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint">
+              <span>New folder</span><span className="text-muted"><FolderPlus size={14} /></span>
+            </button>
+          )}
+          <button role="menuitem" disabled={!clip} title={clip ? `Paste "${clip.name}" here` : "Copy a file first"}
+            onClick={() => { setCanvasCtx(null); pasteClip(); }}
+            className="w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint disabled:opacity-40">
+            <span>Paste{clip ? ` "${clip.name.length > 18 ? clip.name.slice(0, 17) + "…" : clip.name}"` : ""}</span>
+            <span className="text-muted"><ClipboardPaste size={14} /></span>
+          </button>
+        </div>
+      )}
+
+      {viewFile && <FileViewer file={viewFile} onClose={() => setViewFile(null)} onEdit={(f) => { setViewFile(null); setEditFile(f); }} />}
+      {editFile && <FileEditor file={editFile} onClose={() => setEditFile(null)} onSaved={() => load(q)} />}
 
       <Modal open={showNewFolder} title="New folder" onClose={() => setShowNewFolder(false)} labelId="nf-title" width={400}>
         <form onSubmit={createFolder} className="flex flex-col gap-4">

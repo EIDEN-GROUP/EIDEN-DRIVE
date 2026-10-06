@@ -7,6 +7,8 @@ import {
   Moon, Sun, ChevronsRight, ChevronsLeft, Bell, CircleCheck, CalendarDays, Zap, LogOut, X
 } from "lucide-react";
 import Logo from "../ui/Logo";
+import NotificationsPanel from "../notifications/NotificationsPanel";
+import ProfileModal from "../profile/ProfileModal";
 import { browserClient } from "@/lib/supabase-client";
 
 export interface ShellUser { username: string; role: string; dept: string | null }
@@ -17,6 +19,7 @@ const NAV = [
   { href: "/security", label: "Security Center", short: "Security", icon: ShieldCheck },
   { href: "/vault", label: "Vault", short: "Vault", icon: KeyRound },
   { href: "/users", label: "Users & Departments", short: "Users", icon: Users },
+  { href: "/calendar", label: "Calendar & Plans", short: "Calendar", icon: CalendarDays },
   { href: "/storage", label: "Storage & Backups", short: "Storage", icon: HardDrive }
 ];
 
@@ -28,7 +31,23 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
   const [dark, setDark] = useState(false);
   const [promo, setPromo] = useState(true);
   const [userMenu, setUserMenu] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [unread, setUnread] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  async function refreshUnread() {
+    try {
+      const r = await fetch("/api/notifications");
+      const d = await r.json().catch(() => ({}));
+      if (typeof d.unread === "number") setUnread(d.unread);
+    } catch { /* offline — badge stays */ }
+  }
+  useEffect(() => {
+    refreshUnread();
+    const t = setInterval(refreshUnread, 60000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     try {
@@ -135,8 +154,17 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
             <h1 className="text-[16px] text-ink/90 truncate">{title}</h1>
           </div>
           <div className="flex items-center gap-1 sm:gap-3">
+            <button onClick={() => setNotifOpen(true)} aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`}
+              className="lg:hidden relative size-11 grid place-items-center rounded-md hover:bg-tint text-[#22c32e]">
+              <Bell size={21} strokeWidth={1.6} />
+              {unread > 0 && (
+                <span className="absolute top-1 right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-danger text-white text-[10px] font-semibold grid place-items-center">
+                  {unread > 9 ? "9+" : unread}
+                </span>
+              )}
+            </button>
             <div ref={menuRef} className="relative">
-              <button onClick={() => setUserMenu((o) => !o)} aria-haspopup="menu" aria-expanded={userMenu} aria-label="Account menu"
+              <button onClick={() => { setProfileOpen(true); setUserMenu(false); }} aria-haspopup="dialog" aria-label="Open your profile"
                 className="min-h-[44px] flex items-center gap-1 pl-1 pr-2 rounded-full hover:bg-tint">
                 <span className="size-9 rounded-full bg-brand text-white grid place-items-center text-[15px] font-medium">{initial}</span>
                 <ChevronDown size={17} className="text-ink/70" />
@@ -165,13 +193,23 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
           <main className="flex-1 min-w-0 min-h-0 overflow-auto px-3 sm:px-4 pb-4">{children}</main>
           {rail && (
             <aside aria-label="Quick links" className="hidden lg:flex w-[56px] shrink-0 border-l border-line flex-col items-center gap-2 pt-4">
-              <Link href="/activity" aria-label="Activity feed" className="size-11 grid place-items-center rounded-md hover:bg-tint text-[#22c32e]"><Bell size={20} strokeWidth={1.7} /></Link>
+              <button onClick={() => setNotifOpen(true)} aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`}
+                className="relative size-11 grid place-items-center rounded-md hover:bg-tint text-[#22c32e]">
+                <Bell size={20} strokeWidth={1.7} />
+                {unread > 0 && (
+                  <span className="absolute top-1 right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-danger text-white text-[10px] font-semibold grid place-items-center">
+                    {unread > 9 ? "9+" : unread}
+                  </span>
+                )}
+              </button>
               <Link href="/security" aria-label="Security approvals" className="size-11 grid place-items-center rounded-md hover:bg-tint text-brand"><CircleCheck size={20} strokeWidth={1.7} /></Link>
-              <Link href="/storage" aria-label="Backups schedule" className="size-11 grid place-items-center rounded-md hover:bg-tint text-muted"><CalendarDays size={20} strokeWidth={1.7} /></Link>
+              <Link href="/calendar" aria-label="Calendar" className="size-11 grid place-items-center rounded-md hover:bg-tint text-muted"><CalendarDays size={20} strokeWidth={1.7} /></Link>
             </aside>
           )}
         </div>
       </div>
+      <NotificationsPanel open={notifOpen} onClose={() => setNotifOpen(false)} onSeen={() => setUnread(0)} />
+      {profileOpen && <ProfileModal onClose={() => setProfileOpen(false)} />}
     </div>
   );
 }

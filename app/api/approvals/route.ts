@@ -34,5 +34,12 @@ export async function POST(req: Request) {
   }
   await db.from("approvals").update({ status: p.data.decision, approver: me.id }).eq("id", p.data.approval_id);
   await logAudit({ actor: me.id, actor_name: me.username, action: p.data.decision === "denied" ? "restore" : "edit", file_id: ap.file_id, req, detail: { approval: p.data.approval_id, decision: p.data.decision } });
+  if (ap.requester) {
+    await db.from("notifications").insert({
+      user_id: ap.requester, kind: "approval",
+      title: p.data.decision === "denied" ? "Your restore request was denied" : "Your restore request was approved",
+      body: `Decided by ${me.username}.`
+    });
+  }
   return Response.json({ ok: true });
 }
