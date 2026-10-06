@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
+import { adminClient } from "@/lib/supabase-admin";
 import { restoreDriveFile } from "@/lib/google-drive";
 import { logAudit } from "@/lib/audit";
 import { getProfile, can } from "@/lib/roles";
@@ -21,7 +22,7 @@ export async function POST(req: Request) {
     try { await restoreDriveFile(String(f.google_file_id)); }
     catch (e) { return Response.json({ error: `Google restore failed: ${e instanceof Error ? e.message : "unknown"}` }, { status: 502 }); }
   }
-  const { error } = await supa.from("recovery_bin").delete().eq("file_id", file_id);
+  const { error } = await adminClient().from("recovery_bin").delete().eq("file_id", file_id);
   if (error) return Response.json({ error: error.message }, { status: 500 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "restore", file_id, req });
   return Response.json({ ok: true });

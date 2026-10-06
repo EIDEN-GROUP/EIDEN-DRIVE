@@ -10,8 +10,17 @@ import { listAllDriveFiles } from "@/lib/google-drive";
 export async function POST(req: Request) {
   const me = await getProfile();
   if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
-  const { files, note } = await listAllDriveFiles();
-  if (note === "google-not-configured") {
+  let files: { id?: string | null; name?: string | null; mimeType?: string | null; size?: string | null }[];
+  try {
+    ({ files } = await listAllDriveFiles());
+  } catch (e) {
+    const m = e instanceof Error ? e.message : "google request failed";
+    if (/invalid_grant/i.test(m)) {
+      return Response.json({ error: "Google rejected the refresh token — re-run /api/auth/google as admin, save the new token, redeploy." }, { status: 502 });
+    }
+    return Response.json({ error: `Google Drive unreachable right now (${m}).` }, { status: 502 });
+  }
+  if (!files.length) {
     return Response.json({ error: "GOOGLE_REFRESH_TOKEN not set — run the /api/auth/google flow first (docs/10)." }, { status: 503 });
   }
   const db = adminClient();
@@ -36,5 +45,6 @@ export async function POST(req: Request) {
     }
   }
   await logAudit({ actor: me.id, actor_name: me.username, action: "edit", req, detail: { sync: "google", inserted, updated } });
+  await db.from("jobs").insert({ kind: "drive-sync", status: "done", payload: { by: me.username, inserted, updated } });
   return Response.json({ ok: true, inserted, updated, total: files.length });
 }

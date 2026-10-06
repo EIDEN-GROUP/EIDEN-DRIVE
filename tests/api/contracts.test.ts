@@ -20,14 +20,14 @@ describe("API contracts (anonymous)", () => {
       ["/api/drive/upload-url", "POST"], ["/api/drive/rename", "PATCH"], ["/api/drive/sync", "POST"],
       ["/api/folders", "POST"], ["/api/folders", "PATCH"], ["/api/folders", "DELETE"],
       ["/api/users", "PATCH"], ["/api/users", "DELETE"], ["/api/users/invite", "POST"],
-      ["/api/storage", "POST"]
+      ["/api/approvals", "POST"], ["/api/storage", "POST"]
     ] as const) {
       const r = await fetch(`${BASE}${p}`, { method: m, headers: { "content-type": "application/json" }, body: "{}" });
       expect([400, 401, 307]).toContain(r.status);
     }
-    for (const p of ["/api/users", "/api/drive/bin", "/api/activity", "/api/storage", "/api/notifications"]) {
+    for (const p of ["/api/users", "/api/drive/bin", "/api/activity", "/api/storage", "/api/notifications", "/api/health"]) {
       const r = await get(p);
-      expect([401, 307]).toContain(r.status);
+      expect([401, 403, 307]).toContain(r.status);
     }
     const dl = await get("/api/drive/download?file_id=00000000-0000-0000-0000-000000000000");
     expect([400, 401, 307, 404]).toContain(dl.status);
@@ -36,11 +36,13 @@ describe("API contracts (anonymous)", () => {
     const r = await get("/api/auth/google", false);
     expect([302, 403]).toContain(r.status);
   });
-  it("validates access requests without a session (no account enumeration)", async () => {
+  it("validates access requests and login-attempt reports without a session", async () => {
     const bad = await fetch(`${BASE}/api/access-requests`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(bad.status).toBe(400);
     const get = await fetch(`${BASE}/api/access-requests`);
     expect(get.status).toBe(405);
+    const attempt = await fetch(`${BASE}/api/auth/login-attempt`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(attempt.status).toBe(400);
   });
   it("serves PWA + brand assets publicly", async () => {
     expect((await get("/manifest.json")).status).toBe(200);

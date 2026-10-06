@@ -88,31 +88,62 @@ export default function Explorer() {
   const [newName, setNewName] = useState("");
   const [renameTarget, setRenameTarget] = useState<{ kind: "file" | "folder"; id: string; name: string } | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [folderBusy, setFolderBusy] = useState(false);
   const [confirmFolderDelete, setConfirmFolderDelete] = useState<Folder | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const PAGE = 50;
   const [uploading, setUploading] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const lastGoogleError = useRef<string | null>(null);
 
   const nav = hist[hi];
   const curFolder = nav.kind === "root" ? nav.path[nav.path.length - 1] ?? null : null;
 
-  const load = useCallback(async (query: string) => {
-    setLoading(true);
+  const load = useCallback(async (query: string, from = 0, append = false) => {
+    if (append) setLoadingMore(true);
+    else setLoading(true);
     try {
       const [fr, dr, br] = await Promise.all([
-        fetch("/api/folders").then((r) => r.json()),
-        fetch(`/api/drive?q=${encodeURIComponent(query)}`).then((r) => r.json()),
-        fetch("/api/drive/bin").then((r) => r.json())
+        append ? null : fetch("/api/folders").then(async (r) => {
+          if (!r.ok) throw new Error(`folders ${r.status}`);
+          return r.json();
+        }),
+        fetch(`/api/drive?q=${encodeURIComponent(query)}&limit=${PAGE}&offset=${from}`).then(async (r) => {
+          if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            throw new Error((d as { error?: string }).error ?? `drive ${r.status}`);
+          }
+          return r.json();
+        }),
+        append ? null : fetch("/api/drive/bin").then(async (r) => {
+          if (!r.ok) throw new Error(`bin ${r.status}`);
+          return r.json();
+        })
       ]);
-      setFolders(fr.results ?? []);
-      setFiles(dr.results ?? []);
-      setBin(br.results ?? []);
-    } catch {
-      toast({ text: "Couldn't reach the server. Showing cached view.", tone: "err" });
+      if (fr) setFolders(fr.results ?? []);
+      setFiles((prev) => append ? [...prev, ...(dr.results ?? [])] : (dr.results ?? []));
+      setHasMore((dr.results ?? []).length >= PAGE);
+      if (br) setBin(br.results ?? []);
+      if (dr.google_error && dr.google_error !== lastGoogleError.current) {
+        lastGoogleError.current = dr.google_error;
+        toast({ text: dr.google_error, tone: "err" });
+      }
+    } catch (e) {
+      toast({ text: e instanceof Error ? e.message : "Couldn't reach the server.", tone: "err" });
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }, []);
+
+  function loadMore() {
+    // Live Google rows (g:*) aren't in the index — offset counts indexed rows only.
+    const indexed = files.filter((f) => !f.id.startsWith("g:")).length;
+    load(q, indexed, true);
+  }
 
   useEffect(() => {
     const t = setTimeout(() => load(q), q ? 350 : 0);
@@ -237,8 +268,10 @@ export default function Explorer() {
   async function createFolder(e: React.FormEvent) {
     e.preventDefault();
     const name = newName.trim();
-    if (!name) return;
+    if (!name || folderBusy) return;
+    setFolderBusy(true);
     const r = await fetch("/api/folders", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, parent: curFolder }) });
+    setFolderBusy(false);
     if (r.ok) { toast({ text: `Folder "${name}" created.`, tone: "ok" }); setNewName(""); setShowNewFolder(false); load(q); }
     else toast({ text: "Couldn't create folder.", tone: "err" });
   }
@@ -282,15 +315,17 @@ export default function Explorer() {
 
   async function doRename(e: React.FormEvent) {
     e.preventDefault();
-    if (!renameTarget) return;
+    if (!renameTarget || renameBusy) return;
     const name = renameValue.trim();
     if (!name || name === renameTarget.name) { setRenameTarget(null); return; }
+    setRenameBusy(true);
     const url = renameTarget.kind === "folder" ? "/api/folders" : "/api/drive/rename";
     const body = renameTarget.kind === "folder"
       ? { folder_id: renameTarget.id, name }
       : { file_id: renameTarget.id, name };
     const r = await fetch(url, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const d = await r.json().catch(() => ({}));
+    setRenameBusy(false);
     if (r.ok) { toast({ text: `Renamed to "${name}".`, tone: "ok" }); setRenameTarget(null); load(q); }
     else toast({ text: d.error ?? "Couldn't rename.", tone: "err" });
   }
@@ -382,8 +417,8 @@ export default function Explorer() {
         <div className="shrink-0 min-h-[56px] px-3 flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
           <button onClick={() => setPane((p) => !(p ?? true))} aria-label="Toggle favorites pane" className="size-11 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={21} strokeWidth={1.6} /></button>
           <span className="h-5 border-l border-line mx-1" />
-          <button onClick={back} disabled={hi === 0} aria-label="Back" className="size-8 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronLeft size={18} /></button>
-          <button onClick={forward} disabled={hi >= hist.length - 1} aria-label="Forward" className="size-8 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronRight size={18} /></button>
+          <button onClick={back} disabled={hi === 0} aria-label="Back" className="size-11 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronLeft size={18} /></button>
+          <button onClick={forward} disabled={hi >= hist.length - 1} aria-label="Forward" className="size-11 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronRight size={18} /></button>
           <h2 className="ml-2 text-[16px] text-ink/90 truncate max-w-[40%]">{title}</h2>
 
           <div className="ml-auto flex items-center gap-1.5">
@@ -436,7 +471,17 @@ export default function Explorer() {
           <div className="flex-1 min-w-0 flex flex-col">
             <div className="flex-1 min-h-0 overflow-auto" onClick={() => { setSelKey(null); setInfoOpen(false); }}>
               {loading ? (
-                <p className="p-6 text-sm text-muted" role="status">Reading drive…</p>
+                <div aria-busy="true" aria-label="Loading files" className="p-4 flex flex-col gap-2">
+                  {Array.from({ length: 8 }).map((_, i) => (
+                    <div key={i} className="flex items-center gap-3">
+                      <span className="skel size-6 shrink-0" />
+                      <span className="skel h-4 flex-1" />
+                      <span className="skel h-4 w-16 hidden md:block" />
+                      <span className="skel h-4 w-20 hidden md:block" />
+                    </div>
+                  ))}
+                  <span className="sr-only" role="status">Reading drive…</span>
+                </div>
               ) : nav.kind === "bin" ? (
                 bin.length === 0
                   ? <EmptyState title="Recovery Bin is empty" body="Deleted files rest here for 90 days. Members can never delete permanently." />
@@ -519,6 +564,14 @@ export default function Explorer() {
                   })}
                 </div>
               )}
+              {hasMore && !loading && nav.kind !== "bin" && (
+                <div className="p-4 grid place-items-center">
+                  <button onClick={loadMore} disabled={loadingMore}
+                    className="min-h-[44px] px-6 rounded-md border border-line text-sm hover:bg-tint disabled:opacity-50">
+                    {loadingMore ? "Loading…" : "Load more"}
+                  </button>
+                </div>
+              )}
             </div>
             <p className="shrink-0 h-8 px-4 flex items-center text-[11px] text-muted border-t border-line" role="status">
               {nav.kind === "bin" ? `${bin.length} in bin` : `${folderCount} folders · ${fileRows.length} files · ${formatBytes(totalSize)}`}
@@ -529,11 +582,11 @@ export default function Explorer() {
           {showInfo && sel && (
             <aside aria-label="Details"
               className="fixed lg:static inset-x-0 bottom-0 z-30 lg:z-auto max-h-[75vh] lg:max-h-none w-full lg:w-[296px] shrink-0 overflow-y-auto bg-surface border-t lg:border-t-0 lg:border-l border-line rounded-t-2xl lg:rounded-none shadow-pop lg:shadow-none p-4 flex flex-col pop-in">
-              <button onClick={() => { setSelKey(null); setInfoOpen(false); }} aria-label="Close details" className="self-end -mt-1 -mr-1 mb-1 size-8 grid place-items-center rounded-md hover:bg-tint text-muted"><X size={16} /></button>
+              <button onClick={() => { setSelKey(null); setInfoOpen(false); }} aria-label="Close details" className="self-end -mt-1 -mr-1 mb-1 size-11 grid place-items-center rounded-md hover:bg-tint text-muted"><X size={16} /></button>
               <div className="h-[200px] rounded-lg border border-line bg-soft grid place-items-center overflow-hidden">
                 {sel.file && classify(sel.file.name, sel.file.mime) === "IMAGE" && !sel.id.startsWith("g:")
                   // eslint-disable-next-line @next/next/no-img-element
-                  ? <img src={`/api/drive/download?file_id=${sel.id}`} alt={`Preview of ${sel.name}`} className="max-h-full max-w-full object-contain" />
+                  ? <img src={`/api/drive/download?file_id=${sel.id}`} alt={`Preview of ${sel.name}`} loading="lazy" className="max-h-full max-w-full object-contain" />
                   : <FileGlyph kind={kindOf(sel.file ? classify(sel.file.name, sel.file.mime) : "", sel.kind === "folder")} size={84} />}
               </div>
               <div className="mt-3 flex items-start justify-between gap-3">
@@ -563,16 +616,16 @@ export default function Explorer() {
               </div>
               <div className="mt-auto pt-6 flex items-center justify-center divide-x divide-line text-ink/80">
                 {sel.kind === "file" && !sel.id.startsWith("g:") && nav.kind !== "bin" && (
-                  <button onClick={() => router.push(`/drive/${sel.id}`)} aria-label="Open" className="px-4 min-h-[40px] hover:text-brand"><ExternalLink size={19} strokeWidth={1.6} /></button>
+                  <button onClick={() => router.push(`/drive/${sel.id}`)} aria-label="Open" className="px-4 min-h-[44px] hover:text-brand"><ExternalLink size={19} strokeWidth={1.6} /></button>
                 )}
                 {sel.kind === "file" && !sel.id.startsWith("g:") && (
-                  <a href={`/api/drive/download?file_id=${sel.id}`} aria-label="Download" className="px-4 min-h-[40px] grid place-items-center hover:text-brand"><Download size={19} strokeWidth={1.6} /></a>
+                  <a href={`/api/drive/download?file_id=${sel.id}`} aria-label="Download" className="px-4 min-h-[44px] grid place-items-center hover:text-brand"><Download size={19} strokeWidth={1.6} /></a>
                 )}
                 {sel.kind === "file" && nav.kind === "bin" && (
-                  <button onClick={() => restore(sel.id, sel.name)} aria-label="Restore" className="px-4 min-h-[40px] hover:text-brand"><Undo2 size={19} strokeWidth={1.6} /></button>
+                  <button onClick={() => restore(sel.id, sel.name)} aria-label="Restore" className="px-4 min-h-[44px] hover:text-brand"><Undo2 size={19} strokeWidth={1.6} /></button>
                 )}
                 {sel.kind === "file" && !sel.id.startsWith("g:") && nav.kind !== "bin" && sel.file && (
-                  <button onClick={() => setConfirmTrash(sel.file!)} aria-label="Move to Recovery Bin" className="px-4 min-h-[40px] hover:text-danger"><Trash2 size={19} strokeWidth={1.6} /></button>
+                  <button onClick={() => setConfirmTrash(sel.file!)} aria-label="Move to Recovery Bin" className="px-4 min-h-[44px] hover:text-danger"><Trash2 size={19} strokeWidth={1.6} /></button>
                 )}
               </div>
             </aside>
@@ -625,8 +678,8 @@ export default function Explorer() {
             <p className="text-[12px] text-muted mt-2">Created inside “{title}”.</p>
           </div>
           <div className="flex justify-end gap-2">
-            <button type="button" onClick={() => setShowNewFolder(false)} className="min-h-[40px] px-4 rounded-md border border-line text-sm hover:bg-tint">Cancel</button>
-            <button disabled={!newName.trim()} className="min-h-[40px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50">Create</button>
+            <button type="button" onClick={() => setShowNewFolder(false)} className="min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint">Cancel</button>
+            <button disabled={!newName.trim() || folderBusy} className="min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50">{folderBusy ? "Creating…" : "Create"}</button>
           </div>
         </form>
       </Modal>
@@ -644,7 +697,7 @@ export default function Explorer() {
           </div>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={() => setRenameTarget(null)} className="min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint">Cancel</button>
-            <button disabled={!renameValue.trim()} className="min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50">Rename</button>
+            <button disabled={!renameValue.trim() || renameBusy} className="min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50">{renameBusy ? "Renaming…" : "Rename"}</button>
           </div>
         </form>
       </Modal>
@@ -663,7 +716,7 @@ function EmptyState({ title, body, action }: { title: string; body: string; acti
         <FileGlyph kind="folder" size={56} className="opacity-30" />
         <p className="mt-3 text-[15px] font-medium">{title}</p>
         <p className="mt-1 text-[13px] text-muted max-w-xs">{body}</p>
-        {action && <button onClick={action.onClick} className="mt-4 min-h-[40px] px-4 rounded-md bg-brand text-white text-sm font-medium flex items-center gap-2"><Upload size={15} /> {action.label}</button>}
+        {action && <button onClick={action.onClick} className="mt-4 min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium flex items-center gap-2"><Upload size={15} /> {action.label}</button>}
       </div>
     </div>
   );

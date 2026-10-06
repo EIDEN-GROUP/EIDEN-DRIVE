@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
-import { createClient } from "@/lib/supabase-server";
+import { adminClient } from "@/lib/supabase-admin";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { parseJson } from "@/lib/http";
@@ -27,14 +27,16 @@ export async function POST(req: Request) {
   if (body.storage_path && (!body.storage_path.startsWith(`${me.id}/`) || body.storage_path.includes(".."))) {
     return Response.json({ error: "storage_path must be inside your own upload folder" }, { status: 403 });
   }
-  const supa = createClient();
-  const { data, error } = await supa.from("file_index").insert({
+  // Writes use the service role AFTER the checks above (never trust anon RLS for
+  // mutations: a missing/rotated JWT must never turn into a data-loss-shaped error).
+  const db = adminClient();
+  const { data, error } = await db.from("file_index").insert({
     name: body.name, mime: body.mime ?? "application/octet-stream", size: body.size ?? 0,
     hash: body.hash ?? null, backends: body.backends ?? ["google"], owner: me.id, folder: body.folder ?? null,
     storage_path: body.storage_path ?? null
   }).select("id").single();
   if (error) return Response.json({ error: error.message }, { status: 500 });
-  await supa.from("versions").insert({ file_id: data.id, v: 1, hash: body.hash ?? "", actor: me.id });
+  await db.from("versions").insert({ file_id: data.id, v: 1, hash: body.hash ?? "", actor: me.id });
   await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: data.id, req, detail: { backends: body.backends } });
   return Response.json({ ok: true, id: data.id });
 }

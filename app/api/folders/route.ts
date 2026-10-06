@@ -30,8 +30,9 @@ export async function POST(req: Request) {
   const body = p.data;
   const supa = createClient();
   // Only managers may choose a department tag explicitly; members inherit their own.
+  // Write via service role after the checks (folders_insert RLS is a backstop, not the gate).
   const dept = me.role === "member" ? me.department_tag : body.dept ?? me.department_tag;
-  const { data, error } = await supa.from("folders")
+  const { data, error } = await adminClient().from("folders")
     .insert({ name: body.name, parent: body.parent ?? null, dept, classification: "Internal" })
     .select("id").single();
   if (error) return Response.json({ error: error.message }, { status: 500 });

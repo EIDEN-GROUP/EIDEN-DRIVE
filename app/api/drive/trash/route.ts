@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
+import { adminClient } from "@/lib/supabase-admin";
 import { trashDriveFile } from "@/lib/google-drive";
 import { logAudit } from "@/lib/audit";
 import { getProfile, needsApproval } from "@/lib/roles";
@@ -30,20 +31,22 @@ export async function POST(req: Request) {
     classification = fol?.classification ?? "Internal";
   }
 
-  const { error: be } = await supa.from("recovery_bin").upsert({ file_id, deleted_by: me.id });
+  // Mutations use the service role AFTER the checks above (reads stay on RLS).
+  const db = adminClient();
+  const { error: be } = await db.from("recovery_bin").upsert({ file_id, deleted_by: me.id });
   if (be) return Response.json({ error: `could not move to bin: ${be.message}` }, { status: 500 });
 
   if (f.google_file_id) {
     try { await trashDriveFile(String(f.google_file_id)); }
     catch (e) {
-      await supa.from("recovery_bin").delete().eq("file_id", file_id); // roll back so DB and Drive agree
+      await db.from("recovery_bin").delete().eq("file_id", file_id); // roll back so DB and Drive agree
       return Response.json({ error: `Google trash failed: ${e instanceof Error ? e.message : "unknown"}` }, { status: 502 });
     }
   }
 
   const needsOk = needsApproval(classification, "delete");
   if (needsOk) {
-    await supa.from("approvals").insert({ action: "delete", file_id, requester: me.id });
+    await db.from("approvals").insert({ action: "delete", file_id, requester: me.id });
     await notify(null, "approval-pending", "Delete needs approval", `${me.username} requested delete of ${f.name}`);
   }
   await logAudit({ actor: me.id, actor_name: me.username, action: "trash", file_id, req, detail: { classification, approval: needsOk } });

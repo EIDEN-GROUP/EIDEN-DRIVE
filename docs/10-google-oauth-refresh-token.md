@@ -1,4 +1,22 @@
-# 10 — Google OAuth refresh token: click-by-click tutorial
+# 10 — Google + Supabase URL configuration (click tutorial)
+
+Your setup (already correct):
+* Domain: `https://drive.eiden-group.com`
+* Authorized redirect URI in Google Cloud Console: `https://drive.eiden-group.com/api/auth/google/callback` — must match EXACTLY (no trailing slash).
+* Login account for consent: `fileos@eiden-group.com` (must have access to the Shared Drive).
+
+## OTP / invite links must point at the DOMAIN, never localhost
+
+The app builds email redirect URLs from the page origin (`window.location.origin`) with a
+`NEXT_PUBLIC_APP_URL` fallback server-side — correct on `drive.eiden-group.com` by itself.
+What actually decides where Supabase email links land is the **dashboard**, not code:
+
+1. Supabase Dashboard → **Authentication → URL Configuration → Site URL** = `https://drive.eiden-group.com` (if this says `http://localhost:3000`, every OTP/invite email links to localhost).
+2. Same page → **Redirect URLs** allow-list must contain:
+   * `https://drive.eiden-group.com/api/auth/callback`
+   * `https://drive.eiden-group.com/welcome`
+   * `http://localhost:3000/api/auth/callback` and `http://localhost:3000/welcome` (local dev only)
+3. Vercel env: `NEXT_PUBLIC_APP_URL=https://drive.eiden-group.com` (used for invite emails sent server-side).
 
 Your setup (already correct):
 * Domain: `https://drive.eiden-group.com`

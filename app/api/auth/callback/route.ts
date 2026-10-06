@@ -9,7 +9,9 @@ import { cookies } from "next/headers";
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
-  const next = url.searchParams.get("next") ?? "/drive";
+  // Open-redirect guard: only same-origin relative paths. Anything else → /drive.
+  const raw = url.searchParams.get("next") ?? "/drive";
+  const next = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/drive";
   if (code) {
     const supa = createRouteHandlerClient({ cookies });
     await supa.auth.exchangeCodeForSession(code);

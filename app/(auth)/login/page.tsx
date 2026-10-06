@@ -57,6 +57,14 @@ function LoginForm() {
     return m;
   }
 
+  function reportFailure(reason: string) {
+    // Fire-and-forget: feeds Security Center's failed-sign-in feed. Never blocks login.
+    fetch("/api/auth/login-attempt", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, reason })
+    }).catch(() => {});
+  }
+
   async function sendOtp(e: React.FormEvent) {
     e.preventDefault();
     if (cool > 0) return;
@@ -67,7 +75,7 @@ function LoginForm() {
       email,
       options: { shouldCreateUser: false, emailRedirectTo: redirect }
     });
-    if (error) { setError(mapError(error.message)); setState("error"); }
+    if (error) { setError(mapError(error.message)); setState("error"); reportFailure("otp"); }
     else {
       localStorage.setItem("eiden-otp-at", String(Date.now()));
       setCool(COOLDOWN);
@@ -81,7 +89,7 @@ function LoginForm() {
     setError("");
     const supa = browserClient();
     const { error } = await supa.auth.signInWithPassword({ email, password });
-    if (error) { setError(mapError(error.message)); setState("error"); }
+    if (error) { setError(mapError(error.message)); setState("error"); reportFailure("password"); }
     else window.location.replace(next);
   }
 
