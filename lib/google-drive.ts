@@ -2,16 +2,31 @@
 // All functions degrade to stubs when env is missing so UI works without creds (.env left for the end).
 import { google } from "googleapis";
 
+export function oauthFor(refreshToken: string) {
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET } = process.env;
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) return null;
+  const o = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
+  o.setCredentials({ refresh_token: refreshToken });
+  return o;
+}
+
 function oauth() {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) return null;
-  const o = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
-  o.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
-  return o;
+  return oauthFor(GOOGLE_REFRESH_TOKEN);
 }
 
 export function driveClient() {
   const auth = oauth();
+  if (!auth) return null;
+  return google.drive({ version: "v3", auth });
+}
+
+export type DriveLike = ReturnType<typeof driveClient>;
+
+// Per-account client (multi-drive). Null when app-level client id/secret missing.
+export function driveClientFor(refreshToken: string): DriveLike {
+  const auth = oauthFor(refreshToken);
   if (!auth) return null;
   return google.drive({ version: "v3", auth });
 }
@@ -24,29 +39,33 @@ export const SHARED_DRIVE_ID = () => process.env.GOOGLE_SHARED_DRIVE_ID ?? "";
 // Result is cached per process; a changed env value re-resolves on next deploy.
 export type DriveRoot = { kind: "drive"; id: string } | { kind: "folder"; id: string } | { kind: "mydrive" };
 let rootCache: { env: string; root: DriveRoot } | null = null;
+// Parameterized core: same detection for the env root or any account root.
+export async function rootFor(drive: DriveLike, id: string): Promise<DriveRoot> {
+  if (!drive) throw new Error("google not configured");
+  if (!id) return { kind: "mydrive" };
+  try {
+    await drive.drives.get({ driveId: id, fields: "id" });
+    return { kind: "drive", id };
+  } catch {
+    try {
+      const meta = await drive.files.get({ fileId: id, fields: "id,mimeType", supportsAllDrives: true });
+      if (meta.data.mimeType !== "application/vnd.google-apps.folder") {
+        throw new Error(`Drive root is neither a visible Shared Drive nor a folder (it is ${meta.data.mimeType ?? "unknown"}).`);
+      }
+      return { kind: "folder", id };
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("Drive root")) throw e;
+      throw new Error("Drive root is not visible to the connected Google account — share the drive/folder with that account (see /api/health for which account is connected).");
+    }
+  }
+}
 export async function resolveRoot(): Promise<{ root: DriveRoot; note?: string }> {
   const drive = driveClient();
   if (!drive) return { root: { kind: "mydrive" }, note: "google-not-configured" };
   const id = SHARED_DRIVE_ID();
   if (!id) return { root: { kind: "mydrive" } };
   if (rootCache?.env === id) return { root: rootCache.root };
-  let root: DriveRoot;
-  try {
-    await drive.drives.get({ driveId: id, fields: "id" });
-    root = { kind: "drive", id };
-  } catch {
-    // Not a visible Shared Drive — maybe a My Drive folder ID?
-    try {
-      const meta = await drive.files.get({ fileId: id, fields: "id,mimeType", supportsAllDrives: true });
-      if (meta.data.mimeType !== "application/vnd.google-apps.folder") {
-        throw new Error(`GOOGLE_SHARED_DRIVE_ID is neither a visible Shared Drive nor a folder (it is ${meta.data.mimeType ?? "unknown"}).`);
-      }
-      root = { kind: "folder", id };
-    } catch (e) {
-      if (e instanceof Error && e.message.startsWith("GOOGLE_SHARED_DRIVE_ID")) throw e;
-      throw new Error("GOOGLE_SHARED_DRIVE_ID is not visible to the connected Google account — share the drive/folder with that account (see /api/health for which account is connected).");
-    }
-  }
+  const root = await rootFor(drive, id);
   rootCache = { env: id, root };
   return { root };
 }
@@ -56,10 +75,10 @@ function esc(s: string) { return s.replace(/[\\']/g, ""); }
 // BFS walk of a folder tree. `cursor` resumes across sync pages:
 // { queue: [{ id, token? }], scanned } — serialized as the sync pageToken.
 export interface FolderCursor { queue: { id: string; token?: string }[]; scanned: number }
-async function walkFolderPage(pageToken?: string): Promise<{ files: GFile[]; nextPageToken?: string }> {
-  const drive = driveClient();
-  if (!drive) return { files: [] };
-  const id = SHARED_DRIVE_ID();
+async function walkFolderPage(pageToken?: string, rootId?: string, drive?: DriveLike): Promise<{ files: GFile[]; nextPageToken?: string }> {
+  const d = drive ?? driveClient();
+  if (!d) return { files: [] };
+  const id = rootId ?? SHARED_DRIVE_ID();
   let cur: FolderCursor;
   try {
     cur = pageToken ? JSON.parse(Buffer.from(pageToken, "base64url").toString()) as FolderCursor : { queue: [{ id }], scanned: 0 };
@@ -68,7 +87,7 @@ async function walkFolderPage(pageToken?: string): Promise<{ files: GFile[]; nex
   let calls = 0;
   while (cur.queue.length && out.length < 200 && calls < 8 && cur.scanned < 5000) {
     const head = cur.queue[0];
-    const res = await drive.files.list({
+    const res = await d.files.list({
       q: `'${head.id}' in parents and trashed=false`,
       fields: "files(id,name,mimeType,size,modifiedTime,parents),nextPageToken",
       supportsAllDrives: true, includeItemsFromAllDrives: true,
@@ -88,14 +107,14 @@ async function walkFolderPage(pageToken?: string): Promise<{ files: GFile[]; nex
   return { files: out, nextPageToken: next };
 }
 
-export async function listDriveFiles(q = "", pageToken?: string) {
-  const drive = driveClient();
+export async function listDriveFiles(q = "", pageToken?: string, acct?: { drive: DriveLike; rootId: string }) {
+  const drive = acct?.drive ?? driveClient();
   if (!drive) return { files: [], note: "google-not-configured" };
-  const { root } = await resolveRoot();
+  const root = acct ? await rootFor(drive, acct.rootId) : (await resolveRoot()).root;
   if (root.kind === "folder") {
     // Folder root: no server-side name search across the tree — walk it and
     // filter client-side (capped; the file_index search covers the rest).
-    const pages = await walkFolderPage();
+    const pages = await walkFolderPage(undefined, root.id, drive);
     const needle = esc(q).toLowerCase();
     const hit = pages.files.filter((f) => !q || (f.name ?? "").toLowerCase().includes(needle)).slice(0, 10);
     return { files: hit };
@@ -112,14 +131,14 @@ export async function listDriveFiles(q = "", pageToken?: string) {
   return { files: res.data.files ?? [] };
 }
 
-export async function trashDriveFile(fileId: string) {
-  const drive = driveClient();
+export async function trashDriveFile(fileId: string, d?: DriveLike) {
+  const drive = d ?? driveClient();
   if (!drive) return { stub: true };
   return drive.files.update({ fileId, requestBody: { trashed: true }, supportsAllDrives: true });
 }
 
-export async function restoreDriveFile(fileId: string) {
-  const drive = driveClient();
+export async function restoreDriveFile(fileId: string, d?: DriveLike) {
+  const drive = d ?? driveClient();
   if (!drive) return { stub: true };
   return drive.files.update({ fileId, requestBody: { trashed: false }, supportsAllDrives: true });
 }
@@ -145,16 +164,27 @@ export async function getAboutQuota(): Promise<{ usage: number; limit: number } 
   return { usage: Number(q.usage), limit: Number(q.limit) };
 }
 
+// Same, but for any account client — powers per-account quota bars + routing.
+export async function aboutFor(drive: DriveLike): Promise<{ email: string | null; usage: number | null; limit: number | null }> {
+  const res = await drive!.about.get({ fields: "user(emailAddress),storageQuota" });
+  const q = res.data.storageQuota;
+  return {
+    email: res.data.user?.emailAddress ?? null,
+    usage: q?.usage ? Number(q.usage) : null,
+    limit: q?.limit ? Number(q.limit) : null
+  };
+}
+
 export interface GFile { id?: string | null; name?: string | null; mimeType?: string | null; size?: string | null; modifiedTime?: string | null; parents?: string[] | null }
 
 // Single page pull (pageSize 200). The sync route calls this in a loop and the
 // BROWSER chains requests — one Vercel invocation must never walk a whole drive,
 // or large drives blow past the serverless timeout (HTTP 502).
-export async function listDrivePage(pageToken?: string): Promise<{ files: GFile[]; nextPageToken?: string; note?: string }> {
-  const drive = driveClient();
+export async function listDrivePage(pageToken?: string, acct?: { drive: DriveLike; rootId: string }): Promise<{ files: GFile[]; nextPageToken?: string; note?: string }> {
+  const drive = acct?.drive ?? driveClient();
   if (!drive) return { files: [], note: "google-not-configured" };
-  const { root } = await resolveRoot();
-  if (root.kind === "folder") return walkFolderPage(pageToken);
+  const root = acct ? await rootFor(drive, acct.rootId) : (await resolveRoot()).root;
+  if (root.kind === "folder") return walkFolderPage(pageToken, root.id, drive);
   const res = await drive.files.list({
     q: "trashed=false",
     fields: "files(id,name,mimeType,size,modifiedTime,parents),nextPageToken",
@@ -192,8 +222,8 @@ export async function listAllDriveFiles(cap = 2000): Promise<{ files: GFile[]; n
   return { files: out.slice(0, cap) };
 }
 
-export async function renameDriveFile(fileId: string, name: string) {
-  const drive = driveClient();
+export async function renameDriveFile(fileId: string, name: string, d?: DriveLike) {
+  const drive = d ?? driveClient();
   if (!drive) return { stub: true };
   return drive.files.update({ fileId, requestBody: { name }, supportsAllDrives: true, fields: "id,name,modifiedTime" });
 }

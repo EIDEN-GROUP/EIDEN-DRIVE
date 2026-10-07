@@ -6,7 +6,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { signedDownloadUrl, UPLOAD_BUCKET } from "@/lib/storage";
-import { driveClient } from "@/lib/google-drive";
+import { driveCtxFor } from "@/lib/drive-accounts";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ file_id: z.string().uuid(), raw: z.string().optional(), json: z.string().optional() });
@@ -24,7 +24,7 @@ export async function GET(req: Request) {
   if (p.error) return p.error;
   const { file_id } = p.data;
   const supa = createClient();
-  const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,google_file_id").eq("id", file_id).maybeSingle();
+  const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "download", file_id, req });
   if (p.data.json) {
@@ -48,7 +48,8 @@ export async function GET(req: Request) {
         return new Response(blob, { headers: { "content-type": f.mime ?? "application/octet-stream", "content-disposition": `inline; filename="${encodeURIComponent(f.name)}"` } });
       }
       if (f.google_file_id) {
-        const g = driveClient();
+        const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
+        const g = ctx?.drive;
         if (!g) throw new Error("google not configured");
         const meta = await g.files.get({ fileId: f.google_file_id, fields: "size,mimeType", supportsAllDrives: true });
         if (Number(meta.data.size ?? 0) > RAW_MAX) {

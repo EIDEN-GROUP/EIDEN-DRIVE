@@ -5,6 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { renameDriveFile } from "@/lib/google-drive";
+import { driveCtxFor } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({
@@ -19,10 +20,13 @@ export async function PATCH(req: Request) {
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   const db = adminClient();
-  const { data: f } = await db.from("file_index").select("id,name,google_file_id").eq("id", p.data.file_id).maybeSingle();
+  const { data: f } = await db.from("file_index").select("id,name,google_file_id,drive_account_id").eq("id", p.data.file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   if (f.google_file_id) {
-    try { await renameDriveFile(String(f.google_file_id), p.data.name); }
+    try {
+      const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
+      await renameDriveFile(String(f.google_file_id), p.data.name, ctx?.drive ?? undefined);
+    }
     catch { return Response.json({ error: "Google rename failed — nothing changed" }, { status: 502 }); }
   }
   const { error } = await db.from("file_index").update({ name: p.data.name }).eq("id", p.data.file_id);

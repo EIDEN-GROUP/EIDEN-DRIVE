@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
 import { restoreDriveFile } from "@/lib/google-drive";
+import { driveCtxFor } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile, can } from "@/lib/roles";
 import { parseJson } from "@/lib/http";
@@ -17,9 +18,12 @@ export async function POST(req: Request) {
   if (p.error) return p.error;
   const { file_id } = p.data;
   const supa = createClient();
-  const { data: f } = await supa.from("file_index").select("google_file_id").eq("id", file_id).maybeSingle();
+  const { data: f } = await supa.from("file_index").select("google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
   if (f?.google_file_id) {
-    try { await restoreDriveFile(String(f.google_file_id)); }
+    try {
+      const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
+      await restoreDriveFile(String(f.google_file_id), ctx?.drive ?? undefined);
+    }
     catch (e) { return Response.json({ error: `Google restore failed: ${e instanceof Error ? e.message : "unknown"}` }, { status: 502 }); }
   }
   const { error } = await adminClient().from("recovery_bin").delete().eq("file_id", file_id);

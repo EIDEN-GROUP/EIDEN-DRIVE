@@ -1,10 +1,16 @@
 "use client";
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { Plus } from "lucide-react";
 import { Card, Pill, StorageBar } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/Toast";
 import { formatBytes } from "@/lib/files";
 
 interface Job { kind: string; status: string; created_at: string }
+interface Drive {
+  id: string; label: string; email: string | null; status: string; rootKind?: string;
+  used: number; total: number; alert?: string | null;
+}
 
 function fmtDate(d: string): string {
   const t = new Date(d);
@@ -12,7 +18,7 @@ function fmtDate(d: string): string {
 }
 
 export default function StoragePage() {
-  const [data, setData] = useState<{ google: { used: number; total: number; unconfigured?: boolean; alert: string | null }; jobs: Job[]; agent: { heartbeat_min_ago: number | null; online: boolean } } | null>(null);
+  const [data, setData] = useState<{ drives: Drive[]; jobs: Job[]; agent: { heartbeat_min_ago: number | null; online: boolean } } | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function load() {
@@ -32,23 +38,53 @@ export default function StoragePage() {
 
   const backups = (data?.jobs ?? []).filter((j) => j.kind.startsWith("backup") || j.kind === "agent-heartbeat");
   const lastBackup = backups.find((j) => j.kind.startsWith("backup"));
+  const totalUsed = (data?.drives ?? []).reduce((a, d) => a + d.used, 0);
+  const totalCap = (data?.drives ?? []).reduce((a, d) => a + d.total, 0);
 
   return (
     <section className="px-1 pt-1">
-      <h1 className="page-title mb-4">Storage & Backups</h1>
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <h1 className="page-title">Storage & Backups</h1>
+          {data && totalCap > 0 && (
+            <p className="text-sm text-muted mt-1">{formatBytes(totalUsed)} of {formatBytes(totalCap)} across {data.drives.filter((d) => d.status === "active").length} drive{(data.drives.filter((d) => d.status === "active").length === 1) ? "" : "s"}</p>
+          )}
+        </div>
+        <a href="/api/auth/google?label=drive" className="min-h-[44px] inline-flex items-center gap-1.5 px-4 rounded-md bg-brand text-white text-sm font-medium">
+          <Plus size={15} /> Connect another drive
+        </a>
+      </div>
       <div className="grid md:grid-cols-2 gap-4 items-start">
-        <Card label="Capacity">
+        <Card label={`Google drives · ${(data?.drives ?? []).filter((d) => d.status === "active").length} connected`}>
           {!data ? <p className="text-sm text-muted" role="status">Reading storage…</p> : (
-            <div className="mt-1 flex flex-col gap-3">
-              {data.google.total > 0 ? (
-                <StorageBar label={`Google Drive ${formatBytes(data.google.used)} / ${formatBytes(data.google.total)}`} used={data.google.used} total={data.google.total} />
-              ) : (
-                <p className="text-sm text-muted">Google quota appears after the refresh-token flow (docs/10).</p>
-              )}
-              <p className="text-xs text-muted flex items-center gap-2">
+            <div className="mt-1 flex flex-col gap-4">
+              {(data.drives ?? []).map((d) => (
+                <div key={d.id}>
+                  <p className="text-[13px] font-medium flex items-center gap-2 flex-wrap">
+                    {d.label}
+                    {d.email && <span className="font-normal text-muted">{d.email}</span>}
+                    {d.status !== "active"
+                      ? <Pill tone="red">{d.status === "down" ? "Unreachable — reconnect it" : d.status}</Pill>
+                      : d.rootKind === "folder" ? <Pill tone="fill">folder root</Pill>
+                      : d.rootKind === "drive" ? <Pill tone="green">shared drive</Pill> : null}
+                  </p>
+                  {d.total > 0 ? (
+                    <div className="mt-1.5">
+                      <StorageBar label={`${formatBytes(d.used)} / ${formatBytes(d.total)}`} used={d.used} total={d.total} />
+                      {d.alert && <p className="mt-1 text-xs text-danger" role="alert">Above {d.alert === "storage-95" ? "95" : "80"}% — new uploads route to other drives automatically.</p>}
+                    </div>
+                  ) : d.status === "active" ? (
+                    <p className="text-xs text-muted mt-1">Quota not reported by Google (unlimited Workspace or hidden) — uploads allowed.</p>
+                  ) : (
+                    <p className="text-xs text-muted mt-1">Not connected yet.</p>
+                  )}
+                </div>
+              ))}
+              <p className="text-xs text-muted flex items-center gap-2 pt-1 border-t border-line/60">
                 Local agent
                 <Pill tone={data.agent.online ? "green" : "red"}>{data.agent.online ? `Online · ${data.agent.heartbeat_min_ago}m ago` : "Offline"}</Pill>
               </p>
+              <p className="text-xs text-muted">Uploads mirror to the roomiest drive automatically; full drives are skipped, never attempted.</p>
             </div>
           )}
         </Card>

@@ -20,7 +20,7 @@ export interface Folder { id: string; name: string; parent: string | null; dept:
 export interface FileRow {
   id: string; name: string; mime?: string; size?: number; backends: string[];
   owner?: string; updated?: string; updated_at?: string; folder?: string | null;
-  hash?: string; storage_path?: string | null;
+  hash?: string; storage_path?: string | null; accountLabel?: string;
 }
 interface BinRow { file_id: string; deleted_at: string; purge_at: string; file_index: { id: string; name: string; mime: string; size: number } | { id: string; name: string; mime: string; size: number }[] }
 
@@ -91,6 +91,8 @@ export default function Explorer() {
   const [clip, setClip] = useState<{ id: string; name: string } | null>(null);
   const [viewFile, setViewFile] = useState<ViewFile | null>(null);
   const [editFile, setEditFile] = useState<ViewFile | null>(null);
+  const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; status: string }[]>([]);
+  const [driveSel, setDriveSel] = useState(""); // "" = Auto (roomiest drive)
   const [confirmTrash, setConfirmTrash] = useState<FileRow | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newName, setNewName] = useState("");
@@ -155,6 +157,14 @@ export default function Explorer() {
     const indexed = files.filter((f) => !f.id.startsWith("g:")).length;
     load(q, indexed, true);
   }
+
+  useEffect(() => {
+    let dead = false;
+    fetch("/api/drive/accounts").then((r) => r.json().catch(() => ({}))).then((d) => {
+      if (!dead) setAccounts(d.results ?? []);
+    }).catch(() => { /* picker stays hidden */ });
+    return () => { dead = true; };
+  }, []);
 
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -313,10 +323,12 @@ export default function Explorer() {
       if (!put.ok) throw new Error("byte upload failed");
       const meta = await fetch("/api/drive/upload", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder })
+        body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: driveSel || undefined })
       });
-      if (!meta.ok) throw new Error("indexing failed");
-      toast({ text: `"${file.name}" uploaded and indexed.`, tone: "ok" });
+      const mj = await meta.json().catch(() => ({}));
+      if (!meta.ok) throw new Error(mj.error ?? "indexing failed");
+      if (mj.push_error) toast({ text: `"${file.name}" saved locally — Google mirror skipped: ${mj.push_error}`, tone: "err" });
+      else toast({ text: `"${file.name}" uploaded and indexed.`, tone: "ok" });
       load(q);
     } catch (e) {
       toast({ text: e instanceof Error ? e.message : "Upload failed.", tone: "err" });
@@ -366,19 +378,30 @@ export default function Explorer() {
   async function syncGoogle() {
     setSyncing(true);
     try {
-      // Server syncs ONE page per request; chain here until done (avoids the old
-      // single-shot full-drive request that timed out as HTTP 502 on big drives).
-      let token: string | null = null, ins = 0, upd = 0, pages = 0;
-      for (;;) {
-        const r: Response = await fetch("/api/drive/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pageToken: token }) });
-        const d: { inserted?: number; updated?: number; done?: boolean; nextPageToken?: string | null; error?: string } = await r.json().catch(() => ({}));
-        if (!r.ok) { toast({ text: d.error ?? "Sync failed.", tone: "err" }); return; }
-        ins += d.inserted ?? 0; upd += d.updated ?? 0; pages++;
-        if (d.done) break;
-        token = d.nextPageToken ?? null;
-        if (!token || pages > 50) break; // safety cap: 50 pages ≈ 10k files
+      // Per account: chain that account's pages, then move to the next account
+      // the server names (nextAccountId). One page per request per account —
+      // no request ever walks a whole drive (HTTP 502-proof).
+      const accts = accounts.length ? accounts : [{ id: "", label: "Primary" }];
+      let ins = 0, upd = 0, pages = 0;
+      const labels: string[] = [];
+      for (const a of accts) {
+        let token: string | null = null;
+        for (let guard = 0; guard < 51; guard++) {
+          const body: { pageToken: string | null; accountId?: string } = { pageToken: token };
+          if (a.id) body.accountId = a.id;
+          const r: Response = await fetch("/api/drive/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+          const d: { inserted?: number; updated?: number; done?: boolean; nextPageToken?: string | null; nextAccountId?: string | null; accountLabel?: string; error?: string } = await r.json().catch(() => ({}));
+          if (!r.ok) { toast({ text: d.error ?? "Sync failed.", tone: "err" }); return; }
+          ins += d.inserted ?? 0; upd += d.updated ?? 0; pages++;
+          if (d.accountLabel && !labels.includes(d.accountLabel)) labels.push(d.accountLabel);
+          if (d.done) break;
+          // Server-driven hop: done with this account but another remains.
+          if (d.nextAccountId && d.nextAccountId !== a.id) break;
+          token = d.nextPageToken ?? null;
+          if (!token) break;
+        }
       }
-      toast({ text: `Google sync done: ${ins} new, ${upd} updated (${pages} page${pages === 1 ? "" : "s"}).`, tone: "ok" });
+      toast({ text: `Google sync done${labels.length ? ` (${labels.join(" + ")})` : ""}: ${ins} new, ${upd} updated (${pages} page${pages === 1 ? "" : "s"}).`, tone: "ok" });
       load(q);
     } finally {
       setSyncing(false);
@@ -489,6 +512,24 @@ export default function Explorer() {
               <button onClick={() => setView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
             </div>
             <span className="h-5 border-l border-line mx-0.5" />
+            {accounts.length > 1 && (
+              <label className="flex items-center gap-1 text-[12px] text-muted">
+                <span className="sr-only">Target drive for uploads</span>
+                <select value={driveSel} onChange={(e) => setDriveSel(e.target.value)} aria-label="Target drive for uploads"
+                  title={driveSel ? `Uploads mirror to ${accounts.find((a) => a.id === driveSel)?.label ?? "drive"}` : "Uploads mirror to the roomiest drive automatically"}
+                  className="min-h-[40px] max-w-[150px] rounded-md border border-line bg-surface px-1.5 text-[12.5px] text-ink">
+                  <option value="">Auto{(() => {
+                    const roomy = [...accounts].sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0];
+                    return roomy ? ` · ${roomy.label}` : "";
+                  })()}</option>
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.label}{a.free !== null ? ` · ${formatBytes(a.free)} free` : ""}{a.status !== "active" ? " (down)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <Menu label="Sort and filter" align="right" active={`${sort.key}:${sort.dir}`}
               trigger={<span className="flex items-center gap-0.5 text-ink/80"><Rows3 size={20} strokeWidth={1.6} /><ChevronDown size={12} /></span>}
               items={[
@@ -664,6 +705,7 @@ export default function Explorer() {
                 {[
                   ["Modified", sel.file ? fmtDate(sel.file.updated_at ?? sel.file.updated) : "--"],
                   ["Location", sel.file ? badge(sel.file.backends) || "--" : "--"],
+                  ...(sel.file?.accountLabel ? [["Drive", sel.file.accountLabel] as [string, string] ] : []),
                   ["Owner", sel.file?.owner ? `${sel.file.owner.slice(0, 8)}…` : "--"],
                   ["SHA-256", sel.file?.hash ? `${sel.file.hash.slice(0, 12)}…` : "--"]
                 ].map(([k, v]) => (

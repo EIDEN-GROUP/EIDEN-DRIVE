@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { UPLOAD_BUCKET } from "@/lib/storage";
-import { driveClient } from "@/lib/google-drive";
+import { driveCtxFor } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
 // Text-file editing save path. Only plain-text formats are accepted here
@@ -30,7 +30,7 @@ export async function PATCH(req: Request) {
   if (p.error) return p.error;
   const db = adminClient();
   const { data: f } = await db.from("file_index")
-    .select("id,name,mime,size,storage_path,google_file_id,owner").eq("id", p.data.file_id).maybeSingle();
+    .select("id,name,mime,size,storage_path,google_file_id,drive_account_id,owner").eq("id", p.data.file_id).maybeSingle();
   if (!f) return Response.json({ error: "file not found" }, { status: 404 });
   if (f.owner !== me.id && me.role !== "admin" && me.role !== "manager") {
     return Response.json({ error: "you can only edit your own files" }, { status: 403 });
@@ -44,7 +44,8 @@ export async function PATCH(req: Request) {
       const { error } = await db.storage.from(UPLOAD_BUCKET).update(f.storage_path, bytes, { contentType: f.mime ?? "text/plain", upsert: true });
       if (error) throw new Error(error.message);
     } else if (f.google_file_id) {
-      const g = driveClient();
+      const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
+      const g = ctx?.drive;
       if (!g) throw new Error("google not configured");
       await g.files.update({ fileId: f.google_file_id, supportsAllDrives: true, media: { mimeType: f.mime ?? "text/plain", body: Buffer.from(bytes) } });
     } else {

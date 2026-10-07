@@ -1,11 +1,16 @@
 # 10 — Google + Supabase URL configuration (click tutorial)
 
-## Which Google account connects the Drive? ANY Gmail.
+## Which Google account connects the Drive? ANY Gmail — and more than one.
 
-There is no fixed service account. Whoever (as admin) opens `/api/auth/google`,
-clicks through consent, and saves the resulting `GOOGLE_REFRESH_TOKEN` becomes the
-Drive link — a personal Gmail works fine. `/api/health` (manager+) shows
-`drive.connected_as` so you can always verify which account is live.
+There is no fixed service account. Any admin opens `/api/auth/google?label=<name>`
+(omit `label` and it uses the Gmail address), clicks through consent, and the
+account is stored in `drive_accounts` — live immediately, no env paste, no redeploy.
+Reconnecting the same Gmail refreshes its token (the `invalid_grant` fix).
+
+Uploads mirror to the roomiest drive automatically; full drives are skipped, never
+attempted. Each file row records its drive, so view/download/trash/copy always use
+the right token. `/api/health` (manager+) shows every account: connected-as,
+root kind, free space. Per-drive bars live on the Storage page.
 
 ## What GOOGLE_SHARED_DRIVE_ID accepts
 

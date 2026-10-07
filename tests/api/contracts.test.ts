@@ -25,7 +25,7 @@ describe("API contracts (anonymous)", () => {
       const r = await fetch(`${BASE}${p}`, { method: m, headers: { "content-type": "application/json" }, body: "{}" });
       expect([400, 401, 307]).toContain(r.status);
     }
-    for (const p of ["/api/users", "/api/drive/bin", "/api/activity", "/api/storage", "/api/notifications", "/api/health"]) {
+    for (const p of ["/api/users", "/api/drive/bin", "/api/activity", "/api/storage", "/api/notifications", "/api/health", "/api/drive/accounts", "/api/plans", "/api/profile"]) {
       const r = await get(p);
       expect([401, 403, 307]).toContain(r.status);
     }

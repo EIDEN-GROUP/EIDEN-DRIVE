@@ -6,6 +6,7 @@ import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { UPLOAD_BUCKET } from "@/lib/storage";
 import { driveClient, resolveRoot } from "@/lib/google-drive";
+import { getAccounts, quotaFor, rootKind, clientFor, type DriveAccount } from "@/lib/drive-accounts";
 
 // Managers+: "check everything" in one call. Reports NAMES and booleans only —
 // never secret values. Pinpoint which setup step is missing instead of guessing.
@@ -55,11 +56,36 @@ export async function GET() {
     sync = { last: lastSync?.created_at ?? null, status: lastSync?.status ?? null };
   }
 
-  // Live Google probe: token valid? Which account consented? Is the configured
-  // ID a visible Shared Drive, a My Drive folder, or nothing at all?
-  // Any Gmail can connect — whoever completes /api/auth/google owns the link.
-  let drive: Record<string, unknown> = { reachable: null as boolean | null };
-  if (google.ready) {
+  // Live Google probe per connected account: token valid? Which Gmail? Root
+  // kind? Free space? One dead account never hides the healthy ones.
+  const drives: Record<string, unknown>[] = [];
+  const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
+  if (accounts.some((a) => a.status === "active")) {
+    for (const a of accounts) {
+      if (a.status !== "active") { drives.push({ label: a.label, reachable: false, cause: "disabled" }); continue; }
+      try {
+        const d = clientFor(a);
+        if (!d) throw new Error("google not configured");
+        const about = await d.about.get({ fields: "user(emailAddress)" });
+        const kind = (await rootKind(d, a.root_id ?? "")).kind;
+        const q = await quotaFor(a).catch(() => ({ usage: null, limit: null, free: null, email: a.email }));
+        drives.push({
+          label: a.label, reachable: true, connected_as: about.data.user?.emailAddress ?? a.email,
+          root: kind, free: q.free, limit: q.limit
+        });
+      } catch (e) {
+        const m = e instanceof Error ? e.message : "google probe failed";
+        drives.push({
+          label: a.label, reachable: false,
+          cause: /invalid_grant/i.test(m) ? "refresh-token-rejected" : "unreachable",
+          hint: /invalid_grant/i.test(m)
+            ? `Reconnect it: open /api/auth/google?label=${encodeURIComponent(a.label)} as admin (same Gmail refreshes its token).`
+            : m
+        });
+      }
+    }
+  } else if (google.ready) {
+    // Legacy single-env connection (pre-migration).
     try {
       const g = driveClient();
       const about = await g!.about.get({ fields: "user(emailAddress,displayName)" });
@@ -68,30 +94,30 @@ export async function GET() {
       try {
         root = (await resolveRoot()).root;
       } catch (e) {
-        drive = { reachable: false, connected_as: email, cause: "root-unresolvable", hint: e instanceof Error ? e.message : "root check failed" };
+        drives.push({ label: "Primary", reachable: false, connected_as: email, cause: "root-unresolvable", hint: e instanceof Error ? e.message : "root check failed" });
       }
-      if (drive.reachable !== false) {
-        const kind = (root as { kind?: string })?.kind ?? "mydrive";
-        drive = { reachable: true, connected_as: email, root: kind };
-      }
+      const kind = (root as { kind?: string })?.kind ?? "mydrive";
+      drives.push({ label: "Primary", reachable: true, connected_as: email, root: kind });
     } catch (e) {
       const m = e instanceof Error ? e.message : "google probe failed";
-      drive = {
-        reachable: false,
+      drives.push({
+        label: "Primary", reachable: false,
         cause: /invalid_grant/i.test(m) ? "refresh-token-rejected" : "network-or-quota",
         hint: /invalid_grant/i.test(m)
           ? "Re-run /api/auth/google as admin (any Gmail works), save the new GOOGLE_REFRESH_TOKEN, redeploy."
           : m
-      };
+      });
     }
   }
 
   const fix: string[] = [];
-  if (!google.refresh_token) fix.push("Google sync: open /api/auth/google as admin to mint GOOGLE_REFRESH_TOKEN (docs/10).");
-  if (drive.reachable === false) fix.push(`Google Drive: ${typeof drive.hint === "string" ? drive.hint : "unreachable — see drive.hint."}`);
+  if (!google.refresh_token && drives.length === 0) fix.push("Google sync: open /api/auth/google as admin to connect the first drive (docs/10).");
+  for (const d of drives) {
+    if (d.reachable === false) fix.push(`Google Drive "${d.label}": ${typeof d.hint === "string" ? d.hint : d.cause === "disabled" ? "account disabled" : "unreachable — see drives entry."}`);
+  }
   if (identity.match === false) fix.push("Identity mismatch: your profiles.id differs from your auth user id — re-invite the account (delete + invite) so the trigger creates a matching profile.");
   if (storage.configured === false) fix.push("Uploads: create the private eiden-uploads bucket in Supabase → Storage.");
   if (!agent.online) fix.push("Agent: start local-agent on the office PC with the same AGENT_TOKEN.");
 
-  return Response.json({ ok: fix.length === 0, google, drive, identity, storage, agent, sync, fix });
+  return Response.json({ ok: fix.length === 0, google, drives, drive: drives[0] ?? null, identity, storage, agent, sync, fix });
 }

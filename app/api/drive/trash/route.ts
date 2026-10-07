@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
 import { trashDriveFile } from "@/lib/google-drive";
+import { driveCtxFor } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile, needsApproval } from "@/lib/roles";
 import { notify } from "@/lib/alerts";
@@ -21,7 +22,7 @@ export async function POST(req: Request) {
   const { file_id } = p.data;
 
   const supa = createClient();
-  const { data: f, error: fe } = await supa.from("file_index").select("id,name,google_file_id,folder").eq("id", file_id).maybeSingle();
+  const { data: f, error: fe } = await supa.from("file_index").select("id,name,google_file_id,folder,drive_account_id").eq("id", file_id).maybeSingle();
   if (fe) return Response.json({ error: fe.message }, { status: 500 });
   if (!f) return Response.json({ error: "file not found" }, { status: 404 });
 
@@ -37,7 +38,10 @@ export async function POST(req: Request) {
   if (be) return Response.json({ error: `could not move to bin: ${be.message}` }, { status: 500 });
 
   if (f.google_file_id) {
-    try { await trashDriveFile(String(f.google_file_id)); }
+    try {
+      const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
+      await trashDriveFile(String(f.google_file_id), ctx?.drive ?? undefined);
+    }
     catch (e) {
       await db.from("recovery_bin").delete().eq("file_id", file_id); // roll back so DB and Drive agree
       return Response.json({ error: `Google trash failed: ${e instanceof Error ? e.message : "unknown"}` }, { status: 502 });

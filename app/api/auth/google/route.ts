@@ -1,8 +1,9 @@
 export const dynamic = "force-dynamic";
 
 // Step 1 of refresh-token flow. Open https://drive.eiden-group.com/api/auth/google
-// while logged in as Admin/Manager -> redirects to Google consent (fileos@eiden-group.com).
-// Google returns to /api/auth/google/callback?code=... which shows the refresh token ONCE.
+// while logged in as Admin/Manager -> redirects to Google consent (any Gmail works).
+// Google returns to /api/auth/google/callback?code=... which stores the account
+// in drive_accounts immediately (?label= names it, default = the Gmail address).
 import { getProfile } from "@/lib/roles";
 import { GOOGLE_REDIRECT_URI, GOOGLE_SCOPES } from "@/lib/google-auth";
 
@@ -30,7 +31,9 @@ export async function GET(req: Request) {
   auth.searchParams.set("scope", GOOGLE_SCOPES.join(" "));
   auth.searchParams.set("access_type", "offline"); // <-- this makes Google issue a refresh_token
   auth.searchParams.set("prompt", "consent"); // <-- forces re-consent so token is returned even if granted before
-  const state = crypto.randomUUID();
+  // State binds the browser (cookie) AND carries the account label through Google.
+  const label = (url.searchParams.get("label") ?? "").trim().slice(0, 40);
+  const state = `${crypto.randomUUID()}.${Buffer.from(label || "drive", "utf8").toString("base64url")}`;
   auth.searchParams.set("state", state);
 
   // State is bound to this browser by an httpOnly cookie; the callback refuses anything without it.

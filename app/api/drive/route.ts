@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { createClient } from "@/lib/supabase-server";
 import { listDriveFiles } from "@/lib/google-drive";
+import { getAccounts, clientFor, type DriveAccount } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { escapeLike } from "@/lib/http";
@@ -16,28 +17,51 @@ export async function GET(req: Request) {
   const supa = createClient();
 
   // 1) indexed files (Google + Local + Backup badges)
-  const { data: rows } = await supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id").ilike("name", `%${escapeLike(q)}%`).range(offset, offset + limit - 1);
+  const { data: rows } = await supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id").ilike("name", `%${escapeLike(q)}%`).range(offset, offset + limit - 1);
 
-  // 2) live Google fallback — NEVER allowed to 500 the route. A bad/expired refresh
-  // token, revoked access, or Google outage degrades to index-only + a reason string.
-  let g: { files?: { id?: string | null; name?: string | null; mimeType?: string | null; size?: string | null }[]; note?: string } = { files: [] };
+  // 2) live Google fallback, across EVERY connected account — NEVER allowed to
+  // 500 the route. A dead token or unreachable root degrades that account to
+  // index-only + a reason string; other accounts still merge.
+  type Live = { id?: string | null; name?: string | null; mimeType?: string | null; size?: string | null };
+  const live: { id: string; name: string; mime?: string; size: number; backends: string[]; accountLabel?: string }[] = [];
+  let googleNote = "ok";
   let google_error: string | null = null;
-  try {
-    g = await listDriveFiles(q);
-  } catch (e) {
-    const m = e instanceof Error ? e.message : "google request failed";
-    google_error = /invalid_grant/i.test(m)
-      ? "Google rejected the refresh token — re-run /api/auth/google as admin, save the new token, redeploy."
-      : /not.?found|404/i.test(m)
-        ? "Google can't open the configured Drive ID — it must be a Shared Drive (shared with the connected account) or a My Drive folder ID. See /api/health for the connected account. Showing indexed files."
-        : `Google Drive unreachable right now (${m}). Showing indexed files.`;
+  const errors: string[] = [];
+  async function liveFrom(label: string, fn: () => Promise<{ files?: Live[]; note?: string }>) {
+    try {
+      const g = await fn();
+      if (g.note) googleNote = g.note;
+      for (const f of (g.files ?? []).slice(0, 10)) {
+        live.push({ id: `g:${f.id}`, name: f.name ?? "?", mime: f.mimeType ?? undefined, size: Number(f.size ?? 0), backends: ["google"], accountLabel: label });
+        if (live.length >= 10) break;
+      }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : "google request failed";
+      errors.push(/invalid_grant/i.test(m)
+        ? `"${label}": token rejected — reconnect it from /api/auth/google?label=${encodeURIComponent(label)}`
+        : `"${label}": unreachable (${m})`);
+    }
   }
-  const indexed = (rows ?? []).map((r: { id: string; name: string; mime: string; size: number; backends: string[] }) => ({ ...r, updated: (r as { updated_at?: string }).updated_at }));
-  const live = (g.files ?? []).slice(0, 10).map((f: { id?: string | null; name?: string | null; mimeType?: string | null; size?: string | null }) => ({
-    id: `g:${f.id}`, name: f.name ?? "?", mime: f.mimeType ?? undefined, size: Number(f.size ?? 0), backends: ["google"]
+  const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
+  const labelOf = new Map(accounts.map((a) => [a.id, a.label]));
+  if (accounts.some((a) => a.status === "active")) {
+    for (const a of accounts.filter((x) => x.status === "active")) {
+      if (live.length >= 10) break;
+      const d = clientFor(a);
+      if (!d) continue;
+      await liveFrom(a.label, () => listDriveFiles(q, undefined, { drive: d, rootId: a.root_id ?? "" }));
+    }
+  } else {
+    await liveFrom("Primary", () => listDriveFiles(q));
+  }
+  if (errors.length) google_error = `${errors.join(" ")} Showing indexed files.`;
+  const indexed = (rows ?? []).map((r: { id: string; name: string; mime: string; size: number; backends: string[]; drive_account_id?: string | null }) => ({
+    ...r,
+    updated: (r as { updated_at?: string }).updated_at,
+    accountLabel: r.drive_account_id ? labelOf.get(r.drive_account_id) ?? undefined : undefined
   }));
   const merged = [...indexed, ...live];
 
   await logAudit({ actor: me.id, actor_name: me.username, action: "view", req, detail: { q } });
-  return Response.json({ q, results: merged, google: (g as { note?: string }).note ?? "ok", google_error });
+  return Response.json({ q, results: merged, google: googleNote, google_error });
 }
