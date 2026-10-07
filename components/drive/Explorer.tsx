@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
   Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload,
-  Eye, Copy, ClipboardPaste, HardDrive
+  Eye, Copy, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -12,8 +12,11 @@ import Modal from "../ui/Modal";
 import Menu from "../ui/Menu";
 import FileViewer, { type ViewFile } from "./FileViewer";
 import FileEditor from "./FileEditor";
-import { editable } from "./filetext";
-import { FileGlyph, kindOf } from "../ui/Glyphs";
+import { editable, viewKind } from "./filetext";
+import { FileGlyph, FileIcon, FolderIcon, kindOf } from "../ui/Glyphs";
+import { useTags } from "../tags/useTags";
+import { TagChip, TagDot, TagDots, TagEditor, TagPicker } from "../tags/TagUI";
+import type { Tag, TagKind } from "../tags/useTags";
 import { badge, classify, formatBytes } from "@/lib/files";
 
 export interface Folder { id: string; name: string; parent: string | null; dept: string | null }
@@ -56,16 +59,28 @@ function fmtDate(d?: string | null): string {
 
 function kindLabel(name: string, cls: string): string {
   const ext = (name.split(".").pop() ?? "").toLowerCase();
-  if (cls === "IMAGE") return `${ext.toUpperCase()} image`;
-  if (cls === "VIDEO") return "Video";
-  if (cls === "PDF") return "PDF";
-  if (cls === "DOCX") return "Word document";
-  if (cls === "XLSX") return "Spreadsheet";
-  if (cls === "PPTX") return "Presentation";
-  if (cls === "ARCHIVE") return "Archive";
-  if (cls === "DESIGN") return "Design file";
-  if (ext === "txt") return "Text file";
-  return "File";
+  const k = viewKind(name);
+  const E = ext.toUpperCase();
+  switch (k) {
+    case "image": return `${E} image`;
+    case "video": return "Video";
+    case "audio": return "Audio";
+    case "pdf": return "PDF document";
+    case "docx": case "odf": case "rtf": return "Document";
+    case "legacy": return "Legacy Office file";
+    case "sheet": return "Spreadsheet";
+    case "csv": return "CSV table";
+    case "slides": return "Presentation";
+    case "archive": return "Archive";
+    case "ebook": return "Ebook";
+    case "font": return "Font";
+    case "json": return "JSON data";
+    case "notebook": return "Notebook";
+    case "markdown": return "Markdown";
+    case "html": return "Web page";
+    case "code": return ["txt", "log"].includes(ext) ? "Text file" : "Source / text";
+    default: return cls === "DESIGN" ? "Design file" : ext ? `${E} file` : "File";
+  }
 }
 
 export default function Explorer() {
@@ -79,7 +94,14 @@ export default function Explorer() {
   const [hi, setHi] = useState(0);
   const [view, setView] = useState<View>("list");
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
-  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [tagFilter, setTagFilter] = useState<string | null>(null); // department filter (manager-set folder.dept)
+  const tg = useTags();                                            // user-created tags
+  const [tagSel, setTagSel] = useState<string[]>([]);              // active tag filters (AND)
+  const [tagEditor, setTagEditor] = useState<{ tag?: Tag } | null>(null);
+  const [tagPicker, setTagPicker] = useState<{ kind: TagKind; id: string; name: string } | null>(null);
+  const [confirmTagDel, setConfirmTagDel] = useState<Tag | null>(null);
+  const [drivesOpen, setDrivesOpen] = useState(true);
+  const [deptOpen, setDeptOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selKey, setSelKey] = useState<string | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
@@ -91,7 +113,7 @@ export default function Explorer() {
   const [clip, setClip] = useState<{ id: string; name: string } | null>(null);
   const [viewFile, setViewFile] = useState<ViewFile | null>(null);
   const [editFile, setEditFile] = useState<ViewFile | null>(null);
-  const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; status: string }[]>([]);
+  const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; usage?: number | null; limit?: number | null; status: string }[]>([]);
   const [driveSel, setDriveSel] = useState(""); // "" = Auto (roomiest drive)
   const [driveView, setDriveView] = useState<{ accountId: string; folderId: string | null; path: { id: string; name: string }[] } | null>(null);
   const [tree, setTree] = useState<{ id: string; name: string; mime: string; size: number; googleId: string; parent: string | null }[] | null>(null);
@@ -169,6 +191,16 @@ export default function Explorer() {
     return () => { dead = true; };
   }, []);
 
+  useEffect(() => {
+    try { const v = localStorage.getItem("eiden-upload-drive"); if (v) setDriveSel(v); } catch { /* ignore */ }
+  }, []);
+  // A remembered drive that no longer exists falls back to Auto.
+  useEffect(() => { if (driveSel && accounts.length && !accounts.some((a) => a.id === driveSel)) setDriveSel(""); }, [accounts, driveSel]);
+  function chooseUploadDrive(id: string) {
+    setDriveSel(id);
+    try { localStorage.setItem("eiden-upload-drive", id); } catch { /* ignore */ }
+  }
+
   const loadRef = useRef(load);
   loadRef.current = load;
   useEffect(() => {
@@ -244,6 +276,12 @@ export default function Explorer() {
         ...sortFiles(gFiles.map(toFile)).map((f) => fileRowOf(f, 0))
       ];
     }
+    if (tagSel.length) {
+      const n = q.trim().toLowerCase();
+      const has = (kind: TagKind, id: string) => tagSel.every((t) => tg.idsOf(kind, id).includes(t));
+      return [...sortFolders(folders.filter((f) => has("folder", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => folderRowOf(f, 0)),
+        ...sortFiles(files.filter((f) => !f.id.startsWith("g:") && has("file", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => fileRowOf(f, 0))];
+    }
     if (q.trim()) {
       const n = q.trim().toLowerCase();
       return [...sortFolders(folders.filter((f) => f.name.toLowerCase().includes(n))).map((f) => folderRowOf(f, 0)), ...sortFiles(files).map((f) => fileRowOf(f, 0))];
@@ -262,7 +300,7 @@ export default function Explorer() {
     };
     walk(curFolder, 0);
     return out;
-  }, [nav.kind, files, folders, q, tagFilter, sort, expanded, curFolder, deptOf, driveView, tree, accounts]);
+  }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, curFolder, deptOf, driveView, tree, accounts]);
 
   const sel: Row | null = useMemo(() => {
     if (!selKey) return null;
@@ -458,8 +496,19 @@ export default function Explorer() {
   }, [driveView?.accountId]);
 
   function openDrive(accountId: string) {
+    if (nav.kind !== "root" || nav.path.length) go({ kind: "root", path: [] });
+    setTagSel([]); setTagFilter(null); setQ("");
     setDriveView({ accountId, folderId: null, path: [] });
     setSelKey(null); setInfoOpen(false); setCtx(null);
+  }
+  const taggable = (r: Row) => (r.kind === "file" ? !r.id.startsWith("g:") : !r.id.startsWith("gdrive:"));
+  const rowTags = (r: Row): Tag[] => taggable(r) ? tg.idsOf(r.kind, r.id).map((id) => tg.byId.get(id)).filter(Boolean) as Tag[] : [];
+  function toggleTagFilter(id: string) {
+    setDriveView(null);
+    setTagFilter(null);
+    if (nav.kind !== "root") go({ kind: "root", path: [] });
+    setTagSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+    setSelKey(null);
   }
 
   function copyFile(f: FileRow) {
@@ -531,24 +580,109 @@ export default function Explorer() {
             {favItem(nav.kind === "recent", () => go({ kind: "recent", path: [] }), <Clock size={19} strokeWidth={1.6} />, "Recent")}
             {favItem(nav.kind === "docs", () => go({ kind: "docs", path: [] }), <FileText size={19} strokeWidth={1.6} />, "Documents")}
             {favItem(nav.kind === "bin", () => go({ kind: "bin", path: [] }), <Trash2 size={19} strokeWidth={1.6} />, "Recovery Bin", bin.length)}
-            {favItem(nav.kind === "root" && !tagFilter, () => go({ kind: "root", path: [] }), <House size={19} strokeWidth={1.6} />, "Root")}
+            {favItem(nav.kind === "root" && !tagFilter && tagSel.length === 0 && !driveView, () => { setDriveView(null); setTagSel([]); setTagFilter(null); go({ kind: "root", path: [] }); }, <House size={19} strokeWidth={1.6} />, "Root")}
           </div>
         )}
-        <button onClick={() => setTagsOpen((o) => !o)} aria-expanded={tagsOpen} className="mt-2 flex items-center justify-between px-2 min-h-[44px] text-[13px] text-muted">
-          Tags {tagsOpen ? <ChevronDown size={16} className="text-brand" /> : <ChevronRight size={16} className="text-brand" />}
-        </button>
-        {tagsOpen && (
-          <div className="flex flex-col gap-1">
-            {depts.length === 0 && <p className="px-4 py-2 text-[12px] text-muted leading-snug">No tags yet. Managers set department tags on folders.</p>}
-            {depts.map((d) => (
-              <button key={d} onClick={() => { if (tagFilter === d) setTagFilter(null); else { setHist((h) => [...h.slice(0, hi + 1), { kind: "root", path: [] }]); setHi((i) => i + 1); setTagFilter(d); setSelKey(null); } }}
-                aria-pressed={tagFilter === d}
-                className={`w-full min-h-[44px] pl-4 pr-3 rounded-md flex items-center gap-3 text-[15px] text-left transition-colors ${tagFilter === d ? "bg-tint text-brand font-medium" : "text-ink/85 hover:bg-tint/60"}`}>
-                <span className="size-2.5 rounded-full shrink-0" style={{ background: tagColor(d) ?? undefined }} />
-                <span className="truncate">{d}</span>
-              </button>
-            ))}
+        {/* Drives: every connected Google account, with live free space. Click = browse that drive. */}
+        <div className="mt-1 flex items-center justify-between px-2 min-h-[44px]">
+          <button onClick={() => setDrivesOpen((o) => !o)} aria-expanded={drivesOpen} className="flex items-center gap-1 text-[13px] text-muted">
+            Drives {accounts.length > 0 && <span className="text-[11px] tabular-nums">· {accounts.length}</span>}
+            {drivesOpen ? <ChevronDown size={16} className="text-brand" /> : <ChevronRight size={16} className="text-brand" />}
+          </button>
+          <a href="/storage" className="text-[11.5px] text-brand hover:underline min-h-[44px] inline-flex items-center" title="Connect, scope or disconnect drives">Manage</a>
+        </div>
+        {drivesOpen && (
+          <div className="flex flex-col gap-0.5 mb-2 max-h-[300px] overflow-y-auto shrink-0">
+            {accounts.length === 0 && <p className="px-3 py-2 text-[12px] text-muted leading-snug">No Google drive connected. Ask an admin to connect one in Storage.</p>}
+            {accounts.map((a) => {
+              const on = driveView?.accountId === a.id;
+              const total = a.limit ?? null;
+              const used = a.usage ?? null;
+              const pct = total && used !== null ? Math.min(100, Math.round((used / total) * 100)) : null;
+              return (
+                <button key={a.id} onClick={() => openDrive(a.id)} aria-current={on ? "page" : undefined} title={a.email ?? a.label}
+                  className={`relative w-full rounded-md px-3 py-2 text-left flex items-center gap-3 transition-colors ${on ? "bg-tint text-brand" : "hover:bg-tint/60"} ${a.status !== "active" ? "opacity-60" : ""}`}>
+                  {on && <span className="absolute -left-1 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-r bg-brand" />}
+                  <span className={`size-8 rounded-lg grid place-items-center shrink-0 ${on ? "bg-brand text-white" : "bg-tint text-brand"}`} aria-hidden="true"><HardDrive size={16} /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className={`block text-[13.5px] leading-tight truncate ${on ? "font-medium" : "text-ink"}`}>{a.label}</span>
+                    {pct !== null ? (
+                      <span className="mt-1 block h-1 rounded-full bg-line overflow-hidden" role="img" aria-label={`${pct}% used`}>
+                        <span className={`block h-full rounded-full ${pct >= 95 ? "bg-danger" : pct >= 80 ? "bg-warning" : "bg-brand"}`} style={{ width: `${pct}%` }} />
+                      </span>
+                    ) : null}
+                    <span className="block mt-0.5 text-[10.5px] text-muted truncate">
+                      {a.status !== "active" ? (a.status === "down" ? "Unreachable" : "Disabled") : a.free !== null ? `${formatBytes(a.free)} free` : "Quota not reported"}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
+        )}
+
+        {/* Tags: create, attach (right-click → Tags…, or the details panel), filter. */}
+        <div className="mt-1 flex items-center justify-between px-2 min-h-[44px]">
+          <button onClick={() => setTagsOpen((o) => !o)} aria-expanded={tagsOpen} className="flex items-center gap-1 text-[13px] text-muted">
+            Tags {tagsOpen ? <ChevronDown size={16} className="text-brand" /> : <ChevronRight size={16} className="text-brand" />}
+          </button>
+          <span className="flex items-center gap-1">
+            {tagSel.length > 0 && <button onClick={() => setTagSel([])} className="text-[11.5px] text-brand hover:underline min-h-[44px] px-1">Clear</button>}
+            <button onClick={() => setTagEditor({})} aria-label="New tag" title="New tag"
+              className="size-8 grid place-items-center rounded-md text-brand hover:bg-tint"><Plus size={17} /></button>
+          </span>
+        </div>
+        {tagsOpen && (
+          <div className="flex flex-col gap-0.5 shrink-0">
+            {tg.ready && tg.tags.length === 0 && (
+              <div className="px-3 py-2">
+                <p className="text-[12px] text-muted leading-snug">Tags label files and folders so you can filter them across every drive.</p>
+                <button onClick={() => setTagEditor({})} className="mt-2 min-h-[44px] px-3 rounded-md bg-tint text-brand text-[13px] font-medium inline-flex items-center gap-1.5"><Plus size={15} /> Create your first tag</button>
+              </div>
+            )}
+            {tg.tags.map((t) => {
+              const on = tagSel.includes(t.id);
+              return (
+                <div key={t.id} className="group relative">
+                  <button onClick={() => toggleTagFilter(t.id)} aria-pressed={on}
+                    className={`w-full min-h-[44px] pl-3 pr-9 rounded-md flex items-center gap-3 text-[14.5px] text-left transition-colors ${on ? "bg-tint text-brand font-medium" : "text-ink/85 hover:bg-tint/60"}`}>
+                    <span className="size-3 rounded-full shrink-0 grid place-items-center" style={{ background: t.color }}>{on && <Check size={9} className="text-white" strokeWidth={4} />}</span>
+                    <span className="flex-1 truncate">{t.name}</span>
+                    <span className="text-[11px] text-muted tabular-nums group-hover:opacity-0 group-focus-within:opacity-0">{tg.counts.get(t.id) ?? 0}</span>
+                  </button>
+                  <span className="absolute right-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
+                    <Menu label={`Tag options for ${t.name}`} align="right" trigger={<MoreHorizontal size={16} className="text-muted" />}
+                      items={[
+                        { label: "Edit tag…", icon: <Pencil size={14} />, onSelect: () => setTagEditor({ tag: t }) },
+                        { label: "Delete tag", icon: <Trash2 size={14} />, danger: true, onSelect: () => setConfirmTagDel(t) }
+                      ]} />
+                  </span>
+                </div>
+              );
+            })}
+            {tagSel.length > 1 && <p className="px-3 pt-1 text-[11px] text-muted">Showing items with all {tagSel.length} tags.</p>}
+          </div>
+        )}
+
+        {/* Departments: set by managers on folders; read-only filter. */}
+        {depts.length > 0 && (
+          <>
+            <button onClick={() => setDeptOpen((o) => !o)} aria-expanded={deptOpen} className="mt-1 flex items-center justify-between px-2 min-h-[44px] text-[13px] text-muted">
+              Departments {deptOpen ? <ChevronDown size={16} className="text-brand" /> : <ChevronRight size={16} className="text-brand" />}
+            </button>
+            {deptOpen && (
+              <div className="flex flex-col gap-0.5 shrink-0">
+                {depts.map((d) => (
+                  <button key={d} onClick={() => { if (tagFilter === d) setTagFilter(null); else { setTagSel([]); setDriveView(null); if (nav.kind !== "root" || nav.path.length) go({ kind: "root", path: [] }); setTagFilter(d); setSelKey(null); } }}
+                    aria-pressed={tagFilter === d}
+                    className={`w-full min-h-[44px] pl-3 pr-3 rounded-md flex items-center gap-3 text-[14.5px] text-left transition-colors ${tagFilter === d ? "bg-tint text-brand font-medium" : "text-ink/85 hover:bg-tint/60"}`}>
+                    <span className="size-3 rounded-sm shrink-0" style={{ background: tagColor(d) ?? undefined }} />
+                    <span className="truncate">{d}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </aside>
 
@@ -573,24 +707,31 @@ export default function Explorer() {
               <button onClick={() => setView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
             </div>
             <span className="h-5 border-l border-line mx-0.5" />
-            {accounts.length > 1 && (
-              <label className="flex items-center gap-1 text-[12px] text-muted">
-                <span className="sr-only">Target drive for uploads</span>
-                <select value={driveSel} onChange={(e) => setDriveSel(e.target.value)} aria-label="Target drive for uploads"
-                  title={driveSel ? `Uploads mirror to ${accounts.find((a) => a.id === driveSel)?.label ?? "drive"}` : "Uploads mirror to the roomiest drive automatically"}
-                  className="min-h-[40px] max-w-[150px] rounded-md border border-line bg-surface px-1.5 text-[12.5px] text-ink">
-                  <option value="">Auto{(() => {
-                    const roomy = [...accounts].sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0];
-                    return roomy ? ` · ${roomy.label}` : "";
-                  })()}</option>
-                  {accounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.label}{a.free !== null ? ` · ${formatBytes(a.free)} free` : ""}{a.status !== "active" ? " (down)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
+            {/* Upload: one pill, two equal-height segments (action | destination). */}
+            <div className="flex items-stretch h-11 rounded-lg bg-brand text-white shadow-[0_1px_2px_rgba(60,30,140,.3)]">
+              <button onClick={() => fileRef.current?.click()} disabled={!!uploading}
+                title={driveSel ? `Uploads mirror to ${accounts.find((a) => a.id === driveSel)?.label ?? "the chosen drive"}` : accounts.length > 1 ? "Uploads mirror to the drive with the most free space" : "Upload a file"}
+                className={`px-3.5 flex items-center gap-2 text-[13.5px] font-medium hover:bg-white/12 active:bg-white/20 disabled:opacity-60 transition-colors ${accounts.length > 1 ? "rounded-l-lg" : "rounded-lg"}`}>
+                <Upload size={16} strokeWidth={2.2} /> <span className="hidden sm:inline">{uploading ? "Uploading…" : "Upload"}</span>
+              </button>
+              {accounts.length > 1 && (
+                <>
+                  <span className="my-2.5 w-px bg-white/30" aria-hidden="true" />
+                  <Menu label="Choose upload drive" align="right" rootClassName="h-full"
+                    triggerClassName="h-full w-9 grid place-items-center rounded-r-lg hover:bg-white/12 active:bg-white/20 transition-colors"
+                    trigger={<ChevronDown size={15} strokeWidth={2.4} />}
+                    items={[
+                      { label: `Auto · most free space${(() => { const r = [...accounts].filter((a) => a.status === "active").sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0]; return r ? ` (${r.label})` : ""; })()}`,
+                        icon: driveSel === "" ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive("") },
+                      "sep",
+                      ...accounts.filter((a) => a.status === "active").map((a) => ({
+                        label: `${a.label} · ${a.free !== null ? `${formatBytes(a.free)} free` : "quota unknown"}`,
+                        icon: driveSel === a.id ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive(a.id)
+                      }))
+                    ]} />
+                </>
+              )}
+            </div>
             <Menu label="Sort and filter" align="right" active={`${sort.key}:${sort.dir}`}
               trigger={<span className="flex items-center gap-0.5 text-ink/80"><Rows3 size={20} strokeWidth={1.6} /><ChevronDown size={12} /></span>}
               items={[
@@ -604,7 +745,6 @@ export default function Explorer() {
             <Menu label="More actions" align="right"
               trigger={<span className="flex items-center gap-0.5 text-ink/80"><CircleEllipsis size={21} strokeWidth={1.5} /><ChevronDown size={12} /></span>}
               items={[
-                { label: uploading ? `Uploading ${uploading}…` : "Upload file", icon: <Upload size={14} />, onSelect: () => fileRef.current?.click() },
                 { label: "New folder", icon: <FolderPlus size={14} />, onSelect: () => setShowNewFolder(true), hidden: nav.kind !== "root" },
                 "sep",
                 { label: syncing ? "Syncing from Google…" : "Sync from Google", icon: <CloudDownload size={14} />, onSelect: syncGoogle },
@@ -619,7 +759,7 @@ export default function Explorer() {
           {crumbs.map((c, i) => (
             <span key={`${c.label}-${i}`} className="flex items-center gap-1.5">
               {i > 0 && <ChevronRight size={11} className="text-muted/70" />}
-              {i === 0 ? <House size={13} className="text-brand" /> : c.folder ? <FileGlyph kind="folder" size={14} /> : null}
+              {i === 0 ? <House size={13} className="text-brand" /> : c.folder ? <FolderIcon size={14} /> : null}
               {c.onClick ? <button onClick={c.onClick} className="hover:text-brand min-h-[24px]">{c.label}</button> : <span aria-current={i === crumbs.length - 1 ? "page" : undefined}>{c.label}</span>}
             </span>
           ))}
@@ -628,27 +768,6 @@ export default function Explorer() {
         {/* Body */}
         <div className="flex-1 min-h-0 flex">
           <div className="flex-1 min-w-0 flex flex-col">
-            {/* Drive cards: each connected Google drive by name at root. */}
-            {!loading && !driveView && nav.kind === "root" && nav.path.length === 0 && !q.trim() && accounts.length > 0 && (
-              <div className="shrink-0 px-3 pt-3">
-                <p className="text-[11px] font-semibold tracking-wider text-muted mb-1.5">DRIVES</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
-                  {accounts.map((a) => (
-                    <button key={a.id} onClick={() => openDrive(a.id)}
-                      className="flex items-center gap-3 p-3 rounded-lg border border-line hover:border-brand text-left transition-colors min-h-[64px]">
-                      <span className="size-10 rounded-lg bg-tint text-brand grid place-items-center shrink-0" aria-hidden="true"><HardDrive size={20} /></span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-[13.5px] font-medium truncate">{a.label}</span>
-                        <span className="block text-[11px] text-muted truncate">
-                          {a.email ?? ""}{a.free !== null ? ` · ${formatBytes(a.free)} free` : ""}{a.status !== "active" ? " · disabled" : ""}
-                        </span>
-                      </span>
-                      <ChevronRight size={16} className="text-muted shrink-0" />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
             {/* Inside a drive: breadcrumb back through its folders. */}
             {!loading && driveView && nav.kind === "root" && !q.trim() && (
               <div className="shrink-0 px-3 pt-2 flex items-center gap-1.5 text-[12.5px] overflow-x-auto whitespace-nowrap" aria-label="Drive location">
@@ -701,7 +820,7 @@ export default function Explorer() {
                         return (
                           <li key={b.file_id} onClick={(e) => { e.stopPropagation(); setSelKey(id); }}
                             className={`px-4 min-h-[44px] flex items-center gap-3 text-[14px] cursor-default ${selKey === id ? "bg-tint text-brand" : "hover:bg-tint/50"}`}>
-                            <FileGlyph kind={kindOf(classify(fi?.name ?? ""))} size={22} />
+                            <FileIcon name={fi?.name ?? ""} mime={fi?.mime} size={26} />
                             <span className="flex-1 truncate">{fi?.name}</span>
                             <span className="text-[11px] text-muted hidden sm:block">purges {fmtDate(b.purge_at)}</span>
                             <button onClick={(e) => { e.stopPropagation(); restore(b.file_id, fi?.name ?? "?"); }} className="min-h-[44px] px-2 text-[12px] text-brand flex items-center gap-1 hover:underline"><Undo2 size={14} /> Restore</button>
@@ -726,7 +845,6 @@ export default function Explorer() {
                   {rows.map((r) => {
                     const on = selKey === r.key;
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
-                    const color = tagColor(r.dept);
                     return (
                       <div key={r.key} role="row" tabIndex={0} aria-selected={on}
                         onClick={(e) => { e.stopPropagation(); setSelKey(r.key); }}
@@ -739,12 +857,10 @@ export default function Explorer() {
                             ? <button onClick={(e) => { e.stopPropagation(); toggleExpand(r.id); }} aria-label={expanded.has(r.id) ? `Collapse ${r.name}` : `Expand ${r.name}`} aria-expanded={expanded.has(r.id)}
                                 className="size-[18px] grid place-items-center text-muted hover:text-brand shrink-0">{expanded.has(r.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
                             : <span className="w-[18px] shrink-0" />}
-                          <FileGlyph kind={kindOf(cls, r.kind === "folder")} size={24} className="shrink-0" />
+                          <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={26} className="shrink-0" />
                           <span className="text-[15px] truncate">{r.name}</span>
                         </div>
-                        <div role="gridcell" className="frow-hide">
-                          {color ? <span className="inline-block size-2.5 rounded-full" style={{ background: color }} title={r.dept ?? undefined} /> : <span className="text-[11px] text-muted">--</span>}
-                        </div>
+                        <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
                         <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.file ? badge(r.file.backends) || "--" : "--"}</div>
                         <div role="gridcell" className="text-[11px] text-ink/75 truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : "--"}</div>
                         <div role="gridcell" className="text-[11px] text-ink/75 tabular-nums">{r.file?.size ? formatBytes(r.file.size) : "--"}</div>
@@ -765,8 +881,9 @@ export default function Explorer() {
                         onKeyDown={(e) => onRowKey(e, r)}
                         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
                         className={`flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors min-h-[104px] ${on ? "bg-tint text-brand" : "hover:bg-tint/40"}`}>
-                        <FileGlyph kind={kindOf(cls, r.kind === "folder")} size={52} />
+                        <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={64} />
                         <span className="text-[12.5px] leading-tight break-all line-clamp-2">{r.name}</span>
+                        {rowTags(r).length > 0 && <TagDots tags={rowTags(r)} />}
                       </button>
                     );
                   })}
@@ -795,7 +912,7 @@ export default function Explorer() {
                 {sel.file && classify(sel.file.name, sel.file.mime) === "IMAGE" && !sel.id.startsWith("g:")
                   // eslint-disable-next-line @next/next/no-img-element
                   ? <img src={`/api/drive/download?file_id=${sel.id}`} alt={`Preview of ${sel.name}`} loading="lazy" className="max-h-full max-w-full object-contain" />
-                  : <FileGlyph kind={kindOf(sel.file ? classify(sel.file.name, sel.file.mime) : "", sel.kind === "folder")} size={84} />}
+                  : <FileIcon name={sel.name} mime={sel.file?.mime} folder={sel.kind === "folder"} size={132} />}
               </div>
               <div className="mt-3 flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -818,10 +935,18 @@ export default function Explorer() {
                 ))}
               </dl>
               <div className="mt-3">
-                <p className="text-[12px] text-ink/80">Tags</p>
-                <div className="mt-1.5 flex gap-1.5 flex-wrap">
-                  {sel.dept ? <span className="px-2 py-0.5 rounded text-[10px] text-white" style={{ background: tagColor(sel.dept) ?? "var(--brand)" }}>{sel.dept}</span> : <span className="text-[11px] text-muted">No tags</span>}
+                <div className="flex items-center justify-between">
+                  <p className="text-[12px] text-ink/80">Tags</p>
+                  {taggable(sel) && nav.kind !== "bin" && (
+                    <button onClick={() => setTagPicker({ kind: sel.kind, id: sel.id, name: sel.name })}
+                      className="min-h-[36px] px-2 -mr-2 text-[12px] text-brand font-medium inline-flex items-center gap-1 hover:underline"><Plus size={13} /> Add tag</button>
+                  )}
                 </div>
+                <div className="mt-1 flex gap-1.5 flex-wrap">
+                  {rowTags(sel).map((t) => <TagChip key={t.id} tag={t} onRemove={nav.kind === "bin" ? undefined : () => tg.assign(sel.kind, sel.id, t.id, false)} />)}
+                  {rowTags(sel).length === 0 && <span className="text-[11.5px] text-muted">{taggable(sel) ? "No tags yet" : "Tags apply to indexed files"}</span>}
+                </div>
+                {sel.dept && <p className="mt-2 text-[11.5px] text-muted">Department: <span className="text-ink/80">{sel.dept}</span></p>}
               </div>
               <div className="mt-auto pt-6 flex items-center justify-center divide-x divide-line text-ink/80">
                 {sel.kind === "file" && !sel.id.startsWith("g:") && nav.kind !== "bin" && (
@@ -854,6 +979,7 @@ export default function Explorer() {
             { label: "Copy", icon: <Copy size={14} />, on: () => ctx.row.file && copyFile(ctx.row.file),
               show: ctx.row.kind === "file" && !!ctx.row.file && !ctx.row.id.startsWith("g:") },
             { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(ctx.row.key); setInfoOpen(true); }, show: true },
+            { label: "Tags…", icon: <TagIcon size={14} />, on: () => setTagPicker({ kind: ctx.row.kind, id: ctx.row.id, name: ctx.row.name }), show: taggable(ctx.row) },
             { label: "Rename", icon: <Pencil size={14} />, on: () => ctx.row.kind === "folder" && ctx.row.folder
               ? openRename("folder", ctx.row.folder.id, ctx.row.folder.name)
               : ctx.row.file && openRename("file", ctx.row.id, ctx.row.file.name),
@@ -868,18 +994,6 @@ export default function Explorer() {
               <span>{i.label}</span>{"icon" in i && i.icon ? <span className="text-muted">{i.icon}</span> : null}
             </button>
           ))}
-          {depts.length > 0 && (
-            <>
-              <div className="my-1 border-t border-line" />
-              <p className="px-3.5 pt-1 text-[11px] text-muted">Tags</p>
-              <div className="px-3.5 py-2 flex gap-2">
-                {depts.slice(0, 7).map((d) => (
-                  <button key={d} aria-label={`Show tag ${d}`} title={d} onClick={() => { setCtx(null); setTagFilter(d); }}
-                    className="size-3 rounded-full ring-offset-2 ring-offset-surface hover:ring-2 ring-brand" style={{ background: tagColor(d) ?? undefined }} />
-                ))}
-              </div>
-            </>
-          )}
         </div>
       )}
 
@@ -909,6 +1023,13 @@ export default function Explorer() {
           </button>
         </div>
       )}
+
+      {tagEditor && <TagEditor tag={tagEditor.tag} api={tg} onClose={() => setTagEditor(null)} />}
+      {tagPicker && <TagPicker target={tagPicker} api={tg} onClose={() => setTagPicker(null)} />}
+      <ConfirmDialog open={!!confirmTagDel} title={`Delete tag “${confirmTagDel?.name}”?`}
+        body="It is removed from every file and folder. The files themselves are not touched."
+        confirmLabel="Delete tag" onClose={() => setConfirmTagDel(null)}
+        onConfirm={async () => { const t = confirmTagDel; setConfirmTagDel(null); if (t && (await tg.remove(t.id))) setTagSel((x) => x.filter((i) => i !== t.id)); }} />
 
       {viewFile && <FileViewer file={viewFile} onClose={() => setViewFile(null)} onEdit={(f) => { setViewFile(null); setEditFile(f); }} />}
       {editFile && <FileEditor file={editFile} onClose={() => setEditFile(null)} onSaved={() => load(q)} />}
@@ -957,7 +1078,7 @@ function EmptyState({ title, body, action }: { title: string; body: string; acti
   return (
     <div className="h-full min-h-[260px] grid place-items-center p-8 text-center">
       <div className="flex flex-col items-center">
-        <FileGlyph kind="folder" size={56} className="opacity-30" />
+        <FolderIcon size={64} className="opacity-30" />
         <p className="mt-3 text-[15px] font-medium">{title}</p>
         <p className="mt-1 text-[13px] text-muted max-w-xs">{body}</p>
         {action && <button onClick={action.onClick} className="mt-4 min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium flex items-center gap-2"><Upload size={15} /> {action.label}</button>}

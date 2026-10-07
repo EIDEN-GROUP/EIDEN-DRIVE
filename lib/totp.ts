@@ -40,6 +40,6 @@ export function verifyTotp(secret: string, token: string, now = Date.now()): boo
   return false;
 }
 
-export function otpauthUri(secret: string, account: string, issuer = "Eiden"): string {
+export function otpauthUri(secret: string, account: string, issuer = "Eiden Drive"): string {
   return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(account)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
 }

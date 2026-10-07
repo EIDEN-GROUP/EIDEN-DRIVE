@@ -5,6 +5,8 @@ import { Search, Pencil, Trash2, X, User as UserIcon } from "lucide-react";
 import { toast } from "@/components/ui/Toast";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import InviteMember from "@/components/users/InviteMember";
+import Select from "@/components/ui/Select";
+import { Kpi, KpiRow, PageHead } from "@/components/dash/Dash";
 
 export interface DirectoryUser {
   id: string; username: string; role: string; department_tag: string | null;
@@ -58,43 +60,36 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
 
   return (
     <section className="px-1 pt-1">
-      <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
-        <div>
-          <h1 className="page-title">All Users <span className="ml-1 align-middle text-[12px] font-normal text-brand bg-tint rounded-full px-2 py-0.5">{rows.length} user{rows.length === 1 ? "" : "s"}</span></h1>
-          <p className="text-sm text-muted mt-1">Accounts are invite-only; tags are set by managers and admins.</p>
-        </div>
-        {canInvite && <InviteMember isAdmin={isAdmin} depts={depts} />}
-      </div>
+      <PageHead title="All Users" subtitle="Accounts are invite-only; department tags are set by managers and admins."
+        actions={canInvite ? <InviteMember isAdmin={isAdmin} depts={depts} /> : undefined} />
 
-      <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-2 mb-3">
+      <KpiRow>
+        <Kpi label="People" value={rows.length} hint="with an account" />
+        <Kpi label="Admins" value={rows.filter((u) => u.role === "admin").length} tone="brand" />
+        <Kpi label="Managers" value={rows.filter((u) => u.role === "manager").length} />
+        <Kpi label="Members" value={rows.filter((u) => u.role === "member").length} />
+        <Kpi label="Active · 30 days" value={rows.filter((u) => activeSince(u.last_sign_in_at)).length} tone="good" hint="signed in recently" />
+        <Kpi label="No department" value={rows.filter((u) => !u.department_tag).length} tone={rows.some((u) => !u.department_tag) ? "warn" : "default"} hint="untagged people" />
+      </KpiRow>
+
+      <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-2.5 mb-4">
         <div className="relative">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search users…"
-            aria-label="Search users" className={`${input} w-full pl-9`} />
+          <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people…" aria-label="Search users" className={`${input} w-full pl-10`} />
         </div>
-        <select value={dept} onChange={(e) => setDept(e.target.value)} aria-label="Filter by department" className={input}>
-          <option value="">All Departments</option>
-          {depts.map((d) => <option key={d} value={d}>{d}</option>)}
-          <option value="__none">No department</option>
-        </select>
-        <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="Filter by role" className={input}>
-          <option value="">All Roles</option>
-          <option value="admin">admin</option>
-          <option value="manager">manager</option>
-          <option value="member">member</option>
-        </select>
-        <select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status" className={input}>
-          <option value="">All Statuses</option>
-          <option value="active">Active</option>
-          <option value="inactive">Inactive</option>
-        </select>
+        <Select label="Filter by department" value={dept} onChange={setDept} placeholder="All departments"
+          options={[{ value: "", label: "All departments" }, ...depts.map((d) => ({ value: d, label: d })), { value: "__none", label: "No department" }]} />
+        <Select label="Filter by role" value={role} onChange={setRole} placeholder="All roles"
+          options={[{ value: "", label: "All roles" }, { value: "admin", label: "Admin" }, { value: "manager", label: "Manager" }, { value: "member", label: "Member" }]} />
+        <Select label="Filter by status" value={status} onChange={setStatus} placeholder="All statuses"
+          options={[{ value: "", label: "All statuses" }, { value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }]} />
       </div>
 
-      <div className="card overflow-hidden">
+      <div className="rounded-2xl border border-line bg-surface overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-[13.5px] min-w-[720px]">
             <thead>
-              <tr className="bg-head text-left text-[12px] text-muted font-medium">
+              <tr className="bg-soft text-left text-[13.5px] text-ink/80 font-normal">
                 <th className="px-4 h-11 font-medium">User</th>
                 <th className="px-3 h-11 font-medium">Department</th>
                 <th className="px-3 h-11 font-medium">Role</th>

@@ -81,7 +81,12 @@ Split card (`rounded-[32px]`, art panel `rounded-[22px]`, `#E6D7D4`), logo tile,
 * No visual (screenshot) comparison was run against the reference; dimensions were derived from the images by measurement/estimation. Expect small spacing differences — adjust the tokens above rather than the components.
 * Logged-in screens need Supabase env + data; the login page, build, type-check and unit/live tests were run (see `02-bugfix-log.md`).
 
-## 6. Brand: logo + name (added after first review)
-* **Name** is just **Eiden** everywhere users see it: page title, sidebar, login, manifest (`name`/`short_name`), logo alt text, authenticator issuer, error pages, promo card. (Internal identifiers — repo name, `package.json`, IndexedDB/cache keys — are unchanged on purpose.)
-* **Logo** replaced entirely. New mark: a white **E** built from three rounded bars on a violet gradient tile; the middle bar is shorter and lighter (a file-tab rhythm) with a small amber node. Source of truth: `public/logo.svg`. Rendered PNGs: `public/logo.png` (512), `public/icons/icon-192.png`, `icon-512.png`, `apple-touch-icon.png`. The old monogram files were overwritten.
-* Login art panel and mobile header show the logo directly (the old orange tile was removed). `manifest.json` now points at real icons (the previous `/icons/*` 404 in the dev log is gone) with `theme_color #5B3FD0`.
+## 6. Brand: logo + name (current)
+* **Name:** **Eiden Drive** (page title, sidebar, login, manifest, logo alt text, authenticator issuer, error pages).
+* **Logo:** the supplied hand-drawn artwork — three stacked sheets forming an "E" (notch on the top sheet) with the chunky "Eiden / Drive" lettering — **traced into real vector paths** (no raster in the app).
+  * `public/logo.svg` / `logo-dark.svg` — the mark in ink `#533FAF` / light violet `#A99BFF`; `Logo` renders both and CSS swaps them by theme (no flash, no JS).
+  * `public/logo-full.svg` — the official lockup (mark + lettering), used on the sign-in art panel.
+  * `public/favicon.svg` (adapts to the OS dark mode), `favicon.ico` (16/32/48), `icons/icon-192.png`, `icon-512.png`, `apple-touch-icon.png`, `maskable-512.png` (mark on a soft lavender tile), `manifest.json` (name/short_name "Eiden Drive", theme `#533FAF`).
+* **Sidebar:** mark + stacked "Eiden / Drive" in **Fredoka** (the rounded display face that matches the lettering; replaces Comfortaa); collapsed rail shows the mark only.
+* The previous "E on a violet tile" kit (`public/logo/*`, old `icons/*`, favicons, PNG logos) was **deleted** — nothing references it.
+

@@ -46,8 +46,10 @@ describe("API contracts (anonymous)", () => {
   });
   it("serves PWA + brand assets publicly", async () => {
     expect((await get("/manifest.json")).status).toBe(200);
-    expect((await get("/logo.png")).status).toBe(200);
     expect((await get("/logo.svg")).status).toBe(200);
+    expect((await get("/logo-dark.svg")).status).toBe(200);
+    expect((await get("/favicon.svg")).status).toBe(200);
+    expect((await get("/icons/icon-192.png")).status).toBe(200);
     expect((await get("/sw.js")).status).toBe(200);
   });
 });

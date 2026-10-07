@@ -242,10 +242,9 @@ export default function LoginPage() {
         className="w-full max-w-[1020px] grid lg:grid-cols-2 rounded-[32px] bg-surface p-3.5 shadow-[0_30px_80px_-30px_rgba(40,20,90,.35)]">
         {/* Art panel */}
         <div className="relative hidden lg:block overflow-hidden rounded-[22px] bg-[#e6d7d4] min-h-[600px]" aria-hidden="true">
-          <div className="absolute left-12 top-12 drop-shadow-[0_8px_16px_rgba(67,40,184,.25)]"><Logo size={72} /></div>
-          <div className="absolute left-12 top-[44%] text-[var(--login)]">
-            <p className="font-brand text-[64px] leading-none font-semibold tracking-tight">Eiden</p>
-            <p className="font-brand text-[32px] leading-tight mt-1">Your files, one drive.</p>
+          <div className="absolute left-12 top-10">
+            <Logo full size={290} />
+            <p className="font-brand text-[26px] leading-tight mt-4 text-[var(--login)]">Your files, one drive.</p>
           </div>
           <svg className="absolute inset-x-0 bottom-0 w-full" viewBox="0 0 480 300" preserveAspectRatio="none" height="300">
             <defs>

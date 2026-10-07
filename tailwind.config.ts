@@ -29,7 +29,7 @@ const config: Config = {
       fontFamily: {
         body: ["var(--font-poppins)", "system-ui", "sans-serif"],
         display: ["var(--font-poppins)", "system-ui", "sans-serif"],
-        brand: ["var(--font-comfortaa)", "var(--font-poppins)", "sans-serif"],
+        brand: ["var(--font-fredoka)", "var(--font-poppins)", "sans-serif"],
         material: ["var(--font-roboto)", "system-ui", "sans-serif"]
       },
       borderRadius: { "2xl": "1rem", full: "9999px" },

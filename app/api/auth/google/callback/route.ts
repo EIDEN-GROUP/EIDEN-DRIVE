@@ -84,7 +84,7 @@ export async function GET(req: Request) {
 
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Eiden — drive connected</title>
+<title>Eiden Drive — drive connected</title>
 <style>body{font-family:system-ui;background:#f4f4f7;color:#2b2b36;display:grid;place-items:center;min-height:100vh;margin:0}
 .card{max-width:640px;background:#fff;border:1px solid #e8e8ef;padding:28px;border-radius:16px}
 .ok{color:#15803d}button{min-height:44px;padding:0 20px;border-radius:12px;background:#5b3fd0;color:#fff;border:0}</style></head><body><div class="card">

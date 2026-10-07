@@ -1,308 +1,253 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Plus, X, CalendarPlus, Check, Trash2, FolderClosed } from "lucide-react";
-import { toast } from "@/components/ui/Toast";
-import type { PlanRow } from "@/app/api/plans/route";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, ChevronLeft, ChevronRight, FileText, Plus, Search, X } from "lucide-react";
+import MiniMonth from "@/components/calendar/MiniMonth";
+import TimeGrid from "@/components/calendar/TimeGrid";
+import MonthGrid from "@/components/calendar/MonthGrid";
+import MultiMonth from "@/components/calendar/MultiMonth";
+import PlanModal, { draftFrom, type Draft } from "@/components/calendar/PlanModal";
+import { AgendaItem } from "@/components/calendar/PlanBits";
+import { addDays, dayKey, parseKey, startOfWeek, toMin, type Plan, type View } from "@/components/calendar/cal";
 
-interface CalFile { id: string; name: string; updated?: string; updated_at?: string; folder?: string | null }
-interface Folder { id: string; name: string }
+interface CalFile { id: string; updated?: string; updated_at?: string; mime?: string }
+const VIEWS: { id: View; label: string; this: string }[] = [
+  { id: "day", label: "Day", this: "Today" },
+  { id: "week", label: "Week", this: "This Week" },
+  { id: "month", label: "Month", this: "This Month" },
+  { id: "quarter", label: "Quarter", this: "This Quarter" },
+  { id: "year", label: "Year", this: "This Year" }
+];
+const pad = (n: number) => String(n).padStart(2, "0");
+const ddmmyyyy = (d: Date) => `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+const byTime = (a: Plan, b: Plan) => (toMin(a.plan_time) ?? -1) - (toMin(b.plan_time) ?? -1);
 
-type Mode = "month" | "week" | "day";
-const PRIORITIES = ["low", "normal", "high"] as const;
-
-const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const parseKey = (k: string) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
-
-// Calendar: every file by the day it landed/changed, plus personal plans.
-// Files use file_index.updated_at ("added or last changed" — honest label, the
-// index doesn't keep a separate birth date). Plan mode overlays your own plans.
-export default function CalendarPage() {
-  const [mode, setMode] = useState<Mode>("month");
-  const [planMode, setPlanMode] = useState(false);
+// Calendar: schedule view in the style of the reference — mini month + agenda on the left,
+// Day / Week / Month / Quarter / Year on the right. Data: personal plans (/api/plans) and,
+// optionally, file activity (file_index.updated_at = "added or last changed").
+export default function CalendarClient() {
+  const [view, setView] = useState<View>("week");
   const [cursor, setCursor] = useState(() => dayKey(new Date()));
-  const [files, setFiles] = useState<CalFile[]>([]);
-  const [folders, setFolders] = useState<Folder[]>([]);
-  const [plans, setPlans] = useState<PlanRow[]>([]);
-  const [folderFilter, setFolderFilter] = useState<string | null>(null);
-  const [dayOpen, setDayOpen] = useState<string | null>(null);
+  const [mini, setMini] = useState(() => new Date());
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [folders, setFolders] = useState<{ id: string; name: string }[]>([]);
+  const [files, setFiles] = useState<CalFile[] | null>(null);
+  const [showFiles, setShowFiles] = useState(false);
+  const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [today, setToday] = useState(() => new Date());
 
+  const cur = parseKey(cursor);
+  const todayKey = dayKey(today);
+
+  const loadPlans = useCallback(async () => {
+    const r = await fetch("/api/plans").then((x) => x.json().catch(() => ({})));
+    setPlans(r.results ?? []);
+  }, []);
   useEffect(() => {
     let dead = false;
     (async () => {
-      const [fr, dr, pr] = await Promise.all([
+      const [fr, pr] = await Promise.all([
         fetch("/api/folders").then((r) => r.json().catch(() => ({}))),
-        fetch("/api/drive?q=&limit=200").then((r) => r.json().catch(() => ({}))),
         fetch("/api/plans").then((r) => r.json().catch(() => ({})))
       ]);
       if (dead) return;
       setFolders(fr.results ?? []);
-      setFiles((dr.results ?? []).filter((f: CalFile & { mime?: string }) => !f.id.startsWith("g:") && f.mime !== "application/vnd.google-apps.folder"));
       setPlans(pr.results ?? []);
       setLoading(false);
     })();
-    return () => { dead = true; };
+    // Phones get the Day view (a 7-column grid doesn't fit); roll "today" over at midnight.
+    if (window.matchMedia("(max-width: 767px)").matches) setView("day");
+    const t = setInterval(() => setToday(new Date()), 60_000);
+    return () => { dead = true; clearInterval(t); };
   }, []);
+  useEffect(() => {
+    if (!showFiles || files !== null) return;
+    fetch("/api/drive?q=&limit=100").then((r) => r.json().catch(() => ({}))).then((d) => {
+      setFiles(((d.results ?? []) as CalFile[]).filter((f) => !f.id.startsWith("g:") && f.mime !== "application/vnd.google-apps.folder"));
+    }).catch(() => setFiles([]));
+  }, [showFiles, files]);
+  useEffect(() => { setMini(parseKey(cursor)); }, [cursor]);
 
   const folderName = useMemo(() => new Map(folders.map((f) => [f.id, f.name])), [folders]);
-  const visibleFiles = useMemo(
-    () => folderFilter ? files.filter((f) => f.folder === folderFilter) : files,
-    [files, folderFilter]
-  );
-  const byDay = useMemo(() => {
-    const m = new Map<string, CalFile[]>();
-    for (const f of visibleFiles) {
-      const u = f.updated_at ?? f.updated;
-      if (!u) continue;
-      const k = dayKey(new Date(u));
-      if (!m.has(k)) m.set(k, []);
-      m.get(k)!.push(f);
-    }
-    return m;
-  }, [visibleFiles]);
+  const needle = q.trim().toLowerCase();
+  const visible = useMemo(() => {
+    if (!needle) return plans;
+    return plans.filter((p) => `${p.title} ${p.detail ?? ""} ${p.plan_date} ${p.priority} ${p.folder ? folderName.get(p.folder) ?? "" : ""}`.toLowerCase().includes(needle));
+  }, [plans, needle, folderName]);
   const plansByDay = useMemo(() => {
-    const m = new Map<string, PlanRow[]>();
-    for (const p of plans) {
-      if (!m.has(p.plan_date)) m.set(p.plan_date, []);
-      m.get(p.plan_date)!.push(p);
-    }
+    const m = new Map<string, Plan[]>();
+    for (const p of visible) { if (!m.has(p.plan_date)) m.set(p.plan_date, []); m.get(p.plan_date)!.push(p); }
     return m;
-  }, [plans]);
+  }, [visible]);
+  const counts = useMemo(() => new Map([...plansByDay].map(([k, v]) => [k, v.length])), [plansByDay]);
+  const fileCounts = useMemo(() => {
+    if (!showFiles || !files) return undefined;
+    const m = new Map<string, number>();
+    for (const f of files) { const u = f.updated_at ?? f.updated; if (!u) continue; const k = dayKey(new Date(u)); m.set(k, (m.get(k) ?? 0) + 1); }
+    return m;
+  }, [files, showFiles]);
 
-  const cur = parseKey(cursor);
-  const monthCells = useMemo(() => {
-    const first = new Date(cur.getFullYear(), cur.getMonth(), 1);
-    const start = new Date(first);
-    start.setDate(start.getDate() - ((first.getDay() + 6) % 7)); // Monday-first
-    return Array.from({ length: 42 }, (_, i) => {
-      const d = new Date(start);
-      d.setDate(start.getDate() + i);
-      return d;
-    });
-  }, [cur]);
-  const weekCells = useMemo(() => {
-    const s = new Date(cur);
-    s.setDate(s.getDate() - ((cur.getDay() + 6) % 7));
-    return Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(s);
-      d.setDate(s.getDate() + i);
-      return d;
-    });
-  }, [cur]);
-
+  // ── navigation ──
   function step(dir: 1 | -1) {
     const d = new Date(cur);
-    if (mode === "month") d.setMonth(d.getMonth() + dir);
-    else if (mode === "week") d.setDate(d.getDate() + 7 * dir);
-    else d.setDate(d.getDate() + dir);
+    if (view === "day") d.setDate(d.getDate() + dir);
+    else if (view === "week") d.setDate(d.getDate() + 7 * dir);
+    else if (view === "month") d.setMonth(d.getMonth() + dir);
+    else if (view === "quarter") d.setMonth(d.getMonth() + 3 * dir);
+    else d.setFullYear(d.getFullYear() + dir);
     setCursor(dayKey(d));
   }
-  const title = mode === "month"
-    ? cur.toLocaleDateString("en-GB", { month: "long", year: "numeric" })
-    : mode === "week"
-      ? `Week of ${weekCells[0].toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`
-      : cur.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const goDay = (d: Date) => { setCursor(dayKey(d)); setView("day"); };
+  const goMonth = (d: Date) => { setCursor(dayKey(new Date(d.getFullYear(), d.getMonth(), 1))); setView("month"); };
+  const qStart = Math.floor(cur.getMonth() / 3) * 3;
+  const title = view === "day" ? cur.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })
+    : view === "year" ? String(cur.getFullYear())
+    : view === "quarter" ? `Q${qStart / 3 + 1} ${cur.getFullYear()}`
+    : cur.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  const weekDays = useMemo(() => { const s = startOfWeek(cur); return Array.from({ length: 7 }, (_, i) => addDays(s, i)); }, [cursor]); // eslint-disable-line react-hooks/exhaustive-deps
+  const sub = (() => {
+    const isNow = (a: Date, b: Date) => view === "week" ? dayKey(startOfWeek(a)) === dayKey(startOfWeek(b))
+      : view === "day" ? dayKey(a) === dayKey(b)
+      : view === "month" ? a.getMonth() === b.getMonth() && a.getFullYear() === b.getFullYear()
+      : view === "quarter" ? a.getFullYear() === b.getFullYear() && Math.floor(a.getMonth() / 3) === Math.floor(b.getMonth() / 3)
+      : a.getFullYear() === b.getFullYear();
+    if (isNow(cur, today)) return VIEWS.find((v) => v.id === view)!.this;
+    if (view === "week") return `${weekDays[0].toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – ${weekDays[6].toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`;
+    if (view === "day") return cur.toLocaleDateString("en-GB", { weekday: "long" });
+    return title;
+  })();
 
-  async function reloadPlans() {
-    const pr = await fetch("/api/plans").then((r) => r.json().catch(() => ({})));
-    setPlans(pr.results ?? []);
+  // ── plan actions ──
+  const newPlan = (date = cursor, time = "") => setDraft({ title: "", date, time, priority: "normal", folder: "", detail: "" });
+  async function toggle(p: Plan) {
+    setPlans((prev) => prev.map((x) => (x.id === p.id ? { ...x, done: !x.done } : x)));
+    const r = await fetch("/api/plans", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: p.id, done: !p.done }) });
+    if (!r.ok) loadPlans();
   }
 
-  const cells = mode === "month" ? monthCells : mode === "week" ? weekCells : [cur];
-  const todayK = dayKey(new Date());
+  // ── agenda groups (left panel) ──
+  const agenda = useMemo(() => {
+    const out: { key: string; head: string; sub: string; tone?: "today" | "late"; items: Plan[] }[] = [];
+    if (needle) {
+      const sorted = [...visible].sort((a, b) => a.plan_date.localeCompare(b.plan_date) || byTime(a, b)).slice(0, 40);
+      const m = new Map<string, Plan[]>();
+      for (const p of sorted) { if (!m.has(p.plan_date)) m.set(p.plan_date, []); m.get(p.plan_date)!.push(p); }
+      for (const [k, items] of m) { const d = parseKey(k); out.push({ key: k, head: d.toLocaleDateString("en-GB", { weekday: "long" }), sub: ddmmyyyy(d), items }); }
+      return out;
+    }
+    const late = plans.filter((p) => !p.done && p.plan_date < todayKey).sort((a, b) => a.plan_date.localeCompare(b.plan_date) || byTime(a, b));
+    if (late.length) out.push({ key: "late", head: "OVERDUE", sub: `${late.length} plan${late.length === 1 ? "" : "s"}`, tone: "late", items: late.slice(0, 5) });
+    for (let i = 0; i < 14 && out.length < 6; i++) {
+      const d = addDays(today, i), k = dayKey(d);
+      const items = [...(plansByDay.get(k) ?? [])].sort(byTime);
+      if (!items.length) continue;
+      out.push({ key: k, head: i === 0 ? "TODAY" : i === 1 ? "TOMORROW" : d.toLocaleDateString("en-GB", { weekday: "long" }), sub: ddmmyyyy(d), tone: i === 0 ? "today" : undefined, items });
+    }
+    return out;
+  }, [needle, visible, plans, plansByDay, today, todayKey]);
+
+  const months = view === "quarter" ? [0, 1, 2].map((i) => new Date(cur.getFullYear(), qStart + i, 1))
+    : Array.from({ length: 12 }, (_, i) => new Date(cur.getFullYear(), i, 1));
+  const circle = "size-10 rounded-full grid place-items-center bg-tint text-brand hover:bg-brand hover:text-white transition-colors";
 
   return (
-    <section className="px-1 pt-1 max-w-6xl mx-auto">
-      <div className="flex flex-wrap items-center gap-2 mb-3">
-        <h1 className="page-title flex-1 min-w-[140px]">Calendar</h1>
-        <div role="group" aria-label="View" className="flex rounded-md overflow-hidden border border-line">
-          {(["month", "week", "day"] as Mode[]).map((m) => (
-            <button key={m} onClick={() => setMode(m)} aria-pressed={mode === m}
-              className={`min-h-[40px] px-3 text-[13px] capitalize ${mode === m ? "bg-tint text-brand font-medium" : "text-muted hover:bg-tint/60"}`}>{m}</button>
+    <section className="h-full min-h-[560px] flex rounded-2xl border border-line bg-surface overflow-hidden" aria-label="Calendar">
+      {/* ── Left: mini month + agenda ── */}
+      <aside className="hidden lg:flex w-[336px] xl:w-[364px] shrink-0 flex-col bg-soft border-r border-line overflow-y-auto" aria-label="Mini calendar and agenda">
+        <div className="px-5 pt-5 pb-3">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-[28px] leading-none font-medium">
+              {mini.toLocaleDateString("en-GB", { month: "long" })}
+              {mini.getFullYear() !== today.getFullYear() && <span className="ml-2 text-[15px] text-muted font-normal">{mini.getFullYear()}</span>}
+            </h2>
+            <div className="flex gap-2">
+              <button className={circle} aria-label="Previous month" onClick={() => setMini(new Date(mini.getFullYear(), mini.getMonth() - 1, 1))}><ChevronLeft size={18} /></button>
+              <button className={circle} aria-label="Next month" onClick={() => setMini(new Date(mini.getFullYear(), mini.getMonth() + 1, 1))}><ChevronRight size={18} /></button>
+            </div>
+          </div>
+          <MiniMonth big month={mini} selected={cur} today={today} counts={counts} onPick={(d) => { setCursor(dayKey(d)); if (view === "year" || view === "quarter") setView("week"); }} />
+        </div>
+        <div className="mx-5 border-t border-line" />
+        <div className="px-5 py-3 flex-1">
+          {loading && <div className="space-y-3" aria-label="Loading plans"><div className="skel h-14 w-full" /><div className="skel h-14 w-full" /></div>}
+          {!loading && agenda.length === 0 && (
+            <div className="py-8 text-center">
+              <p className="text-[14px] text-muted">{needle ? "No plans match your search." : "Nothing planned for the next two weeks."}</p>
+              {!needle && <button onClick={() => newPlan(todayKey)} className="mt-3 min-h-[44px] px-4 rounded-lg bg-brand text-white text-[13.5px] font-medium inline-flex items-center gap-1.5"><Plus size={16} /> New plan</button>}
+            </div>
+          )}
+          {agenda.map((g) => (
+            <div key={g.key} className="mb-2">
+              <p className="flex items-baseline justify-between text-[13px] pt-1.5 pb-0.5">
+                <span><span className={`font-medium tracking-wide ${g.tone === "today" ? "text-brand" : g.tone === "late" ? "text-danger" : "text-ink"}`}>{g.head}</span>
+                  <span className={`ml-2 ${g.tone === "today" ? "text-brand" : "text-muted"}`}>{g.sub}</span></span>
+                {g.tone !== "late" && <span className="text-[11.5px] text-muted tabular-nums">{g.items.length} plan{g.items.length === 1 ? "" : "s"}</span>}
+              </p>
+              <div className="divide-y divide-line/60">
+                {g.items.map((p) => (
+                  <AgendaItem key={p.id} plan={p} folder={p.folder ? folderName.get(p.folder) : undefined}
+                    onOpen={() => setDraft(draftFrom(p))} onToggle={() => toggle(p)} />
+                ))}
+              </div>
+            </div>
           ))}
         </div>
-        <label className="flex items-center gap-2 min-h-[40px] px-2 text-[13px] cursor-pointer select-none">
-          <button role="switch" aria-checked={planMode} aria-label="Plan mode" onClick={() => setPlanMode((v) => !v)}
-            className={`w-11 h-6 rounded-full p-0.5 transition-colors ${planMode ? "bg-brand" : "bg-line"}`}>
-            <span className={`block size-5 rounded-full bg-white shadow transition-transform ${planMode ? "translate-x-5" : ""}`} />
+        <div className="sticky bottom-0 bg-soft border-t border-line px-5 py-3 flex items-center gap-3">
+          <button onClick={() => newPlan()} className="flex-1 min-h-[44px] rounded-lg bg-brand text-white text-[14px] font-medium flex items-center justify-center gap-1.5 hover:brightness-110 transition">
+            <Plus size={17} /> New plan
           </button>
-          Plan mode
-        </label>
-      </div>
-
-      <div className="flex items-center gap-2 mb-3">
-        <button onClick={() => step(-1)} aria-label="Previous" className="size-11 grid place-items-center rounded-md hover:bg-tint"><ChevronLeft size={18} /></button>
-        <p className="text-[14px] font-medium flex-1 text-center">{title}</p>
-        <button onClick={() => step(1)} aria-label="Next" className="size-11 grid place-items-center rounded-md hover:bg-tint"><ChevronRight size={18} /></button>
-        <button onClick={() => setCursor(dayKey(new Date()))} className="min-h-[44px] px-3 rounded-md border border-line text-[13px] hover:bg-tint">Today</button>
-      </div>
-
-      <div className="flex gap-1.5 flex-wrap mb-3" role="group" aria-label="Folder filter">
-        <button onClick={() => setFolderFilter(null)} aria-pressed={folderFilter === null}
-          className={`min-h-[40px] px-3 rounded-full text-[12.5px] border ${folderFilter === null ? "bg-brand text-white border-brand" : "border-line hover:bg-tint"}`}>All folders</button>
-        {folders.map((f) => (
-          <button key={f.id} onClick={() => setFolderFilter((v) => v === f.id ? null : f.id)} aria-pressed={folderFilter === f.id}
-            className={`min-h-[40px] px-3 rounded-full text-[12.5px] border flex items-center gap-1 ${folderFilter === f.id ? "bg-brand text-white border-brand" : "border-line hover:bg-tint"}`}>
-            <FolderClosed size={12} /> {f.name}
+          <button onClick={() => setShowFiles((v) => !v)} aria-pressed={showFiles} title="Overlay days with added / changed files"
+            className={`min-h-[44px] px-3 rounded-lg border text-[13px] flex items-center gap-1.5 transition-colors ${showFiles ? "border-brand bg-tint text-brand font-medium" : "border-line bg-surface hover:bg-tint"}`}>
+            <FileText size={15} /> Files
           </button>
-        ))}
-      </div>
-
-      {loading ? (
-        <div className="grid grid-cols-7 gap-1.5" aria-label="Loading calendar">
-          {Array.from({ length: 14 }, (_, i) => <div key={i} className="skel h-20" />)}
         </div>
-      ) : (
-        <>
-          <div className={`grid gap-1.5 ${mode === "day" ? "grid-cols-1" : "grid-cols-7"}`}>
-            {(mode === "day" ? [] : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]).map((d) => (
-              <p key={d} className="text-center text-[11px] text-muted font-medium py-1">{d}</p>
-            ))}
-            {cells.map((d) => {
-              const k = dayKey(d);
-              const fs = byDay.get(k) ?? [];
-              const ps = plansByDay.get(k) ?? [];
-              const inMonth = mode !== "month" || d.getMonth() === cur.getMonth();
-              return (
-                <button key={k + mode} onClick={() => setDayOpen(k)}
-                  className={`min-h-[64px] rounded-lg border p-1.5 text-left align-top hover:border-brand transition-colors
-                    ${k === todayK ? "border-brand ring-1 ring-brand" : "border-line"} ${inMonth ? "bg-surface" : "opacity-40"}`}>
-                  <span className={`text-[12px] font-medium ${k === todayK ? "text-brand" : ""}`}>{d.getDate()}</span>
-                  {(fs.length > 0 || (planMode && ps.length > 0)) && (
-                    <span className="mt-1 flex gap-1 flex-wrap">
-                      {fs.length > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-tint text-brand font-medium">{fs.length} file{fs.length === 1 ? "" : "s"}</span>}
-                      {planMode && ps.length > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">{ps.length} plan{ps.length === 1 ? "" : "s"}</span>}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-          <p className="mt-3 text-[12px] text-muted">File days use “added or last changed”. Click any day for details{planMode ? " and to add plans" : ""}.</p>
-        </>
-      )}
+      </aside>
 
-      {dayOpen && (
-        <DayModal dateKey={dayOpen} files={byDay.get(dayOpen) ?? []} plans={plansByDay.get(dayOpen) ?? []}
-          folders={folders} folderName={folderName} planMode={planMode}
-          onClose={() => setDayOpen(null)} onChanged={reloadPlans} />
-      )}
+      {/* ── Right: header + view ── */}
+      <div className="flex-1 min-w-0 flex flex-col p-4 sm:px-6 sm:py-5 gap-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+          <h1 className="text-[28px] sm:text-[32px] leading-none font-medium tracking-tight mr-1">{title}</h1>
+          <div className="flex items-center gap-2">
+            <button className={circle} aria-label="Previous" onClick={() => step(-1)}><ChevronLeft size={18} /></button>
+            <button onClick={() => setCursor(dayKey(new Date()))} className="min-h-[42px] min-w-[132px] px-4 rounded-lg border border-line bg-surface text-[14.5px] hover:bg-tint transition-colors">
+              {VIEWS.find((v) => v.id === view)!.this}
+            </button>
+            <button className={circle} aria-label="Next" onClick={() => step(1)}><ChevronRight size={18} /></button>
+          </div>
+          <div role="group" aria-label="Calendar view" className="flex rounded-lg border border-line overflow-hidden bg-surface">
+            {VIEWS.map((v) => (
+              <button key={v.id} onClick={() => setView(v.id)} aria-pressed={view === v.id}
+                className={`min-h-[42px] px-3 sm:px-5 text-[14px] flex items-center gap-1.5 border-l border-line first:border-l-0 transition-colors ${view === v.id ? "bg-tint text-brand font-medium" : "hover:bg-tint/60"}`}>
+                {view === v.id && <Check size={14} strokeWidth={2.5} />}{v.label}
+              </button>
+            ))}
+          </div>
+          <div className="relative flex-1 min-w-[180px] max-w-[300px] ml-auto">
+            <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search date, event, etc…" aria-label="Search plans"
+              className="w-full min-h-[42px] pl-10 pr-9 rounded-lg border border-line bg-surface text-[13.5px] placeholder:text-muted focus:border-brand focus:outline-none" />
+            {q && <button onClick={() => setQ("")} aria-label="Clear search" className="absolute right-1.5 top-1/2 -translate-y-1/2 size-8 grid place-items-center rounded-md hover:bg-tint text-muted"><X size={15} /></button>}
+          </div>
+          <button onClick={() => newPlan()} aria-label="New plan" className="lg:hidden size-[42px] rounded-lg bg-brand text-white grid place-items-center"><Plus size={18} /></button>
+        </div>
+
+        <h2 className="text-[20px] font-medium -mb-1">{sub}</h2>
+
+        {loading ? (
+          <div className="flex-1 skel rounded-2xl" aria-label="Loading calendar" />
+        ) : view === "week" || view === "day" ? (
+          <TimeGrid key={view + (view === "day" ? cursor : "")} days={view === "week" ? weekDays : [cur]} todayKey={todayKey} plansByDay={plansByDay} fileCounts={fileCounts}
+            onCreate={(k, t) => newPlan(k, t)} onEdit={(p) => setDraft(draftFrom(p))} onDayClick={goDay} />
+        ) : view === "month" ? (
+          <MonthGrid month={cur} todayKey={todayKey} plansByDay={plansByDay} fileCounts={fileCounts}
+            onCreate={(k) => newPlan(k)} onEdit={(p) => setDraft(draftFrom(p))} onDayClick={goDay} />
+        ) : (
+          <MultiMonth months={months} selected={cur} today={today} counts={counts} onPickDay={goDay} onPickMonth={goMonth} />
+        )}
+      </div>
+
+      {draft && <PlanModal key={draft.id ?? "new"} draft={draft} folders={folders} onClose={() => setDraft(null)} onSaved={loadPlans} />}
     </section>
-  );
-}
-
-function DayModal({ dateKey, files, plans, folders, folderName, planMode, onClose, onChanged }: {
-  dateKey: string; files: CalFile[]; plans: PlanRow[];
-  folders: Folder[]; folderName: Map<string, string>; planMode: boolean;
-  onClose: () => void; onChanged: () => void;
-}) {
-  const [form, setForm] = useState(false);
-  const [title, setTitle] = useState("");
-  const [time, setTime] = useState("");
-  const [priority, setPriority] = useState<(typeof PRIORITIES)[number]>("normal");
-  const [folder, setFolder] = useState("");
-  const [detail, setDetail] = useState("");
-  const [busy, setBusy] = useState(false);
-  const label = parseKey(dateKey).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-
-  async function addPlan() {
-    if (!title.trim()) return;
-    setBusy(true);
-    const r = await fetch("/api/plans", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: title.trim(), detail: detail.trim() || null, plan_date: dateKey, plan_time: time || null, priority, folder: folder || null })
-    });
-    const d = await r.json().catch(() => ({}));
-    setBusy(false);
-    if (!r.ok) { toast({ text: d.error ?? "Couldn't add plan.", tone: "err" }); return; }
-    setTitle(""); setTime(""); setDetail(""); setFolder(""); setPriority("normal"); setForm(false);
-    toast({ text: "Plan added.", tone: "ok" });
-    onChanged();
-  }
-
-  async function toggleDone(p: PlanRow) {
-    await fetch("/api/plans", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: p.id, done: !p.done }) });
-    onChanged();
-  }
-  async function delPlan(p: PlanRow) {
-    await fetch("/api/plans", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: p.id }) });
-    onChanged();
-  }
-
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={label}>
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="pop-in relative w-full max-w-md max-h-[85vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
-        <div className="flex items-center px-4 min-h-[56px] border-b border-line">
-          <p className="text-[14px] font-medium flex-1">{label}</p>
-          <button onClick={onClose} aria-label="Close day details" className="size-11 grid place-items-center rounded-md hover:bg-tint"><X size={18} /></button>
-        </div>
-        <div className="flex-1 overflow-auto p-4 space-y-4">
-          <div>
-            <p className="text-[12px] text-muted font-medium mb-1.5">{files.length} file{files.length === 1 ? "" : "s"} added / changed</p>
-            {files.length === 0 && <p className="text-[13px] text-muted">Nothing landed this day.</p>}
-            {files.slice(0, 30).map((f) => (
-              <div key={f.id} className="flex items-center gap-2 py-1.5 border-b border-line/60 text-[13px]">
-                <span className="truncate flex-1">{f.name}</span>
-                {f.folder && folderName.get(f.folder) && <span className="text-[11px] text-muted shrink-0">{folderName.get(f.folder)}</span>}
-              </div>
-            ))}
-          </div>
-          <div>
-            <div className="flex items-center mb-1.5">
-              <p className="text-[12px] text-muted font-medium flex-1">{plans.length} plan{plans.length === 1 ? "" : "s"}</p>
-              {planMode && !form && (
-                <button onClick={() => setForm(true)} className="min-h-[40px] px-2.5 text-[12.5px] text-brand font-medium flex items-center gap-1"><Plus size={14} /> Add plan</button>
-              )}
-            </div>
-            {plans.length === 0 && !form && <p className="text-[13px] text-muted">{planMode ? "No plans — add one." : "Turn on Plan mode to schedule something here."}</p>}
-            {plans.map((p) => (
-              <div key={p.id} className={`flex items-start gap-2 py-2 border-b border-line/60 ${p.done ? "opacity-55" : ""}`}>
-                <button onClick={() => toggleDone(p)} aria-label={p.done ? `Reopen ${p.title}` : `Mark ${p.title} done`}
-                  className={`mt-0.5 size-6 grid place-items-center rounded border shrink-0 ${p.done ? "bg-brand border-brand text-white" : "border-line"}`}>
-                  {p.done && <Check size={13} />}
-                </button>
-                <div className="flex-1 min-w-0">
-                  <p className={`text-[13.5px] font-medium ${p.done ? "line-through" : ""}`}>{p.title}</p>
-                  <p className="text-[11.5px] text-muted">
-                    {[p.plan_time, p.priority !== "normal" ? p.priority : null, p.folder ? folderName.get(p.folder) : null].filter(Boolean).join(" · ")}
-                  </p>
-                  {p.detail && <p className="text-[12.5px] text-ink/80 mt-0.5">{p.detail}</p>}
-                </div>
-                <button onClick={() => delPlan(p)} aria-label={`Delete ${p.title}`} className="size-9 grid place-items-center rounded-md hover:bg-tint text-muted shrink-0"><Trash2 size={14} /></button>
-              </div>
-            ))}
-            {form && (
-              <div className="mt-2 p-3 rounded-lg border border-line bg-soft space-y-2.5">
-                <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={160} placeholder="Plan title"
-                  aria-label="Plan title" className="w-full min-h-[44px] rounded-md border border-line bg-surface px-2.5 text-[13px]" />
-                <div className="flex gap-2">
-                  <input type="time" value={time} onChange={(e) => setTime(e.target.value)} aria-label="Time (optional)"
-                    className="min-h-[44px] rounded-md border border-line bg-surface px-2 text-[13px]" />
-                  <select value={priority} onChange={(e) => setPriority(e.target.value as (typeof PRIORITIES)[number])} aria-label="Priority"
-                    className="min-h-[44px] rounded-md border border-line bg-surface px-2 text-[13px]">
-                    {PRIORITIES.map((pr) => <option key={pr} value={pr}>{pr}</option>)}
-                  </select>
-                  <select value={folder} onChange={(e) => setFolder(e.target.value)} aria-label="Linked folder (optional)"
-                    className="min-h-[44px] flex-1 rounded-md border border-line bg-surface px-2 text-[13px] min-w-0">
-                    <option value="">No folder</option>
-                    {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-                  </select>
-                </div>
-                <textarea value={detail} onChange={(e) => setDetail(e.target.value)} maxLength={2000} rows={2} placeholder="Notes (optional)"
-                  aria-label="Plan notes" className="w-full rounded-md border border-line bg-surface px-2.5 py-2 text-[13px]" />
-                <div className="flex justify-end gap-2">
-                  <button onClick={() => setForm(false)} className="min-h-[44px] px-3 rounded-md border border-line text-[13px]">Cancel</button>
-                  <button onClick={addPlan} disabled={!title.trim() || busy}
-                    className="min-h-[44px] px-3 rounded-md bg-brand text-white text-[13px] font-medium disabled:opacity-50 flex items-center gap-1">
-                    <CalendarPlus size={14} /> {busy ? "Adding…" : "Add plan"}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
   );
 }

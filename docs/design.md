@@ -4,8 +4,8 @@
 > supplied by the owner (list view with context menu, grid view with details panel, file-picker
 > dialog, split-card sign-in), re-measured onto Next.js 14 + Tailwind. Supersedes
 > `docs/06-ui-ux-theme.md` and `design-system/Eiden-Drive/MASTER.md` (both now synced to this file).
-> Brand mark decision: the **violet E tile** (commit `00abc64`) is the logo; the old cream
-> monogram is retired. Brand: just **Eiden** everywhere users see it.
+> Brand mark decision: the **stacked-sheets "E" mark + "Eiden Drive" lettering** (vector, traced from the supplied artwork)
+> is the logo; the violet E tile and the cream monogram are retired. Brand name: **Eiden Drive**.
 
 ## 1. Color system
 
@@ -68,7 +68,7 @@ cream `#FEFFF8`, Inter/Anton/Besley. Grep guard: `tests` fail if these hexes app
 ## 2. Typography
 
 Loaded via `next/font` (`app/layout.tsx`, `display: swap`): **Poppins** 300–700
-(`--font-poppins`, `font-body` + `font-display`), **Comfortaa** 500–700 (`--font-comfortaa`,
+(`--font-poppins`, `font-body` + `font-display`), **Fredoka** 400–700 (`--font-fredoka`,
 `font-brand`, wordmark only), **Roboto** 400–500 (`--font-roboto`, `font-material`, login form).
 
 | Role | Spec |
@@ -122,11 +122,11 @@ after mount (password-manager extensions otherwise break hydration).
 
 ## 7. Logo
 
-Violet-gradient rounded tile, white **E** from three rounded bars (middle bar shorter +
-lighter, file-tab rhythm, amber node). Source: `public/logo.svg`; rendered:
-`public/logo.png` (512), `public/icons/icon-192.png`, `icon-512.png`, `apple-touch-icon.png`.
-Shown: sidebar 28 px, login 56 px, manifest/PWA. Clear space = bar height; min 16 px.
-Don't: recolor, stretch, add shadows, place on violet without the tile.
+The supplied hand-drawn mark (three stacked sheets forming an "E", notch on the top sheet) plus the "Eiden / Drive" lettering,
+traced to vector. Files: `public/logo.svg` + `logo-dark.svg` (mark), `logo-full.svg` (lockup), `favicon.svg`/`favicon.ico`,
+`icons/*` (PWA, apple-touch, maskable). Ink `#533FAF` on light, `#A99BFF` on dark; clear space = the height of one sheet; minimum 16 px.
+Sidebar: mark 38 px + stacked wordmark in Fredoka; collapsed rail: mark only; sign-in: full lockup on the beige panel.
+Don't: recolour outside the two inks, stretch, add shadows/outlines, or rebuild the lettering in another font for the lockup.
 
 ## 8. Iconography rule
 

@@ -16,8 +16,10 @@ const PUBLIC = [
   "/api/drive/webhook",        // x-goog-channel-token
   "/manifest.json",
   "/sw.js",
-  "/logo.png",
   "/logo.svg",
+  "/logo-dark.svg",
+  "/logo-full.svg",
+  "/favicon.svg",
   "/favicon.ico"
 ];
 const STATIC_EXT = /\.(?:png|jpe?g|svg|ico|webp|gif|css|js|map|json|txt|woff2?|ttf)$/i;

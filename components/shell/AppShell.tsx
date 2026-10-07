@@ -4,12 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   ChevronDown, Menu as MenuIcon, FolderClosed, Activity, ShieldCheck, KeyRound, Users, HardDrive,
-  Moon, Sun, ChevronsRight, ChevronsLeft, Bell, CircleCheck, CalendarDays, Zap, LogOut, X
+  Moon, Sun, ChevronsRight, ChevronsLeft, Bell, CircleCheck, CalendarDays, LogOut, X
 } from "lucide-react";
 import Logo from "../ui/Logo";
 import NotificationsPanel from "../notifications/NotificationsPanel";
 import ProfileModal from "../profile/ProfileModal";
 import { browserClient } from "@/lib/supabase-client";
+import { formatBytes } from "@/lib/files";
 
 export interface ShellUser { username: string; role: string; dept: string | null }
 
@@ -25,11 +26,12 @@ const NAV = [
 
 export default function AppShell({ user, children }: { user: ShellUser | null; children: ReactNode }) {
   const path = usePathname() ?? "/drive";
-  const [drawer, setDrawer] = useState(false);       // mobile sidebar
-  const [collapsed, setCollapsed] = useState(false); // desktop sidebar
+  const [drawer, setDrawer] = useState(false);              // phone: overlay drawer (< 768 px)
+  const [mode, setMode] = useState<"full" | "rail">("full"); // tablet/desktop: full ⇄ icon rail
   const [rail, setRail] = useState(true);
   const [dark, setDark] = useState(false);
   const [promo, setPromo] = useState(true);
+  const [health, setHealth] = useState<{ used: number; total: number; drives: number; agentOnline: boolean } | null>(null);
   const [userMenu, setUserMenu] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -49,12 +51,35 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
     return () => clearInterval(t);
   }, []);
 
+  // Live storage + agent status for the sidebar card (same endpoint as the Storage page; null = nothing connected).
+  useEffect(() => {
+    let dead = false;
+    const run = async () => {
+      try {
+        const r = await fetch("/api/storage");
+        if (!r.ok) return;
+        const d = await r.json();
+        const act = ((d.drives ?? []) as { status: string; used: number; total: number }[]).filter((x) => x.status === "active");
+        if (!dead) setHealth(act.length ? { used: act.reduce((a, x) => a + (x.used || 0), 0), total: act.reduce((a, x) => a + (x.total || 0), 0), drives: act.length, agentOnline: !!d.agent?.online } : null);
+      } catch { /* offline — card hides */ }
+    };
+    run();
+    const t = setInterval(run, 300_000);
+    return () => { dead = true; clearInterval(t); };
+  }, []);
   useEffect(() => {
     try {
       setDark(document.documentElement.getAttribute("data-theme") === "dark");
       if (localStorage.getItem("eiden-promo") === "0") setPromo(false);
-      if (localStorage.getItem("eiden-sidebar") === "0") setCollapsed(true);
     } catch { /* storage blocked */ }
+    // The boot script in app/layout.tsx already set <html data-sb> before first paint (no flash);
+    // mirror it into React state so the toggle and tooltips know the current mode.
+    setMode(document.documentElement.getAttribute("data-sb") === "rail" ? "rail" : "full");
+    // Crossing into tablet/desktop width closes the phone drawer.
+    const mq = window.matchMedia("(min-width: 768px)");
+    const onChange = () => { if (mq.matches) setDrawer(false); };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
   }, []);
   useEffect(() => setDrawer(false), [path]);
   useEffect(() => {
@@ -77,8 +102,11 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
     try { localStorage.setItem("eiden-theme", next ? "dark" : "light"); } catch { /* ignore */ }
   }
   function toggleSidebar() {
-    if (window.matchMedia("(min-width: 1024px)").matches) {
-      setCollapsed((c) => { try { localStorage.setItem("eiden-sidebar", c ? "1" : "0"); } catch { /* ignore */ } return !c; });
+    if (window.matchMedia("(min-width: 768px)").matches) {
+      const next = mode === "rail" ? "full" : "rail";
+      document.documentElement.setAttribute("data-sb", next); // CSS does the animation
+      try { localStorage.setItem("eiden-sidebar", next); } catch { /* ignore */ }
+      setMode(next);
     } else setDrawer((d) => !d);
   }
   async function signOut() {
@@ -87,59 +115,74 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
   }
 
   const current = NAV.find((n) => path === n.href || path.startsWith(n.href + "/"));
-  const title = current?.label ?? "Eiden";
+  const title = current?.label ?? "Eiden Drive";
   const initial = (user?.username ?? "?").slice(0, 1).toLowerCase();
 
   return (
     <div className="h-screen flex bg-surface text-ink overflow-hidden">
       {/* ── Sidebar ── */}
-      {drawer && <div className="lg:hidden fixed inset-0 z-30 bg-black/30" onClick={() => setDrawer(false)} aria-hidden="true" />}
+      {drawer && <div className="md:hidden fixed inset-0 z-30 bg-black/30" onClick={() => setDrawer(false)} aria-hidden="true" />}
       <aside aria-label="Primary" role={drawer ? "dialog" : undefined} aria-modal={drawer ? true : undefined}
-        className={`fixed lg:static z-40 inset-y-0 left-0 w-[248px] shrink-0 bg-surface flex flex-col transition-transform duration-200
-          ${drawer ? "translate-x-0 shadow-pop" : "-translate-x-full"} ${collapsed ? "lg:hidden" : "lg:translate-x-0"}`}>
-        <div className="h-[72px] px-5 flex items-center justify-between">
-          <Link href="/drive" className="flex items-center gap-3">
-            <Logo size={34} />
-            <span className="font-brand text-[22px] font-semibold tracking-tight">Eiden</span>
+        className={`sb fixed md:static z-40 inset-y-0 left-0 shrink-0 bg-surface flex flex-col overflow-hidden
+          ${drawer ? "translate-x-0 shadow-pop" : "-translate-x-full md:translate-x-0"}`}>
+        <div className="sb-head h-[72px] px-5 flex items-center justify-between">
+          <Link href="/drive" className="flex items-center gap-3 min-w-0" aria-label="Eiden Drive — home">
+            <Logo size={38} />
+            <span className="sb-full font-brand leading-none whitespace-nowrap">
+              <span className="block text-[22px] font-bold tracking-tight text-brand">Eiden</span>
+              <span className="block text-[13.5px] font-medium text-ink/70 mt-1 tracking-wide">Drive</span>
+            </span>
           </Link>
-          <button className="lg:hidden size-11 grid place-items-center rounded-md hover:bg-tint" onClick={() => setDrawer(false)} aria-label="Close menu"><X size={18} /></button>
+          <button className="md:hidden size-11 grid place-items-center rounded-md hover:bg-tint" onClick={() => setDrawer(false)} aria-label="Close menu"><X size={18} /></button>
         </div>
-        <div className="mx-4 border-t border-line" />
-        <nav className="mt-2 px-4 flex flex-col gap-1 overflow-y-auto" aria-label="Sections">
+        <div className="sb-divider mx-4 border-t border-line" />
+        <nav className="sb-nav mt-2 px-4 flex flex-col gap-1 overflow-y-auto overflow-x-hidden" aria-label="Sections">
           {NAV.map((n) => {
             const on = current?.href === n.href;
             const Icon = n.icon;
             return (
-              <Link key={n.href} href={n.href} aria-current={on ? "page" : undefined}
-                className={`relative min-h-[44px] pl-3 pr-3 rounded-md flex items-center gap-3 text-[15px] transition-colors
+              <Link key={n.href} href={n.href} aria-current={on ? "page" : undefined} title={mode === "rail" ? n.label : undefined}
+                className={`sb-item relative min-h-[44px] pl-3 pr-3 rounded-md flex items-center gap-3 text-[15px] transition-colors
                   ${on ? "bg-tint text-brand font-medium" : "text-ink/85 hover:bg-tint/60"}`}>
-                {on && <span className="absolute -left-4 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-r bg-brand" />}
-                <Icon size={19} strokeWidth={1.6} className={on ? "text-brand" : "text-muted"} />
-                {n.short}
+                {on && <span className="sb-bar absolute -left-4 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-r bg-brand" />}
+                <Icon size={19} strokeWidth={1.6} className={`shrink-0 ${on ? "text-brand" : "text-muted"}`} />
+                <span className="sb-text whitespace-nowrap">{n.short}</span>
               </Link>
             );
           })}
         </nav>
 
-        <div className="mt-auto px-4 pb-3">
-          {promo && (
-            <div className="mb-3 p-3 rounded-lg bg-soft border border-line">
-              <div className="flex gap-3">
-                <Zap size={22} className="text-brand shrink-0 mt-0.5" fill="currentColor" strokeWidth={0} />
-                <div className="min-w-0">
-                  <p className="text-[13px] font-medium">Eiden v0.1.0</p>
-                  <p className="text-[11px] text-muted leading-snug mt-0.5">Check storage, backups and agent health at a glance.</p>
-                </div>
+        <div className="sb-foot mt-auto px-4 pb-3">
+          {promo && health && (
+            <div className="sb-full mb-3 p-3 rounded-lg bg-soft border border-line">
+              <div className="flex items-center gap-2">
+                <HardDrive size={16} className="text-brand shrink-0" />
+                <p className="text-[13px] font-medium flex-1">Storage</p>
+                <span className={`inline-flex items-center gap-1 text-[11px] ${health.agentOnline ? "text-[#15902a]" : "text-muted"}`} title={health.agentOnline ? "Local agent is online" : "Local agent is offline"}>
+                  <span className={`size-1.5 rounded-full ${health.agentOnline ? "bg-[#22c32e]" : "bg-muted/50"}`} />agent
+                </span>
               </div>
-              <div className="mt-2 flex justify-between text-[13px]">
-                <button className="text-muted hover:text-ink px-2 min-h-[44px]" onClick={() => { setPromo(false); try { localStorage.setItem("eiden-promo", "0"); } catch { /* ignore */ } }}>Dismiss</button>
-                <Link href="/storage" className="text-brand font-medium px-2 min-h-[44px] inline-flex items-center">Open</Link>
+              {health.total > 0 ? (() => {
+                const pct = Math.min(100, Math.round((health.used / health.total) * 100));
+                return (
+                  <>
+                    <div className="mt-2 h-1.5 rounded-full bg-line overflow-hidden" role="img" aria-label={`${pct}% of storage used`}>
+                      <div className={`h-full rounded-full ${pct >= 95 ? "bg-danger" : pct >= 80 ? "bg-warning" : "bg-brand"}`} style={{ width: `${pct}%` }} />
+                    </div>
+                    <p className="mt-1.5 text-[11px] text-muted tabular-nums">{formatBytes(health.used)} of {formatBytes(health.total)} · {health.drives} drive{health.drives === 1 ? "" : "s"}</p>
+                  </>
+                );
+              })() : <p className="mt-1.5 text-[11px] text-muted">{health.drives} drive{health.drives === 1 ? "" : "s"} connected</p>}
+              <div className="mt-1.5 flex justify-between text-[13px]">
+                <button className="text-muted hover:text-ink px-2 min-h-[44px]" onClick={() => { setPromo(false); try { localStorage.setItem("eiden-promo", "0"); } catch { /* ignore */ } }}>Hide</button>
+                <Link href="/storage" className="text-brand font-medium px-2 min-h-[44px] inline-flex items-center">Details</Link>
               </div>
             </div>
           )}
           <div className="border-t border-line pt-2">
-            <button onClick={signOut} className="w-full min-h-[44px] px-3 rounded-md flex items-center gap-3 text-[15px] text-ink/85 hover:bg-tint/60">
-              <LogOut size={19} strokeWidth={1.6} className="text-muted" /> Sign out
+            <button onClick={signOut} title={mode === "rail" ? "Sign out" : undefined}
+              className="sb-item w-full min-h-[44px] px-3 rounded-md flex items-center gap-3 text-[15px] text-ink/85 hover:bg-tint/60">
+              <LogOut size={19} strokeWidth={1.6} className="text-muted shrink-0" /> <span className="sb-text whitespace-nowrap">Sign out</span>
             </button>
           </div>
         </div>
@@ -149,7 +192,7 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
       <div className="flex-1 min-w-0 flex flex-col">
         <header className="h-[72px] shrink-0 px-4 sm:px-6 flex items-center justify-between gap-3">
           <div className="flex items-center gap-4 min-w-0">
-            <button onClick={toggleSidebar} aria-label="Toggle sidebar" className="size-11 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={22} strokeWidth={1.6} /></button>
+            <button onClick={toggleSidebar} aria-label={mode === "rail" ? "Expand sidebar" : "Collapse sidebar"} className="size-11 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={22} strokeWidth={1.6} /></button>
             <span className="hidden sm:block h-5 border-l border-line" />
             <h1 className="text-[16px] text-ink/90 truncate">{title}</h1>
           </div>

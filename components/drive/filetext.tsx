@@ -18,13 +18,29 @@ const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico",
 const VIDEO = new Set(["mp4", "m4v", "webm", "ogv", "ogg", "mov", "avi", "wmv", "flv", "f4v", "mkv", "mpg", "mpeg", "m2ts", "mts", "ts", "3gp", "3g2", "asf", "rm", "rmvb", "vob", "ogm", "divx", "xvid", "amv"]);
 // Containers a <video> tag can actually decode without help (H.264/VP9/Theora + AAC/Vorbis/Opus inside).
 const NATIVE_VIDEO = new Set(["mp4", "m4v", "webm", "ogv", "ogg"]);
-const AUDIO = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac"]);
+const AUDIO = new Set(["mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "opus", "weba", "aiff", "aif", "mid", "midi"]);
 const PDF = new Set(["pdf"]);
 const TEXT_EDIT = new Set(["txt", "md", "markdown", "html", "htm", "css", "js", "ts", "tsx", "jsx", "json", "xml", "csv", "yml", "yaml", "toml", "sh", "py", "sql", "env", "log", "java", "c", "h", "cpp", "go", "rs", "php", "rb", "vue", "svelte"]);
-const TEXT_VIEW = new Set([...TEXT_EDIT, "rtf", "ini", "cfg"]);
-const OFFICE = new Set(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "pages", "numbers", "key"]);
+// Everything a text editor would open. Unknown extensions are also sniffed (see viewer/sniff.ts).
+const TEXT_VIEW = new Set([...TEXT_EDIT, "ini", "cfg", "conf", "properties", "gitignore", "dockerfile", "makefile", "bat", "ps1", "zsh", "bash",
+  "kt", "kts", "swift", "m", "mm", "cs", "scala", "lua", "pl", "r", "dart", "hs", "ex", "exs", "clj", "erl", "jl", "tex", "bib", "rst", "adoc", "org",
+  "scss", "sass", "less", "styl", "graphql", "gql", "proto", "tf", "hcl", "gradle", "lock", "sub", "srt", "vtt", "ass", "ssa", "diff", "patch",
+  "ics", "vcf", "eml", "ndjson", "jsonl", "svg", "plist", "tsv", "mjs", "cjs", "map", "asm", "s", "vb", "fs", "sol", "wat"]);
+const CSV = new Set(["csv", "tsv"]);
+const JSONK = new Set(["json", "jsonc", "geojson", "webmanifest", "har"]);
+const DOCX = new Set(["docx", "docm", "dotx"]);
+const SHEET = new Set(["xlsx", "xlsm", "xlsb", "xls", "ods", "fods", "numbers"]);
+const SLIDES = new Set(["pptx", "ppsx", "potx", "pptm"]);
+const ODF = new Set(["odt", "odp", "ott", "otp"]);
+const ARCHIVE = new Set(["zip", "jar", "war", "apk", "ipa", "xpi", "crx", "tar", "tgz", "gz", "bz2", "xz", "7z", "rar", "cbz", "whl", "nupkg", "vsix"]);
+const FONT = new Set(["ttf", "otf", "woff", "woff2"]);
+const LEGACY = new Set(["doc", "dot", "ppt", "pps", "pot", "msg", "wps", "wpd", "pages", "key", "mdb", "pub", "vsd"]);
+const EBOOK = new Set(["epub"]);
 
-export type ViewKind = "image" | "video" | "audio" | "pdf" | "markdown" | "html" | "code" | "office" | "unknown";
+export type ViewKind =
+  | "image" | "video" | "audio" | "pdf" | "markdown" | "html" | "code"
+  | "csv" | "json" | "notebook" | "docx" | "sheet" | "slides" | "odf" | "archive" | "ebook" | "font" | "rtf" | "legacy"
+  | "office" | "unknown";
 
 export function nativeVideo(name: string, mime?: string): boolean {
   const e = extOf(name);
@@ -38,14 +54,28 @@ export function nativeVideo(name: string, mime?: string): boolean {
 
 export function viewKind(name: string, mime?: string): ViewKind {
   const e = extOf(name);
+  const lower = name.toLowerCase();
+  if (e === "svg") return "image"; // rendered as an <img> (scripts never run); source is one click away
   if (IMAGE.has(e) || mime?.startsWith("image/")) return "image";
   if (VIDEO.has(e) || mime?.startsWith("video/")) return "video";
   if (AUDIO.has(e) || mime?.startsWith("audio/")) return "audio";
   if (PDF.has(e) || mime === "application/pdf") return "pdf";
-  if (e === "md" || e === "markdown" || mime === "text/markdown") return "markdown";
-  if (e === "html" || e === "htm") return "html";
-  if (TEXT_VIEW.has(e) || mime?.startsWith("text/") || mime === "application/json") return "code";
-  if (OFFICE.has(e)) return "office";
+  if (e === "ipynb") return "notebook";
+  if (e === "md" || e === "markdown" || e === "mdx" || mime === "text/markdown") return "markdown";
+  if (e === "html" || e === "htm" || e === "xhtml") return "html";
+  if (CSV.has(e) || mime === "text/csv" || mime === "text/tab-separated-values") return "csv";
+  if (JSONK.has(e) || mime === "application/json") return "json";
+  if (e === "rtf" || mime === "application/rtf" || mime === "text/rtf") return "rtf";
+  if (DOCX.has(e)) return "docx";
+  if (SHEET.has(e)) return "sheet";
+  if (SLIDES.has(e)) return "slides";
+  if (ODF.has(e)) return "odf";
+  if (EBOOK.has(e)) return "ebook";
+  if (lower.endsWith(".tar.gz") || lower.endsWith(".tar.bz2") || lower.endsWith(".tar.xz") || ARCHIVE.has(e)) return "archive";
+  if (FONT.has(e)) return "font";
+  if (LEGACY.has(e)) return "legacy";
+  if (TEXT_VIEW.has(e) || mime?.startsWith("text/") || mime === "application/xml" || mime === "application/x-sh" || mime === "application/javascript") return "code";
+  if (["cfg", "ini"].includes(e)) return "code";
   return "unknown";
 }
 
@@ -67,7 +97,8 @@ export function langOf(name: string): string {
 }
 
 export function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Quotes too: escHtml output is later placed inside attributes (links), so " must never survive.
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // Minimal Markdown → HTML (escaped first, so raw HTML in the doc never executes).

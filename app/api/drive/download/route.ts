@@ -11,6 +11,20 @@ import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ file_id: z.string().max(300), raw: z.string().optional(), json: z.string().optional() });
 
+// Raw bytes are served from the app's own origin, and the MIME type is whatever the uploader declared — so treat it as
+// hostile: never let the browser sniff, and anything that can run script (HTML/SVG/XML/JS) is download-only and
+// sandboxed if someone opens the URL directly. The in-app viewer reads these bytes as data and renders them safely.
+function rawHeaders(mime: string, name: string): Record<string, string> {
+  const risky = /^(text\/html|application\/xhtml|image\/svg|text\/xml|application\/xml|text\/javascript|application\/javascript)/i.test(mime) || /\.(x?html?|svg|xml|m?js)$/i.test(name);
+  return {
+    "content-type": mime,
+    "content-disposition": `${risky ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(name)}`,
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, no-store",
+    ...(risky ? { "content-security-policy": "sandbox; default-src 'none'" } : {})
+  };
+}
+
 const RAW_MAX = 25 * 1024 * 1024; // in-app preview cap — bigger files use Download
 
 // Parses live (not yet synced) Google ids: g:<accountId>:<googleFileId>
@@ -49,7 +63,7 @@ export async function GET(req: Request) {
       const mime = String(meta.data.mimeType ?? "application/octet-stream");
       await logAudit({ actor: me.id, actor_name: me.username, action: "download", req, detail: { live_google: live.googleId } });
       return new Response(Buffer.from(dl.data as ArrayBuffer), {
-        headers: { "content-type": mime, "content-disposition": `inline; filename="${encodeURIComponent(name)}"` }
+        headers: rawHeaders(mime, name)
       });
     } catch (e) {
       const m = e instanceof Error ? e.message : "preview failed";
@@ -84,7 +98,7 @@ export async function GET(req: Request) {
         const db = adminClient();
         const { data: blob, error } = await db.storage.from(UPLOAD_BUCKET).download(f.storage_path);
         if (error || !blob) throw new Error(error?.message ?? "storage read failed");
-        return new Response(blob, { headers: { "content-type": f.mime ?? "application/octet-stream", "content-disposition": `inline; filename="${encodeURIComponent(f.name)}"` } });
+        return new Response(blob, { headers: rawHeaders(f.mime ?? "application/octet-stream", f.name) });
       }
       if (f.google_file_id) {
         const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
@@ -96,7 +110,7 @@ export async function GET(req: Request) {
         }
         const dl = await g.files.get({ fileId: f.google_file_id, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" });
         return new Response(Buffer.from(dl.data as ArrayBuffer), {
-          headers: { "content-type": f.mime ?? (meta.data.mimeType as string) ?? "application/octet-stream", "content-disposition": `inline; filename="${encodeURIComponent(f.name)}"` }
+          headers: rawHeaders(f.mime ?? (meta.data.mimeType as string) ?? "application/octet-stream", f.name)
         });
       }
     } catch (e) {

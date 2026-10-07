@@ -113,3 +113,7 @@ Real TOTP/WebAuthn verification in unlock route; Google Docs/OnlyOffice in-place
 Test log: `npm test` 23/23 · live (local) 14/14 · `tsc` 0 errors · `npm run build` passes (2026-10-06). Not run: live-Supabase RLS/TOTP end-to-end, prod deploy.
 
 **Pass 3b —** "how do I see the admin role? / build the invite form and add the profile trigger" Migration `0005` (auto profile, always member), `POST /api/users/invite`, Invite member form on `/users`, `/welcome` landing, sign-up closed (`shouldCreateUser:false`). See `docs/frontend/03-invites-and-profiles.md` — **Supabase dashboard steps required**.
+
+**Pass 3c —** "mirror this calendar; fix the sidebar; tags + drives placement; remove anything fake" → calendar rebuilt, sidebar rail, real tags (0013), Drives in the pane + Upload split button, real encrypted Vault (`VAULT_KEK`), live sidebar storage card. See `docs/frontend/04-calendar-tags-drives-vault.md` (apply checklist: run 0013, set `VAULT_KEK`).
+
+**Pass 3d —** "fix the reading of files; all types" + the file-type icon reference → universal in-app reader + new page icons + security hardening of the raw endpoint. See `docs/frontend/05-file-readers-and-icons.md`.

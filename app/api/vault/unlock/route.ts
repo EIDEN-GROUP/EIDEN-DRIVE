@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
-import { getProfile, can } from "@/lib/roles";
+import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { parseJson } from "@/lib/http";
 import { verifyTotp } from "@/lib/totp";
@@ -53,21 +53,15 @@ export async function GET() {
   const { data: auth } = await supa.from("vault_auth").select("authed_at").eq("user_id", me.id).maybeSingle();
   const valid = auth?.authed_at ? Date.now() - new Date(auth.authed_at).getTime() < VAULT_SESSION_HOURS * 3600_000 : false;
   if (!valid) return Response.json({ error: "re-auth required", valid: false }, { status: 403 });
-  // RLS: managers/admins see all items, members only their own.
-  const { data } = await supa.from("vault_items").select("id,created_at").limit(50);
-  return Response.json({ valid: true, items: data ?? [], note: "ciphertext decrypted client-side after 2FA" });
+  const expires_at = new Date(new Date(auth!.authed_at as string).getTime() + VAULT_SESSION_HOURS * 3600_000).toISOString();
+  return Response.json({ valid: true, expires_at });
 }
 
-const NewItem = z.object({ owner: z.string().uuid(), enc_blob: z.string().min(1).max(200_000) });
-
-export async function PUT(req: Request) {
+// Lock now: ends the unlocked session immediately.
+export async function DELETE(req: Request) {
   const me = await getProfile();
-  if (!me || !can(me.role, "create-vault")) return Response.json({ error: "managers only" }, { status: 403 });
-  const p = await parseJson(req, NewItem);
-  if (p.error) return p.error;
-  const supa = createClient();
-  const { data, error } = await supa.from("vault_items").insert({ owner: p.data.owner, enc_blob: p.data.enc_blob, created_by: me.id }).select("id").single();
-  if (error) return Response.json({ error: error.message }, { status: 500 });
-  await logAudit({ actor: me.id, actor_name: me.username, action: "add", req, detail: { vault_item: data.id, owner: p.data.owner } });
-  return Response.json({ ok: true, id: data.id });
+  if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
+  await adminClient().from("vault_auth").delete().eq("user_id", me.id);
+  await logAudit({ actor: me.id, actor_name: me.username, action: "vault-view", req, detail: { result: "locked" } });
+  return Response.json({ ok: true });
 }
