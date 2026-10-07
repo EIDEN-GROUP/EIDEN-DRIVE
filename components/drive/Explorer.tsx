@@ -20,7 +20,7 @@ export interface Folder { id: string; name: string; parent: string | null; dept:
 export interface FileRow {
   id: string; name: string; mime?: string; size?: number; backends: string[];
   owner?: string; updated?: string; updated_at?: string; folder?: string | null;
-  hash?: string; storage_path?: string | null; accountLabel?: string;
+  hash?: string; storage_path?: string | null; accountLabel?: string; google_file_id?: string | null;
 }
 interface BinRow { file_id: string; deleted_at: string; purge_at: string; file_index: { id: string; name: string; mime: string; size: number } | { id: string; name: string; mime: string; size: number }[] }
 
@@ -238,7 +238,7 @@ export default function Explorer() {
       const gFolders = kids.filter((k) => k.mime === "application/vnd.google-apps.folder");
       const gFiles = kids.filter((k) => k.mime !== "application/vnd.google-apps.folder");
       const toFile = (t: { id: string; name: string; mime: string; size: number; googleId: string }): FileRow =>
-        ({ id: t.id ?? `g:${driveView.accountId}:${t.googleId}`, name: t.name, mime: t.mime, size: t.size, backends: ["google"], accountLabel: acctLabel });
+        ({ id: t.id ?? `g:${driveView.accountId}:${t.googleId}`, name: t.name, mime: t.mime, size: t.size, backends: ["google"], accountLabel: acctLabel, google_file_id: t.googleId });
       return [
         ...gFolders.map((g): Row => ({ key: `gdrive:${g.googleId}`, kind: "folder", id: `gdrive:${g.googleId}`, name: g.name, depth: 0, dept: null })),
         ...sortFiles(gFiles.map(toFile)).map((f) => fileRowOf(f, 0))
@@ -482,7 +482,14 @@ export default function Explorer() {
   }
 
   function toViewFile(f: FileRow): ViewFile {
-    return { id: f.id, name: f.name, mime: f.mime, size: f.size, backends: f.backends };
+    // googleId resolution order: indexed column → live g: id suffix.
+    let googleId: string | null = f.google_file_id ?? null;
+    if (!googleId && f.id.startsWith("g:")) {
+      const rest = f.id.slice(2);
+      const i = rest.indexOf(":");
+      googleId = i >= 0 ? rest.slice(i + 1) : rest;
+    }
+    return { id: f.id, name: f.name, mime: f.mime, size: f.size, backends: f.backends, googleId };
   }
 
   // ── view helpers ──

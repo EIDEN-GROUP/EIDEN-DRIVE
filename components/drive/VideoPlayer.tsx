@@ -1,0 +1,114 @@
+"use client";
+import { useState } from "react";
+import { Download, RefreshCw, Loader2, AlertTriangle } from "lucide-react";
+import { nativeVideo } from "./filetext";
+
+// Video that refuses to stay black. Chain:
+//  1. direct stream (works for MP4/WebM/Ogg/MOV everywhere),
+//  2. Google's own transcoding embed (any format Google can preview — AVI, MKV,
+//     WMV, FLV…), when we know the Drive file id,
+//  3. in-browser conversion (ffmpeg.wasm, Storage-hosted files): converts to
+//     MP4 locally and plays the result — nothing uploads anywhere.
+// Caps are stated, never silent: >300 MB won't convert in a tab.
+const CONVERT_MAX = 300 * 1024 * 1024;
+
+export default function VideoPlayer({ src, fileName, googleId, size, canDownload, downloadHref }: {
+  src: string; fileName: string; googleId?: string | null; size?: number;
+  canDownload: boolean; downloadHref: string;
+}) {
+  const directOk = nativeVideo(fileName);
+  const [phase, setPhase] = useState<"direct" | "drive" | "convert-offer">(directOk ? "direct" : googleId ? "drive" : "convert-offer");
+
+  if (phase === "drive" && googleId) {
+    return (
+      <div>
+        <iframe src={`https://drive.google.com/file/d/${googleId}/preview`} title={`Video ${fileName}`}
+          className="w-full h-[70vh] border-0 bg-black" allow="autoplay; fullscreen" allowFullScreen />
+        <p className="px-4 py-2 text-[12px] text-muted">Playing via Google's preview transcoding — original file untouched.</p>
+      </div>
+    );
+  }
+  if (phase === "convert-offer") {
+    return <ConvertOffer src={src} fileName={fileName} size={size} canDownload={canDownload} downloadHref={downloadHref} />;
+  }
+  return (
+    <video src={src} controls className="w-full max-h-[70vh] bg-black" preload="metadata"
+      onError={() => setPhase(googleId ? "drive" : "convert-offer")} />
+  );
+}
+
+function ConvertOffer({ src, fileName, size, canDownload, downloadHref }: {
+  src: string; fileName: string; size?: number; canDownload: boolean; downloadHref: string;
+}) {
+  const [st, setSt] = useState<{ step: "idle" | "loading" | "converting" | "done" | "error"; pct?: number; msg?: string; url?: string }>(
+    { step: (size ?? 0) > CONVERT_MAX ? "error" : "idle", msg: (size ?? 0) > CONVERT_MAX ? "This file is over 300 MB — too big to convert inside a browser tab. Download it and play locally." : undefined });
+
+  async function convert() {
+    try {
+      setSt({ step: "loading", pct: 0 });
+      // Loaded from pinned CDN builds at runtime (never bundled): keeps the
+      // app bundle small and conversion available only when actually needed.
+      interface FFmpegInstance {
+        on(ev: "progress", cb: (p: { progress: number }) => void): void;
+        load(o: { coreURL: string; wasmURL: string }): Promise<void>;
+        writeFile(name: string, data: unknown): Promise<void>;
+        exec(args: string[]): Promise<void>;
+        readFile(name: string): Promise<Uint8Array>;
+        terminate(): void;
+      }
+      const FFMPEG_ESM: string = "https://unpkg.com/@ffmpeg/ffmpeg@0.12.15/+esm";
+      const FFUTIL_ESM: string = "https://unpkg.com/@ffmpeg/util@0.12.2/+esm";
+      const FF = (await import(/* webpackIgnore: true */ FFMPEG_ESM)) as { FFmpeg: new () => FFmpegInstance };
+      const { fetchFile } = (await import(/* webpackIgnore: true */ FFUTIL_ESM)) as { fetchFile: (f: unknown) => Promise<Uint8Array> };
+      const ffmpeg = new FF.FFmpeg();
+      ffmpeg.on("progress", ({ progress }) => setSt({ step: "converting", pct: Math.round(progress * 100) }));
+      await ffmpeg.load({
+        coreURL: "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.js",
+        wasmURL: "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.wasm"
+      });
+      const res = await fetch(src);
+      if (!res.ok) throw new Error("couldn't fetch the file for conversion");
+      await ffmpeg.writeFile("in", await fetchFile(res));
+      setSt({ step: "converting", pct: 0 });
+      await ffmpeg.exec(["-i", "in", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-movflags", "faststart", "out.mp4"]);
+      const data = await ffmpeg.readFile("out.mp4");
+      const url = URL.createObjectURL(new Blob([data.buffer as ArrayBuffer], { type: "video/mp4" }));
+      try { ffmpeg.terminate(); } catch { /* ignore */ }
+      setSt({ step: "done", url });
+    } catch (e) {
+      setSt({ step: "error", msg: e instanceof Error ? e.message : "Conversion failed — download the file and play it locally." });
+    }
+  }
+
+  if (st.step === "done" && st.url) {
+    return (
+      <div>
+        <video src={st.url} controls autoPlay className="w-full max-h-[70vh] bg-black" preload="metadata" />
+        <p className="px-4 py-2 text-[12px] text-muted">Converted in your browser to MP4 for playback — the stored file is unchanged.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="p-8 text-center max-w-md mx-auto">
+      <AlertTriangle size={26} className="mx-auto text-muted" />
+      <p className="mt-3 text-[14px] font-medium">This format doesn't play directly in browsers</p>
+      <p className="mt-1 text-[13px] text-muted">Browsers decode MP4 / WebM / Ogg natively. “{fileName}” can be converted to MP4 right here — it takes a while for big files and never uploads anything.</p>
+      {st.step === "error" ? (
+        <p className="mt-3 text-[13px] text-danger">{st.msg}</p>
+      ) : (
+        <button onClick={convert} disabled={st.step !== "idle"}
+          className="mt-4 min-h-[44px] px-5 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-60 inline-flex items-center gap-2">
+          {st.step === "idle" ? <><RefreshCw size={15} /> Convert & play</> : <><Loader2 size={15} className="animate-spin" /> {st.step === "loading" ? "Loading converter…" : `Converting… ${st.pct ?? 0}%`}</>}
+        </button>
+      )}
+      {(st.step === "loading" || st.step === "converting") && (
+        <div className="mt-3 h-2 rounded-full bg-tint overflow-hidden" role="progressbar" aria-valuenow={st.pct ?? 0} aria-valuemin={0} aria-valuemax={100}>
+          <div className="h-full bg-brand transition-all" style={{ width: `${st.step === "loading" ? 5 : st.pct ?? 0}%` }} />
+        </div>
+      )}
+      {canDownload && (
+        <p className="mt-3"><a href={downloadHref} className="inline-flex min-h-[44px] items-center gap-1.5 text-[13px] text-brand font-medium"><Download size={14} /> or download the original</a></p>
+      )}
+    </div>
+  );
+}

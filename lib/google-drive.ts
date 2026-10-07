@@ -74,17 +74,34 @@ function esc(s: string) { return s.replace(/[\\']/g, ""); }
 
 // BFS walk of a folder tree. `cursor` resumes across sync pages:
 // { queue: [{ id, token? }], scanned } — serialized as the sync pageToken.
-export interface FolderCursor { queue: { id: string; token?: string }[]; scanned: number }
+export interface FolderCursor { queue: { id: string; token?: string }[]; scanned: number; seen?: string[] }
+// Drive IDs are URL-safe base64-ish ([A-Za-z0-9_-], 10+ chars). The sync cursor
+// (pageToken) is client-supplied base64 — every folder id re-entering a query
+// is re-validated so a crafted cursor can't inject Drive query syntax.
+function validDriveId(id: unknown): id is string {
+  return typeof id === "string" && /^[A-Za-z0-9_-]{10,200}$/.test(id);
+}
+
 async function walkFolderPage(pageToken?: string, rootId?: string, drive?: DriveLike): Promise<{ files: GFile[]; nextPageToken?: string }> {
   const d = drive ?? driveClient();
   if (!d) return { files: [] };
   const id = rootId ?? SHARED_DRIVE_ID();
+  if (id && !validDriveId(id)) throw new Error("invalid drive root id");
   let cur: FolderCursor;
   try {
     cur = pageToken ? JSON.parse(Buffer.from(pageToken, "base64url").toString()) as FolderCursor : { queue: [{ id }], scanned: 0 };
   } catch { cur = { queue: [{ id }], scanned: 0 }; }
+  // Drop anything that isn't a well-formed queue (crafted/garbled cursors
+  // restart cleanly at the root instead of failing or injecting).
+  cur.queue = (Array.isArray(cur.queue) ? cur.queue : []).filter((q) => q && validDriveId(q.id)).map((q) => ({ id: q.id, token: typeof q.token === "string" ? q.token : undefined }));
+  if (!cur.queue.length) cur.queue = validDriveId(id) ? [{ id }] : [];
+  cur.scanned = typeof cur.scanned === "number" ? Math.max(0, Math.min(cur.scanned, 100000)) : 0;
   const out: GFile[] = [];
   let calls = 0;
+  // Visited folders: multi-parent folders (and shortcut cycles) must not be
+  // descended twice — otherwise one folder's subtree is scanned (and billed)
+  // once per parent link. Survives across chained pages via the cursor.
+  const seen = new Set<string>([id, ...(cur.seen ?? [])]);
   while (cur.queue.length && out.length < 200 && calls < 8 && cur.scanned < 5000) {
     const head = cur.queue[0];
     const res = await d.files.list({
@@ -98,14 +115,18 @@ async function walkFolderPage(pageToken?: string, rootId?: string, drive?: Drive
       cur.scanned++;
       // Folders are kept as entries (the sync persists them, the tree renders
       // them) AND queued for descent — files and folders share the page.
-      if (f.mimeType === "application/vnd.google-apps.folder") cur.queue.push({ id: f.id! });
+      if (f.mimeType === "application/vnd.google-apps.folder") {
+        if (f.id && !seen.has(f.id)) { seen.add(f.id); cur.queue.push({ id: f.id }); }
+      }
       out.push(f as GFile);
       if (out.length >= 200) break;
     }
     if (res.data.nextPageToken) head.token = res.data.nextPageToken;
     else cur.queue.shift();
   }
-  const next = cur.queue.length ? Buffer.from(JSON.stringify(cur)).toString("base64url") : undefined;
+  const next = cur.queue.length
+    ? Buffer.from(JSON.stringify({ ...cur, seen: [...seen].slice(-200) })).toString("base64url")
+    : undefined;
   return { files: out, nextPageToken: next };
 }
 

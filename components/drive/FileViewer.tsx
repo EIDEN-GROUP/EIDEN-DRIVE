@@ -2,8 +2,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { X, Download, Pencil, Loader2, FileWarning } from "lucide-react";
 import { viewKind, mdToHtml, highlight, escHtml } from "./filetext";
+import VideoPlayer from "./VideoPlayer";
 
-export interface ViewFile { id: string; name: string; mime?: string; size?: number; backends?: string[] }
+export interface ViewFile { id: string; name: string; mime?: string; size?: number; backends?: string[]; googleId?: string | null }
 
 // In-app preview. Google-hosted bytes stream through ?raw=1 (Drive blocks
 // framing); Supabase-hosted files use a short signed URL (?json=1).
@@ -93,7 +94,8 @@ export default function FileViewer({ file, onClose, onEdit }: {
             <img src={embedUrl} alt={`Preview of ${file.name}`} className="mx-auto max-h-[70vh] object-contain" />
           )}
           {!busy && !err && kind === "video" && embedUrl && (
-            <video src={embedUrl} controls className="w-full max-h-[70vh] bg-black" preload="metadata" />
+            <VideoPlayer src={embedUrl} fileName={file.name} googleId={file.googleId} size={file.size}
+              canDownload={!isLive} downloadHref={`/api/drive/download?file_id=${file.id}`} />
           )}
           {!busy && !err && kind === "audio" && embedUrl && (
             <div className="p-8"><audio src={embedUrl} controls className="w-full" preload="metadata" /></div>

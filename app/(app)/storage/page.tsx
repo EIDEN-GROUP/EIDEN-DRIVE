@@ -8,13 +8,66 @@ import { formatBytes } from "@/lib/files";
 
 interface Job { kind: string; status: string; created_at: string }
 interface Drive {
-  id: string; label: string; email: string | null; status: string; rootKind?: string;
+  id: string; label: string; email: string | null; status: string; rootKind?: string; rootId?: string | null;
   used: number; total: number; alert?: string | null;
 }
 
 function fmtDate(d: string): string {
   const t = new Date(d);
   return isNaN(t.getTime()) ? "--" : t.toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+// Per-drive scope editor: pin the account to one folder/drive ID (paste it from
+// the Drive URL), or resync-clean after re-scoping. Whole-My-Drive requires the
+// explicit checkbox — that scope is what floods indexes with system dirs.
+function RootEditor({ drive, onSaved, onResync }: { drive: Drive; onSaved: () => void; onResync: () => void }) {
+  const [rootId, setRootId] = useState(drive.rootId ?? "");
+  const [full, setFull] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const dirty = (rootId.trim() || "") !== (drive.rootId ?? "") || (full && !(drive.rootId ?? ""));
+
+  async function save() {
+    setBusy(true);
+    const r = await fetch("/api/drive/accounts", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: drive.id, root_id: rootId.trim(), allowFullDrive: full })
+    });
+    const j = await r.json().catch(() => ({}));
+    setBusy(false);
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't save root.", tone: "err" }); return; }
+    toast({ text: `“${drive.label}” re-scoped — resync-clean it, then Sync.`, tone: "ok" });
+    onSaved();
+  }
+
+  return (
+    <details className="mt-1.5 text-[12.5px]">
+      <summary className="cursor-pointer text-muted hover:text-ink min-h-[32px] inline-flex items-center">Scope & cleanup</summary>
+      <div className="mt-1.5 p-2.5 rounded-md border border-line bg-soft space-y-2">
+        <label className="block">
+          <span className="text-[11.5px] text-muted">Root folder / Shared Drive ID (from the Drive URL)</span>
+          <input value={rootId} onChange={(e) => { setRootId(e.target.value); setFull(false); }} placeholder="1gDx… (empty = whole My Drive)"
+            spellCheck={false} aria-label={`Root ID for ${drive.label}`}
+            className="mt-1 w-full min-h-[40px] rounded-md border border-line bg-surface px-2 font-mono text-[12px]" />
+        </label>
+        {!rootId.trim() && (
+          <label className="flex items-start gap-2 text-[12px] cursor-pointer">
+            <input type="checkbox" checked={full} onChange={(e) => setFull(e.target.checked)} className="mt-1 size-4 accent-brand" />
+            <span>Yes, index the <strong>entire</strong> My Drive (includes everything, e.g. app/system folders)</span>
+          </label>
+        )}
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={save} disabled={!dirty || busy || (!rootId.trim() && !full)}
+            className="min-h-[40px] px-3 rounded-md bg-brand text-white text-[12.5px] font-medium disabled:opacity-50">
+            {busy ? "Checking…" : "Save scope"}
+          </button>
+          <button onClick={onResync} title="Drop this drive's indexed rows so the next Sync rebuilds from truth"
+            className="min-h-[40px] px-3 rounded-md border border-line text-[12.5px] hover:bg-tint">
+            Resync clean
+          </button>
+        </div>
+      </div>
+    </details>
+  );
 }
 
 export default function StoragePage() {
@@ -62,6 +115,16 @@ export default function StoragePage() {
     toast({ text: "Drive disconnected — its files stay indexed.", tone: "ok" });
     load();
   }
+  async function resyncClean(d: Drive) {
+    const r = await fetch("/api/drive/resync-clean", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId: d.id })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't clean index.", tone: "err" }); return; }
+    toast({ text: `Index cleaned (${j.deleted} removed, ${j.unpinned} unpinned) — run Sync from Google next.`, tone: "ok" });
+    load();
+  }
   const totalUsed = (data?.drives ?? []).reduce((a, d) => a + d.used, 0);
   const totalCap = (data?.drives ?? []).reduce((a, d) => a + d.total, 0);
 
@@ -105,6 +168,9 @@ export default function StoragePage() {
                       </span>
                     )}
                   </p>
+                  {data.canManage && d.id !== "legacy" && (
+                    <RootEditor drive={d} onSaved={load} onResync={() => resyncClean(d)} />
+                  )}
                   {d.total > 0 ? (
                     <div className="mt-1.5">
                       <StorageBar label={`${formatBytes(d.used)} / ${formatBytes(d.total)}`} used={d.used} total={d.total} />

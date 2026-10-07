@@ -11,7 +11,7 @@ import { getAccounts, clientFor, type DriveAccount } from "@/lib/drive-accounts"
 // ONE page (≤200 files) per request PER ACCOUNT — the browser chains
 // {accountId, nextPageToken} until every account reports done. Rows are pinned
 // to their account (drive_account_id) so later ops use the right token.
-const Body = z.object({ pageToken: z.string().max(8000).nullish(), accountId: z.string().uuid().nullish() });
+const Body = z.object({ pageToken: z.string().max(20000).nullish(), accountId: z.string().uuid().nullish() });
 
 export async function POST(req: Request) {
   const me = await getProfile();
@@ -43,7 +43,10 @@ export async function POST(req: Request) {
   }
   const db = adminClient();
   const ids = page.files.map((f) => f.id).filter(Boolean) as string[];
-  const { data: existing } = await db.from("file_index").select("id,google_file_id,backends").in("google_file_id", ids.length ? ids : ["__none__"]);
+  // Account-scoped match: the same Google id can be visible to two accounts
+  // (shared files) — each account owns its own row (see 0011).
+  const { data: existing } = await db.from("file_index").select("id,google_file_id,drive_account_id,backends")
+    .eq("drive_account_id", acct.id).in("google_file_id", ids.length ? ids : ["__none__"]);
   const have = new Map((existing ?? []).map((r: { id: string; google_file_id: string; backends: string[] }) => [r.google_file_id, r]));
   let inserted = 0, updated = 0;
   for (const f of page.files) {
@@ -59,8 +62,11 @@ export async function POST(req: Request) {
       await db.from("file_index").update({ ...row, backends }).eq("id", ex.id);
       updated++;
     } else {
-      await db.from("file_index").insert({ ...row, backends: ["google"], owner: me.id });
-      inserted++;
+      const { error: insErr } = await db.from("file_index").insert({ ...row, backends: ["google"], owner: me.id });
+      if (insErr) {
+        // Lost a race with another page/account's insert — adopt nothing, skip.
+        if (!/duplicate|unique/i.test(insErr.message)) throw new Error(insErr.message);
+      } else inserted++;
     }
   }
   const done = !page.nextPageToken;

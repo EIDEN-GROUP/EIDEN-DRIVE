@@ -8,8 +8,16 @@ export function extOf(name: string): string {
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
 }
 
-const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"]);
-const VIDEO = new Set(["mp4", "webm", "ogv", "mov"]);
+const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "heic", "heif"]);
+// NOTE: RAW camera files (cr2, nef, arw, dng) intentionally excluded — browsers
+// can't decode them, so they get the honest download fallback instead of a
+// broken image icon.
+// Full container list (Wikipedia "Video file format"): browsers natively decode
+// only a few of these — the viewer falls back to Drive-preview transcoding or
+// in-browser conversion for the rest. Never silently mislabel one as playable.
+const VIDEO = new Set(["mp4", "m4v", "webm", "ogv", "ogg", "mov", "avi", "wmv", "flv", "f4v", "mkv", "mpg", "mpeg", "m2ts", "mts", "ts", "3gp", "3g2", "asf", "rm", "rmvb", "vob", "ogm", "divx", "xvid", "amv"]);
+// Containers a <video> tag can actually decode without help (H.264/VP9/Theora + AAC/Vorbis/Opus inside).
+const NATIVE_VIDEO = new Set(["mp4", "m4v", "webm", "ogv", "ogg"]);
 const AUDIO = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac"]);
 const PDF = new Set(["pdf"]);
 const TEXT_EDIT = new Set(["txt", "md", "markdown", "html", "htm", "css", "js", "ts", "tsx", "jsx", "json", "xml", "csv", "yml", "yaml", "toml", "sh", "py", "sql", "env", "log", "java", "c", "h", "cpp", "go", "rs", "php", "rb", "vue", "svelte"]);
@@ -17,6 +25,16 @@ const TEXT_VIEW = new Set([...TEXT_EDIT, "rtf", "ini", "cfg"]);
 const OFFICE = new Set(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "pages", "numbers", "key"]);
 
 export type ViewKind = "image" | "video" | "audio" | "pdf" | "markdown" | "html" | "code" | "office" | "unknown";
+
+export function nativeVideo(name: string, mime?: string): boolean {
+  const e = extOf(name);
+  if (NATIVE_VIDEO.has(e)) return true;
+  // .mov usually holds H.264 (plays in Safari/Chrome); anything else misleading
+  // is resolved at runtime: the player falls back on actual decode failure.
+  if (e === "mov") return true;
+  if (mime?.startsWith("video/") && (mime.includes("mp4") || mime.includes("webm") || mime.includes("ogg"))) return true;
+  return false;
+}
 
 export function viewKind(name: string, mime?: string): ViewKind {
   const e = extOf(name);
