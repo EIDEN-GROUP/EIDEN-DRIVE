@@ -37,7 +37,7 @@ export default function CalendarPage() {
       ]);
       if (dead) return;
       setFolders(fr.results ?? []);
-      setFiles((dr.results ?? []).filter((f: CalFile) => !f.id.startsWith("g:")));
+      setFiles((dr.results ?? []).filter((f: CalFile & { mime?: string }) => !f.id.startsWith("g:") && f.mime !== "application/vnd.google-apps.folder"));
       setPlans(pr.results ?? []);
       setLoading(false);
     })();

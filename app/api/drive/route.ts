@@ -17,7 +17,7 @@ export async function GET(req: Request) {
   const supa = createClient();
 
   // 1) indexed files (Google + Local + Backup badges)
-  const { data: rows } = await supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id").ilike("name", `%${escapeLike(q)}%`).range(offset, offset + limit - 1);
+  const { data: rows } = await supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id").ilike("name", `%${escapeLike(q)}%`).range(offset, offset + limit - 1);
 
   // 2) live Google fallback, across EVERY connected account — NEVER allowed to
   // 500 the route. A dead token or unreachable root degrades that account to
@@ -27,12 +27,14 @@ export async function GET(req: Request) {
   let googleNote = "ok";
   let google_error: string | null = null;
   const errors: string[] = [];
-  async function liveFrom(label: string, fn: () => Promise<{ files?: Live[]; note?: string }>) {
+  async function liveFrom(label: string, accountId: string | null, fn: () => Promise<{ files?: Live[]; note?: string }>) {
     try {
       const g = await fn();
       if (g.note) googleNote = g.note;
       for (const f of (g.files ?? []).slice(0, 10)) {
-        live.push({ id: `g:${f.id}`, name: f.name ?? "?", mime: f.mimeType ?? undefined, size: Number(f.size ?? 0), backends: ["google"], accountLabel: label });
+        // Live (not yet synced) rows carry their account: g:<accountId>:<fileId>.
+        // Legacy single-connection rows stay g:<fileId>.
+        live.push({ id: accountId ? `g:${accountId}:${f.id}` : `g:${f.id}`, name: f.name ?? "?", mime: f.mimeType ?? undefined, size: Number(f.size ?? 0), backends: ["google"], accountLabel: label });
         if (live.length >= 10) break;
       }
     } catch (e) {
@@ -49,10 +51,10 @@ export async function GET(req: Request) {
       if (live.length >= 10) break;
       const d = clientFor(a);
       if (!d) continue;
-      await liveFrom(a.label, () => listDriveFiles(q, undefined, { drive: d, rootId: a.root_id ?? "" }));
+      await liveFrom(a.label, a.id, () => listDriveFiles(q, undefined, { drive: d, rootId: a.root_id ?? "" }));
     }
   } else {
-    await liveFrom("Primary", () => listDriveFiles(q));
+    await liveFrom("Primary", null, () => listDriveFiles(q));
   }
   if (errors.length) google_error = `${errors.join(" ")} Showing indexed files.`;
   const indexed = (rows ?? []).map((r: { id: string; name: string; mime: string; size: number; backends: string[]; drive_account_id?: string | null }) => ({

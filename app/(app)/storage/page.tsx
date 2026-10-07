@@ -18,8 +18,9 @@ function fmtDate(d: string): string {
 }
 
 export default function StoragePage() {
-  const [data, setData] = useState<{ drives: Drive[]; jobs: Job[]; agent: { heartbeat_min_ago: number | null; online: boolean } } | null>(null);
+  const [data, setData] = useState<{ drives: Drive[]; canManage?: boolean; jobs: Job[]; agent: { heartbeat_min_ago: number | null; online: boolean } } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmDel, setConfirmDel] = useState<Drive | null>(null);
 
   async function load() {
     const r = await fetch("/api/storage");
@@ -38,6 +39,29 @@ export default function StoragePage() {
 
   const backups = (data?.jobs ?? []).filter((j) => j.kind.startsWith("backup") || j.kind === "agent-heartbeat");
   const lastBackup = backups.find((j) => j.kind.startsWith("backup"));
+
+  async function setStatus(d: Drive, status: "active" | "disabled") {
+    const r = await fetch("/api/drive/accounts", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: d.id, status })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't update drive.", tone: "err" }); return; }
+    toast({ text: `"${d.label}" ${status === "active" ? "enabled" : "disabled"}.`, tone: "ok" });
+    load();
+  }
+  async function delDrive() {
+    if (!confirmDel) return;
+    const r = await fetch("/api/drive/accounts", {
+      method: "DELETE", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: confirmDel.id })
+    });
+    const j = await r.json().catch(() => ({}));
+    setConfirmDel(null);
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't remove drive.", tone: "err" }); return; }
+    toast({ text: "Drive disconnected — its files stay indexed.", tone: "ok" });
+    load();
+  }
   const totalUsed = (data?.drives ?? []).reduce((a, d) => a + d.used, 0);
   const totalCap = (data?.drives ?? []).reduce((a, d) => a + d.total, 0);
 
@@ -67,6 +91,19 @@ export default function StoragePage() {
                       ? <Pill tone="red">{d.status === "down" ? "Unreachable — reconnect it" : d.status}</Pill>
                       : d.rootKind === "folder" ? <Pill tone="fill">folder root</Pill>
                       : d.rootKind === "drive" ? <Pill tone="green">shared drive</Pill> : null}
+                    {data.canManage && d.id !== "legacy" && (
+                      <span className="ml-auto inline-flex gap-1.5">
+                        <button onClick={() => setStatus(d, d.status === "active" ? "disabled" : "active")}
+                          aria-label={`${d.status === "active" ? "Disable" : "Enable"} ${d.label}`}
+                          className="min-h-[36px] px-2.5 rounded-md border border-line text-[12px] hover:bg-tint">
+                          {d.status === "active" ? "Disable" : "Enable"}
+                        </button>
+                        <button onClick={() => setConfirmDel(d)} aria-label={`Disconnect ${d.label}`}
+                          className="min-h-[36px] px-2.5 rounded-md border border-danger/40 text-danger text-[12px]">
+                          Delete
+                        </button>
+                      </span>
+                    )}
                   </p>
                   {d.total > 0 ? (
                     <div className="mt-1.5">
@@ -106,6 +143,19 @@ export default function StoragePage() {
           {lastBackup && <p className="mt-2 text-xs text-muted">Last backup activity: {fmtDate(lastBackup.created_at)}</p>}
         </Card>
       </div>
+      {confirmDel && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={`Disconnect ${confirmDel.label}`}>
+          <div className="absolute inset-0 bg-black/50" onClick={() => setConfirmDel(null)} />
+          <div className="pop-in relative w-full max-w-sm rounded-xl bg-surface border border-line shadow-pop p-5">
+            <p className="text-[15px] font-medium">Disconnect “{confirmDel.label}”?</p>
+            <p className="mt-2 text-[13px] text-muted">FileOS forgets its token. Indexed files stay (readable); Google copies are untouched. Reconnect anytime from the button above.</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => setConfirmDel(null)} className="min-h-[44px] px-4 rounded-md border border-line text-sm">Cancel</button>
+              <button onClick={delDrive} className="min-h-[44px] px-4 rounded-md bg-danger text-white text-sm font-medium">Disconnect</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

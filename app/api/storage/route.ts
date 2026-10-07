@@ -49,6 +49,7 @@ export async function GET() {
   }
   return Response.json({
     drives,
+    canManage: can(me.role, "manage-users"),
     google: drives[0] ? { used: drives[0].used, total: drives[0].total, alert: (drives[0] as { alert?: string | null }).alert ?? null } : { used: 0, total: 0, unconfigured: true },
     jobs,
     agent: { heartbeat_min_ago: agentMin, online: agentMin !== null && agentMin < 10 }

@@ -96,8 +96,10 @@ async function walkFolderPage(pageToken?: string, rootId?: string, drive?: Drive
     calls++;
     for (const f of res.data.files ?? []) {
       cur.scanned++;
+      // Folders are kept as entries (the sync persists them, the tree renders
+      // them) AND queued for descent — files and folders share the page.
       if (f.mimeType === "application/vnd.google-apps.folder") cur.queue.push({ id: f.id! });
-      else out.push(f as GFile);
+      out.push(f as GFile);
       if (out.length >= 200) break;
     }
     if (res.data.nextPageToken) head.token = res.data.nextPageToken;

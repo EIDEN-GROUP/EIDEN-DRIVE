@@ -50,7 +50,8 @@ export async function POST(req: Request) {
     if (!f.id) continue;
     const row = {
       name: f.name ?? "?", mime: f.mimeType ?? "application/octet-stream",
-      size: Number(f.size ?? 0), google_file_id: f.id, drive_account_id: acct.id
+      size: Number(f.size ?? 0), google_file_id: f.id, drive_account_id: acct.id,
+      google_parent_id: f.parents?.[0] ?? null
     };
     const ex = have.get(f.id);
     if (ex) {

@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
   Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload,
-  Eye, Copy, ClipboardPaste
+  Eye, Copy, ClipboardPaste, HardDrive
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -93,6 +93,9 @@ export default function Explorer() {
   const [editFile, setEditFile] = useState<ViewFile | null>(null);
   const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; status: string }[]>([]);
   const [driveSel, setDriveSel] = useState(""); // "" = Auto (roomiest drive)
+  const [driveView, setDriveView] = useState<{ accountId: string; folderId: string | null; path: { id: string; name: string }[] } | null>(null);
+  const [tree, setTree] = useState<{ id: string; name: string; mime: string; size: number; googleId: string; parent: string | null }[] | null>(null);
+  const [treeLoading, setTreeLoading] = useState(false);
   const [confirmTrash, setConfirmTrash] = useState<FileRow | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newName, setNewName] = useState("");
@@ -226,6 +229,21 @@ export default function Explorer() {
     if (nav.kind === "bin") return [];
     if (nav.kind === "recent") return sortFiles(files).sort((a, b) => String(b.updated_at ?? b.updated ?? "").localeCompare(String(a.updated_at ?? a.updated ?? ""))).slice(0, 50).map((f) => fileRowOf(f, 0));
     if (nav.kind === "docs") return sortFiles(files.filter((f) => DOC_KINDS.includes(classify(f.name, f.mime)))).map((f) => fileRowOf(f, 0));
+    // Drive tree view: one account's Google folders/files from the index.
+    if (driveView && nav.kind === "root" && !q.trim()) {
+      if (!tree) return [];
+      const acctLabel = accounts.find((a) => a.id === driveView.accountId)?.label ?? "Drive";
+      const idSet = new Set(tree.map((t) => t.googleId));
+      const kids = tree.filter((t) => driveView.folderId ? t.parent === driveView.folderId : (!t.parent || !idSet.has(t.parent)));
+      const gFolders = kids.filter((k) => k.mime === "application/vnd.google-apps.folder");
+      const gFiles = kids.filter((k) => k.mime !== "application/vnd.google-apps.folder");
+      const toFile = (t: { id: string; name: string; mime: string; size: number; googleId: string }): FileRow =>
+        ({ id: t.id ?? `g:${driveView.accountId}:${t.googleId}`, name: t.name, mime: t.mime, size: t.size, backends: ["google"], accountLabel: acctLabel });
+      return [
+        ...gFolders.map((g): Row => ({ key: `gdrive:${g.googleId}`, kind: "folder", id: `gdrive:${g.googleId}`, name: g.name, depth: 0, dept: null })),
+        ...sortFiles(gFiles.map(toFile)).map((f) => fileRowOf(f, 0))
+      ];
+    }
     if (q.trim()) {
       const n = q.trim().toLowerCase();
       return [...sortFolders(folders.filter((f) => f.name.toLowerCase().includes(n))).map((f) => folderRowOf(f, 0)), ...sortFiles(files).map((f) => fileRowOf(f, 0))];
@@ -244,7 +262,7 @@ export default function Explorer() {
     };
     walk(curFolder, 0);
     return out;
-  }, [nav.kind, files, folders, q, tagFilter, sort, expanded, curFolder, deptOf]);
+  }, [nav.kind, files, folders, q, tagFilter, sort, expanded, curFolder, deptOf, driveView, tree, accounts]);
 
   const sel: Row | null = useMemo(() => {
     if (!selKey) return null;
@@ -268,8 +286,19 @@ export default function Explorer() {
   function forward() { if (hi < hist.length - 1) { setHi(hi + 1); setSelKey(null); } }
 
   function open(r: Row) {
-    if (r.kind === "folder") { go({ kind: "root", path: pathTo(r.id) }); return; }
-    if (!r.id.startsWith("g:")) router.push(`/drive/${r.id}`);
+    if (r.kind === "folder") {
+      // Google-tree folders descend inside the drive view; local folders use history.
+      if (r.id.startsWith("gdrive:")) {
+        const gid = r.id.slice("gdrive:".length);
+        const dv = driveView;
+        if (dv) setDriveView({ ...dv, folderId: gid, path: [...dv.path, { id: gid, name: r.name }] });
+        return;
+      }
+      go({ kind: "root", path: pathTo(r.id) });
+      return;
+    }
+    // Double-click / Enter / Open = in-app preview for every file kind.
+    if (r.file) setViewFile(toViewFile(r.file));
   }
   function toggleExpand(id: string) {
     setExpanded((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -406,6 +435,31 @@ export default function Explorer() {
     } finally {
       setSyncing(false);
     }
+  }
+
+  // Drive tree data: fetched once per opened drive (folders + files, capped).
+  useEffect(() => {
+    if (!driveView) { setTree(null); return; }
+    let dead = false;
+    setTree(null);
+    setTreeLoading(true);
+    fetch(`/api/drive/tree?accountId=${driveView.accountId}`)
+      .then((r) => r.json().catch(() => ({})))
+      .then((d) => {
+        if (dead) return;
+        setTree((d.results ?? []).map((t: { id: string; name: string; mime: string; size: number; google_file_id: string; google_parent_id: string | null }) => ({
+          id: t.id, name: t.name, mime: t.mime, size: t.size ?? 0, googleId: t.google_file_id, parent: t.google_parent_id
+        })));
+        setTreeLoading(false);
+      })
+      .catch(() => { if (!dead) setTreeLoading(false); });
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driveView?.accountId]);
+
+  function openDrive(accountId: string) {
+    setDriveView({ accountId, folderId: null, path: [] });
+    setSelKey(null); setInfoOpen(false); setCtx(null);
   }
 
   function copyFile(f: FileRow) {
@@ -567,6 +621,48 @@ export default function Explorer() {
         {/* Body */}
         <div className="flex-1 min-h-0 flex">
           <div className="flex-1 min-w-0 flex flex-col">
+            {/* Drive cards: each connected Google drive by name at root. */}
+            {!loading && !driveView && nav.kind === "root" && nav.path.length === 0 && !q.trim() && accounts.length > 0 && (
+              <div className="shrink-0 px-3 pt-3">
+                <p className="text-[11px] font-semibold tracking-wider text-muted mb-1.5">DRIVES</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+                  {accounts.map((a) => (
+                    <button key={a.id} onClick={() => openDrive(a.id)}
+                      className="flex items-center gap-3 p-3 rounded-lg border border-line hover:border-brand text-left transition-colors min-h-[64px]">
+                      <span className="size-10 rounded-lg bg-tint text-brand grid place-items-center shrink-0" aria-hidden="true"><HardDrive size={20} /></span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[13.5px] font-medium truncate">{a.label}</span>
+                        <span className="block text-[11px] text-muted truncate">
+                          {a.email ?? ""}{a.free !== null ? ` · ${formatBytes(a.free)} free` : ""}{a.status !== "active" ? " · disabled" : ""}
+                        </span>
+                      </span>
+                      <ChevronRight size={16} className="text-muted shrink-0" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Inside a drive: breadcrumb back through its folders. */}
+            {!loading && driveView && nav.kind === "root" && !q.trim() && (
+              <div className="shrink-0 px-3 pt-2 flex items-center gap-1.5 text-[12.5px] overflow-x-auto whitespace-nowrap" aria-label="Drive location">
+                <button onClick={() => setDriveView(null)} className="text-brand font-medium min-h-[36px] px-1">Drives</button>
+                <ChevronRight size={12} className="text-muted shrink-0" />
+                <button onClick={() => setDriveView({ ...driveView, folderId: null, path: [] })}
+                  className={`min-h-[36px] px-1 ${driveView.path.length === 0 ? "font-medium" : "hover:text-brand"}`}>
+                  {accounts.find((a) => a.id === driveView.accountId)?.label ?? "Drive"}
+                </button>
+                {driveView.path.map((p, i) => (
+                  <span key={p.id} className="flex items-center gap-1.5">
+                    <ChevronRight size={12} className="text-muted shrink-0" />
+                    <button
+                      onClick={() => i < driveView.path.length - 1 && setDriveView({ ...driveView, folderId: p.id, path: driveView.path.slice(0, i + 1) })}
+                      className={`min-h-[36px] px-1 ${i === driveView.path.length - 1 ? "font-medium" : "hover:text-brand"}`}>
+                      {p.name}
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="flex-1 min-h-0 overflow-auto"
               onClick={() => { setSelKey(null); setInfoOpen(false); }}
               onContextMenu={(e) => {
@@ -575,7 +671,7 @@ export default function Explorer() {
                 setSelKey(null); setInfoOpen(false); setCtx(null);
                 setCanvasCtx({ x: Math.min(e.clientX, window.innerWidth - 220), y: Math.min(e.clientY, window.innerHeight - 220) });
               }}>
-              {loading ? (
+              {loading || (driveView && treeLoading) ? (
                 <div aria-busy="true" aria-label="Loading files" className="p-4 flex flex-col gap-2">
                   {Array.from({ length: 8 }).map((_, i) => (
                     <div key={i} className="flex items-center gap-3">
@@ -744,10 +840,10 @@ export default function Explorer() {
         <div role="menu" style={{ left: ctx.x, top: ctx.y }} onClick={(e) => e.stopPropagation()}
           className="pop-in fixed z-[70] w-[184px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
           {[
-            { label: "Open", on: () => open(ctx.row), show: !(ctx.row.kind === "file" && ctx.row.id.startsWith("g:")) },
+            { label: "Open", on: () => open(ctx.row), show: ctx.row.kind === "file" },
             { label: "View", icon: <Eye size={14} />, on: () => ctx.row.file && setViewFile(toViewFile(ctx.row.file)), show: ctx.row.kind === "file" },
             { label: "Edit", icon: <Pencil size={14} />, on: () => ctx.row.file && setEditFile(toViewFile(ctx.row.file)),
-              show: ctx.row.kind === "file" && !!ctx.row.file && editable(ctx.row.file.name, ctx.row.file.mime) },
+              show: ctx.row.kind === "file" && !!ctx.row.file && !ctx.row.id.startsWith("g:") && editable(ctx.row.file.name, ctx.row.file.mime) },
             { label: "Copy", icon: <Copy size={14} />, on: () => ctx.row.file && copyFile(ctx.row.file),
               show: ctx.row.kind === "file" && !!ctx.row.file && !ctx.row.id.startsWith("g:") },
             { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(ctx.row.key); setInfoOpen(true); }, show: true },

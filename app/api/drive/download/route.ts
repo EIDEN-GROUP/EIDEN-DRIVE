@@ -9,20 +9,59 @@ import { signedDownloadUrl, UPLOAD_BUCKET } from "@/lib/storage";
 import { driveCtxFor } from "@/lib/drive-accounts";
 import { parseQuery } from "@/lib/http";
 
-const Q = z.object({ file_id: z.string().uuid(), raw: z.string().optional(), json: z.string().optional() });
+const Q = z.object({ file_id: z.string().max(300), raw: z.string().optional(), json: z.string().optional() });
 
 const RAW_MAX = 25 * 1024 * 1024; // in-app preview cap — bigger files use Download
+
+// Parses live (not yet synced) Google ids: g:<accountId>:<googleFileId>
+// (legacy single-connection rows are g:<googleFileId>).
+function parseLiveId(file_id: string): { accountId: string | null; googleId: string } | null {
+  if (!file_id.startsWith("g:")) return null;
+  const rest = file_id.slice(2);
+  const i = rest.indexOf(":");
+  if (i < 0) return { accountId: null, googleId: rest };
+  return { accountId: rest.slice(0, i) || null, googleId: rest.slice(i + 1) };
+}
 
 // Real download: Supabase-hosted bytes get a 5-min signed URL; Google-hosted files
 // redirect to the Drive viewer (bytes stay in Google, permissions enforced there too).
 // ?json=1 → { url } instead of redirect (viewer embedding). ?raw=1 → bytes streamed
 // through the server (needed for in-app preview of Google files + text extraction).
+// Live g: ids stream raw directly from the right account — no index row needed.
 export async function GET(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
   const p = parseQuery(req, Q);
   if (p.error) return p.error;
   const { file_id } = p.data;
+  const live = parseLiveId(file_id);
+  if (live && p.data.raw) {
+    try {
+      const ctx = await driveCtxFor(live.accountId);
+      const g = ctx?.drive;
+      if (!g) throw new Error("google not configured");
+      const meta = await g.files.get({ fileId: live.googleId, fields: "size,mimeType,name", supportsAllDrives: true });
+      if (Number(meta.data.size ?? 0) > RAW_MAX) {
+        return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });
+      }
+      const dl = await g.files.get({ fileId: live.googleId, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" });
+      const name = String(meta.data.name ?? "file");
+      const mime = String(meta.data.mimeType ?? "application/octet-stream");
+      await logAudit({ actor: me.id, actor_name: me.username, action: "download", req, detail: { live_google: live.googleId } });
+      return new Response(Buffer.from(dl.data as ArrayBuffer), {
+        headers: { "content-type": mime, "content-disposition": `inline; filename="${encodeURIComponent(name)}"` }
+      });
+    } catch (e) {
+      const m = e instanceof Error ? e.message : "preview failed";
+      if (/not.?found|404/i.test(m)) return Response.json({ error: "Google copy missing — the Drive file was deleted or unshared", gone: true }, { status: 404 });
+      return Response.json({ error: m }, { status: 500 });
+    }
+  }
+  if (live && !p.data.raw) {
+    // No direct download URL exists for live rows (Drive blocks framing and
+    // direct links need cookies) — the viewer streams them via ?raw=1 instead.
+    return Response.json({ error: "open this file in the viewer (preview) — direct download needs a synced copy", live: true }, { status: 400 });
+  }
   const supa = createClient();
   const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });

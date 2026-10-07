@@ -12,6 +12,7 @@ export default function FileViewer({ file, onClose, onEdit }: {
   file: ViewFile; onClose: () => void; onEdit: (f: ViewFile) => void;
 }) {
   const kind = viewKind(file.name, file.mime);
+  const isLive = file.id.startsWith("g:"); // not yet synced: preview streams, no download/edit endpoints
   const rawUrl = `/api/drive/download?file_id=${file.id}&raw=1`;
   const [text, setText] = useState<string | null>(null);
   const [embedUrl, setEmbedUrl] = useState<string | null>(null);
@@ -61,15 +62,17 @@ export default function FileViewer({ file, onClose, onEdit }: {
       <div className="pop-in relative w-full max-w-4xl max-h-[88vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
         <div className="flex items-center gap-2 px-4 min-h-[56px] border-b border-line">
           <p className="text-[14px] font-medium truncate flex-1">{file.name}</p>
-          {(kind === "markdown" || kind === "html" || kind === "code") && (
+          {(kind === "markdown" || kind === "html" || kind === "code") && !isLive && (
             <button onClick={() => onEdit(file)} className="min-h-[40px] px-3 rounded-md border border-line text-[13px] flex items-center gap-1.5 hover:bg-tint">
               <Pencil size={14} /> Edit
             </button>
           )}
-          <a href={`/api/drive/download?file_id=${file.id}`}
-            className="min-h-[40px] px-3 rounded-md border border-line text-[13px] flex items-center gap-1.5 hover:bg-tint">
-            <Download size={14} /> Download
-          </a>
+          {!isLive && (
+            <a href={`/api/drive/download?file_id=${file.id}`}
+              className="min-h-[40px] px-3 rounded-md border border-line text-[13px] flex items-center gap-1.5 hover:bg-tint">
+              <Download size={14} /> Download
+            </a>
+          )}
           <button onClick={onClose} aria-label="Close preview" className="size-11 grid place-items-center rounded-md hover:bg-tint"><X size={18} /></button>
         </div>
         <div className="flex-1 min-h-0 overflow-auto">
@@ -82,7 +85,7 @@ export default function FileViewer({ file, onClose, onEdit }: {
             <div className="p-8 text-center">
               <FileWarning size={28} className="mx-auto text-muted" />
               <p className="mt-3 text-[14px]">{err}</p>
-              <a href={`/api/drive/download?file_id=${file.id}`} className="mt-4 inline-flex min-h-[44px] items-center px-4 rounded-md bg-brand text-white text-sm">Download instead</a>
+              {!isLive && <a href={`/api/drive/download?file_id=${file.id}`} className="mt-4 inline-flex min-h-[44px] items-center px-4 rounded-md bg-brand text-white text-sm">Download instead</a>}
             </div>
           )}
           {!busy && !err && kind === "image" && embedUrl && (
@@ -111,7 +114,7 @@ export default function FileViewer({ file, onClose, onEdit }: {
             <div className="p-8 text-center">
               <FileWarning size={28} className="mx-auto text-muted" />
               <p className="mt-3 text-[14px]">No in-app preview for this format — the bytes stay untouched.</p>
-              <a href={`/api/drive/download?file_id=${file.id}`} className="mt-4 inline-flex min-h-[44px] items-center px-4 rounded-md bg-brand text-white text-sm">Download to view</a>
+              {!isLive && <a href={`/api/drive/download?file_id=${file.id}`} className="mt-4 inline-flex min-h-[44px] items-center px-4 rounded-md bg-brand text-white text-sm">Download to view</a>}
             </div>
           )}
         </div>
