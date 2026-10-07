@@ -160,6 +160,13 @@ export async function trashDriveFile(fileId: string, d?: DriveLike) {
   return drive.files.update({ fileId, requestBody: { trashed: true }, supportsAllDrives: true });
 }
 
+// PERMANENT: removes the file from Google Drive (skips Google's own trash). Only used by the manager-only purge route.
+export async function deleteDriveFile(fileId: string, d?: DriveLike) {
+  const drive = d ?? driveClient();
+  if (!drive) return { stub: true };
+  return drive.files.delete({ fileId, supportsAllDrives: true });
+}
+
 export async function restoreDriveFile(fileId: string, d?: DriveLike) {
   const drive = d ?? driveClient();
   if (!drive) return { stub: true };

@@ -14,6 +14,7 @@ import FileViewer, { type ViewFile } from "./FileViewer";
 import FileEditor from "./FileEditor";
 import { editable, viewKind } from "./filetext";
 import { FileGlyph, FileIcon, FolderIcon, kindOf } from "../ui/Glyphs";
+import Pagination, { usePagination } from "../ui/Pagination";
 import { useTags } from "../tags/useTags";
 import { TagChip, TagDot, TagDots, TagEditor, TagPicker } from "../tags/TagUI";
 import type { Tag, TagKind } from "../tags/useTags";
@@ -88,6 +89,9 @@ export default function Explorer() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [files, setFiles] = useState<FileRow[]>([]);
   const [bin, setBin] = useState<BinRow[]>([]);
+  const [canPurge, setCanPurge] = useState(false);
+  const [confirmPurge, setConfirmPurge] = useState<{ id: string; name: string } | null>(null);
+  const [purging, setPurging] = useState(false);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [hist, setHist] = useState<Nav[]>([{ kind: "root", path: [] }]);
@@ -164,7 +168,7 @@ export default function Explorer() {
       if (fr) setFolders(fr.results ?? []);
       setFiles((prev) => append ? [...prev, ...(dr.results ?? [])] : (dr.results ?? []));
       setHasMore((dr.results ?? []).length >= PAGE);
-      if (br) setBin(br.results ?? []);
+      if (br) { setBin(br.results ?? []); setCanPurge(!!br.canPurge); }
       if (dr.google_error && dr.google_error !== lastGoogleError.current) {
         lastGoogleError.current = dr.google_error;
         toast({ text: dr.google_error, tone: "err" });
@@ -302,6 +306,11 @@ export default function Explorer() {
     return out;
   }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, curFolder, deptOf, driveView, tree, accounts]);
 
+  // Pagination: files/folders (list + grid) and the Recovery Bin page independently; any navigation/filter/sort resets to page 1.
+  const pg = usePagination(rows, { defaultSize: 50, sizes: [25, 50, 100, 200], storageKey: "files",
+    resetKey: `${nav.kind}|${nav.path.join("/")}|${q}|${tagSel.join(",")}|${tagFilter}|${driveView?.accountId}|${driveView?.folderId}|${sort.key}${sort.dir}` });
+  const binPg = usePagination(bin, { defaultSize: 25, sizes: [10, 25, 50, 100], storageKey: "bin" });
+
   const sel: Row | null = useMemo(() => {
     if (!selKey) return null;
     if (nav.kind === "bin") {
@@ -358,6 +367,19 @@ export default function Explorer() {
       load(q);
     } else toast({ text: "Trash failed. Try again.", tone: "err" });
     setConfirmTrash(null);
+  }
+
+  async function purge() {
+    if (!confirmPurge || purging) return;
+    setPurging(true);
+    const r = await fetch("/api/drive/purge", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: confirmPurge.id }) });
+    const d = await r.json().catch(() => ({}));
+    setPurging(false);
+    if (r.ok) {
+      toast({ text: `"${confirmPurge.name}" deleted permanently.`, tone: "ok" });
+      setBin((b) => b.filter((x) => x.file_id !== confirmPurge.id));
+      setSelKey(null); setConfirmPurge(null); load(q, 0, false, true);
+    } else { toast({ text: d.error ?? "Couldn't delete the file.", tone: "err" }); setConfirmPurge(null); }
   }
 
   async function restore(id: string, name: string) {
@@ -814,7 +836,7 @@ export default function Explorer() {
                   ? <EmptyState title="Recovery Bin is empty" body="Deleted files rest here for 90 days. Members can never delete permanently." />
                   : (
                     <ul className="divide-y divide-line">
-                      {bin.map((b) => {
+                      {binPg.pageItems.map((b) => {
                         const fi = Array.isArray(b.file_index) ? b.file_index[0] : b.file_index;
                         const id = fi?.id ?? b.file_id;
                         return (
@@ -824,6 +846,7 @@ export default function Explorer() {
                             <span className="flex-1 truncate">{fi?.name}</span>
                             <span className="text-[11px] text-muted hidden sm:block">purges {fmtDate(b.purge_at)}</span>
                             <button onClick={(e) => { e.stopPropagation(); restore(b.file_id, fi?.name ?? "?"); }} className="min-h-[44px] px-2 text-[12px] text-brand flex items-center gap-1 hover:underline"><Undo2 size={14} /> Restore</button>
+                            {canPurge && <button onClick={(e) => { e.stopPropagation(); setConfirmPurge({ id: b.file_id, name: fi?.name ?? "file" }); }} aria-label={`Delete ${fi?.name ?? "file"} permanently`} title="Delete permanently" className="size-11 grid place-items-center rounded-md text-muted hover:text-danger hover:bg-danger/10 transition-colors"><Trash2 size={16} /></button>}
                           </li>
                         );
                       })}
@@ -842,7 +865,7 @@ export default function Explorer() {
                     <button role="columnheader" aria-sort={ariaSort("size")} onClick={(e) => { e.stopPropagation(); sortBy("size"); }} className="text-left flex items-center gap-1">Size {arrow("size")}</button>
                     <button role="columnheader" aria-sort={ariaSort("kind")} onClick={(e) => { e.stopPropagation(); sortBy("kind"); }} className="frow-hide text-left items-center gap-1">Kind {arrow("kind")}</button>
                   </div>
-                  {rows.map((r) => {
+                  {pg.pageItems.map((r) => {
                     const on = selKey === r.key;
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
                     return (
@@ -871,7 +894,7 @@ export default function Explorer() {
                 </div>
               ) : (
                 <div role="grid" aria-label={`${rows.length} items`} className="p-4 grid gap-1 content-start" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))" }}>
-                  {rows.map((r) => {
+                  {pg.pageItems.map((r) => {
                     const on = selKey === r.key;
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
                     return (
@@ -889,7 +912,7 @@ export default function Explorer() {
                   })}
                 </div>
               )}
-              {hasMore && !loading && nav.kind !== "bin" && (
+              {hasMore && !loading && nav.kind !== "bin" && pg.page === pg.pages && (
                 <div className="p-4 grid place-items-center">
                   <button onClick={loadMore} disabled={loadingMore}
                     className="min-h-[44px] px-6 rounded-md border border-line text-sm hover:bg-tint disabled:opacity-50">
@@ -898,6 +921,7 @@ export default function Explorer() {
                 </div>
               )}
             </div>
+            <div className="shrink-0 border-t border-line px-3 empty:hidden"><Pagination pager={nav.kind === "bin" ? binPg : pg} noun={nav.kind === "bin" ? "files" : "items"} /></div>
             <p className="shrink-0 h-8 px-4 flex items-center text-[11px] text-muted border-t border-line" role="status">
               {nav.kind === "bin" ? `${bin.length} in bin` : `${folderCount} folders · ${fileRows.length} files · ${formatBytes(totalSize)}`}
             </p>
@@ -957,6 +981,9 @@ export default function Explorer() {
                 )}
                 {sel.kind === "file" && nav.kind === "bin" && (
                   <button onClick={() => restore(sel.id, sel.name)} aria-label="Restore" className="px-4 min-h-[44px] hover:text-brand"><Undo2 size={19} strokeWidth={1.6} /></button>
+                )}
+                {sel.kind === "file" && nav.kind === "bin" && canPurge && (
+                  <button onClick={() => setConfirmPurge({ id: sel.id, name: sel.name })} aria-label="Delete permanently" title="Delete permanently" className="px-4 min-h-[44px] text-muted hover:text-danger"><Trash2 size={19} strokeWidth={1.6} /></button>
                 )}
                 {sel.kind === "file" && !sel.id.startsWith("g:") && nav.kind !== "bin" && sel.file && (
                   <button onClick={() => setConfirmTrash(sel.file!)} aria-label="Move to Recovery Bin" className="px-4 min-h-[44px] hover:text-danger"><Trash2 size={19} strokeWidth={1.6} /></button>
@@ -1048,6 +1075,10 @@ export default function Explorer() {
           </div>
         </form>
       </Modal>
+
+      <ConfirmDialog open={!!confirmPurge} title={`Delete “${confirmPurge?.name}” permanently?`}
+        body="This erases the file from Eiden Drive and from Google Drive. It cannot be recovered afterwards — the Recovery Bin is the last safety net."
+        confirmLabel={purging ? "Deleting…" : "Delete forever"} onClose={() => !purging && setConfirmPurge(null)} onConfirm={purge} />
 
       <ConfirmDialog open={!!confirmTrash} title="Move to Recovery Bin?"
         body={`"${confirmTrash?.name}" stays recoverable for 90 days. Members can never delete permanently.`}

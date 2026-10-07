@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { createClient } from "@/lib/supabase-server";
-import { getProfile } from "@/lib/roles";
+import { getProfile, can } from "@/lib/roles";
 
 export async function GET() {
   const me = await getProfile();
@@ -11,5 +11,5 @@ export async function GET() {
     .select("file_id,deleted_at,purge_at,file_index(id,name,mime,size,updated_at)")
     .order("deleted_at", { ascending: false }).limit(100);
   if (error) return Response.json({ error: error.message }, { status: 500 });
-  return Response.json({ results: data ?? [] });
+  return Response.json({ results: data ?? [], canPurge: can(me.role, "perm-delete") });
 }

@@ -2,8 +2,8 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { detectDelimiter, parseCsv } from "./lib";
+import Pagination, { usePagination } from "../ui/Pagination";
 
-const STEP = 500;
 
 /** CSV / TSV as a real table: sticky header, row numbers, sort, filter, delimiter auto-detected. */
 export default function CsvView({ text }: { text: string }) {
@@ -12,7 +12,6 @@ export default function CsvView({ text }: { text: string }) {
   const [header, setHeader] = useState(true);
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<{ col: number; dir: 1 | -1 } | null>(null);
-  const [limit, setLimit] = useState(STEP);
   const head = header && rows.length ? rows[0] : null;
   const body = header ? rows.slice(1) : rows;
   const cols = Math.max(0, ...rows.slice(0, 200).map((r) => r.length));
@@ -30,11 +29,12 @@ export default function CsvView({ text }: { text: string }) {
     return r;
   }, [body, q, sort]);
 
+  const pager = usePagination(view, { defaultSize: 100, sizes: [50, 100, 250, 500], storageKey: "csv", resetKey: `${q}|${sort?.col}|${sort?.dir}|${header}` });
   if (!rows.length) return <p className="p-8 text-center text-[14px] text-muted">This file is empty.</p>;
   return (
     <div className="flex flex-col h-full min-h-0">
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-line text-[12px] text-muted shrink-0">
-        <input value={q} onChange={(e) => { setQ(e.target.value); setLimit(STEP); }} placeholder="Filter rows" aria-label="Filter rows"
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter rows" aria-label="Filter rows"
           className="min-h-[36px] w-44 rounded-md border border-line bg-surface px-2.5 text-[12.5px] text-ink focus:border-brand focus:outline-none" />
         <label className="flex items-center gap-1.5 min-h-[36px] cursor-pointer"><input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} className="accent-brand" /> First row is a header</label>
         <span className="flex-1" />
@@ -55,18 +55,16 @@ export default function CsvView({ text }: { text: string }) {
             </tr>
           </thead>
           <tbody>
-            {view.slice(0, limit).map((r, i) => (
+            {pager.pageItems.map((r, i) => (
               <tr key={i} className="hover:bg-tint/40">
-                <td className="px-2 h-8 text-right text-muted tabular-nums border-b border-line/60">{i + 1}</td>
+                <td className="px-2 h-8 text-right text-muted tabular-nums border-b border-line/60">{pager.from + i}</td>
                 {Array.from({ length: cols }, (_, c) => <td key={c} className="px-3 h-8 border-b border-l border-line/60 max-w-[360px] truncate" title={r[c]}>{r[c]}</td>)}
               </tr>
             ))}
           </tbody>
         </table>
-        {view.length > limit && (
-          <div className="p-3 text-center"><button onClick={() => setLimit((l) => l + STEP * 2)} className="min-h-[40px] px-4 rounded-md border border-line text-[13px] hover:bg-tint">Show more ({(view.length - limit).toLocaleString()} left)</button></div>
-        )}
       </div>
+      <div className="shrink-0 border-t border-line px-3"><Pagination pager={pager} noun="rows" /></div>
     </div>
   );
 }

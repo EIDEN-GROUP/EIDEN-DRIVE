@@ -1,24 +1,29 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Copy, WrapText } from "lucide-react";
 import { highlight } from "../drive/filetext";
 import { toast } from "../ui/Toast";
+import Pagination, { usePagination } from "../ui/Pagination";
 
-/** Source / plain-text reader: line numbers, wrap toggle, find-in-file with match count, copy. */
+/** Source / plain-text reader: line numbers, wrap toggle, find-in-file (jumps to the first match), copy. Long files are paged by lines. */
 export default function TextView({ text, note }: { text: string; note?: string }) {
   const [wrap, setWrap] = useState(false);
   const [q, setQ] = useState("");
   const lines = useMemo(() => text.split("\n"), [text]);
   const needle = q.trim().toLowerCase();
   const hits = useMemo(() => (needle ? lines.reduce((n, l) => n + (l.toLowerCase().includes(needle) ? 1 : 0), 0) : 0), [lines, needle]);
-  const html = useMemo(() => {
-    const MAX = 20_000; // keep the DOM sane; the rest is one click away via Download
-    return lines.slice(0, MAX).map((l, i) => {
-      const hl = highlight(l) || "&nbsp;";
-      const hit = needle && l.toLowerCase().includes(needle);
-      return `<span class="cl${hit ? " cl-hit" : ""}"><span class="ln">${i + 1}</span><span class="lc">${hl}</span></span>`;
-    }).join("") + (lines.length > MAX ? `<span class="cl"><span class="ln"></span><span class="lc">… ${lines.length - MAX} more lines — download to read everything</span></span>` : "");
-  }, [lines, needle]);
+  const pager = usePagination(lines, { defaultSize: 500, sizes: [200, 500, 1000, 2000], storageKey: "text", resetKey: text });
+  const { setPage, size } = pager;
+  useEffect(() => {
+    if (!needle) return;
+    const i = lines.findIndex((l) => l.toLowerCase().includes(needle));
+    if (i >= 0) setPage(Math.floor(i / size) + 1);
+  }, [needle, lines, size, setPage]);
+  const html = useMemo(() => pager.pageItems.map((l, i) => {
+    const hl = highlight(l) || "&nbsp;";
+    const hit = needle && l.toLowerCase().includes(needle);
+    return `<span class="cl${hit ? " cl-hit" : ""}"><span class="ln">${pager.from + i}</span><span class="lc">${hl}</span></span>`;
+  }).join(""), [pager.pageItems, pager.from, needle]);
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -35,6 +40,7 @@ export default function TextView({ text, note }: { text: string; note?: string }
       </div>
       {note && <p className="px-4 py-2 text-[12px] text-muted bg-soft border-b border-line shrink-0">{note}</p>}
       <pre className={`code-view flex-1 min-h-0 overflow-auto p-4 text-[12.5px] leading-6 ${wrap ? "whitespace-pre-wrap break-words" : ""}`} dangerouslySetInnerHTML={{ __html: html }} />
+      <div className="shrink-0 border-t border-line px-3"><Pagination pager={pager} noun="lines" /></div>
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { File as FileIcon, Folder } from "lucide-react";
 import { fmtBytes, gunzip, parseTar, type ArchEntry } from "./lib";
 import TextView from "./TextView";
+import Pagination, { usePagination } from "../ui/Pagination";
 import { decodeText, looksLikeText } from "./lib";
 
 /** Archive contents (zip & friends, tar, tar.gz/tgz, gz). Listing only — nothing is extracted or executed. */
@@ -39,8 +40,9 @@ export default function ArchiveView({ bytes, name }: { bytes: ArrayBuffer; name:
 
   const shown = useMemo(() => {
     const n = q.trim().toLowerCase();
-    return (entries ?? []).filter((e) => e.name.replace(/\/$/, "") !== "." && (!n || e.name.toLowerCase().includes(n))).slice(0, 5000);
+    return (entries ?? []).filter((e) => e.name.replace(/\/$/, "") !== "." && (!n || e.name.toLowerCase().includes(n))).slice(0, 20000);
   }, [entries, q]);
+  const pager = usePagination(shown, { defaultSize: 100, sizes: [50, 100, 250, 500], storageKey: "archive", resetKey: q });
 
   if (inner !== null) return <TextView text={inner} note="Decompressed text file (gzip)." />;
   if (!entries) return <div className="p-6 space-y-3" aria-label="Reading archive"><div className="skel h-5 w-1/3" /><div className="skel h-32 w-full" /></div>;
@@ -55,7 +57,7 @@ export default function ArchiveView({ bytes, name }: { bytes: ArrayBuffer; name:
       </div>
       {note && <p className="px-4 py-3 text-[13px] text-muted bg-soft border-b border-line">{note}</p>}
       <ul className="flex-1 min-h-0 overflow-auto text-[13px]" aria-label="Archive contents">
-        {shown.map((e) => {
+        {pager.pageItems.map((e) => {
           const depth = e.name.replace(/\/$/, "").split("/").length - 1;
           const base = e.name.replace(/\/$/, "").split("/").pop();
           return (
@@ -68,6 +70,7 @@ export default function ArchiveView({ bytes, name }: { bytes: ArrayBuffer; name:
         })}
         {shown.length === 0 && !note && <li className="p-8 text-center text-muted">{q ? "No matches." : "This archive is empty."}</li>}
       </ul>
+      <div className="shrink-0 border-t border-line px-3"><Pagination pager={pager} noun="entries" /></div>
     </div>
   );
 }

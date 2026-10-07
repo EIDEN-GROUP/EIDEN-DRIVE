@@ -5,10 +5,10 @@ import Select from "@/components/ui/Select";
 import { toast } from "@/components/ui/Toast";
 import { EmptyNote, FeedItem, Kpi, KpiRow, LineChart, PageHead, Panel, StatusPill, relTime } from "@/components/dash/Dash";
 import { ACTIONS, actionMeta } from "@/components/dash/actions";
+import Pagination, { usePagination } from "@/components/ui/Pagination";
 
 interface Entry { id: number; actor_name: string; action: string; file_id: string | null; detail: Record<string, unknown> | null; ip: string | null; ts: string }
 const LIMIT = 300;
-const PAGE = 40;
 
 const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 function detailText(e: Entry): string | null {
@@ -35,7 +35,6 @@ export default function ActivityClient() {
   const [q, setQ] = useState(""); const [action, setAction] = useState(""); const [actor, setActor] = useState("");
   const [from, setFrom] = useState(""); const [to, setTo] = useState("");
   const [applied, setApplied] = useState({ q: "", action: "", actor: "", from: "", to: "" });
-  const [shown, setShown] = useState(PAGE);
 
   async function run(f = applied) {
     setLoading(true);
@@ -44,7 +43,7 @@ export default function ActivityClient() {
     if (f.from) sp.set("from", f.from); if (f.to) sp.set("to", f.to);
     const r = await fetch(`/api/activity?${sp}`);
     const d = await r.json().catch(() => ({}));
-    setItems(d.results ?? []); setShown(PAGE); setLoading(false);
+    setItems(d.results ?? []); setLoading(false);
   }
   useEffect(() => { run(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -74,6 +73,7 @@ export default function ActivityClient() {
     toast({ text: `Exported ${items.length} events.`, tone: "ok" });
   }
 
+  const pager = usePagination(items, { defaultSize: 25, storageKey: "activity", resetKey: items });
   const input = "min-h-[44px] rounded-lg border border-line bg-surface px-3 text-[13.5px] focus:border-brand focus:outline-none";
   const feed = items.slice(0, 6);
 
@@ -142,7 +142,7 @@ export default function ActivityClient() {
                   </tr>
                 </thead>
                 <tbody>
-                  {items.slice(0, shown).map((e) => { const m = actionMeta(e.action); return (
+                  {pager.pageItems.map((e) => { const m = actionMeta(e.action); return (
                     <tr key={e.id} className="border-b border-line/70 last:border-0 hover:bg-tint/30 transition-colors">
                       <td className="px-4 py-3.5 whitespace-nowrap text-ink/80 tabular-nums" title={new Date(e.ts).toLocaleString()}>{fmtDay(e.ts)} <span className="text-muted">· {fmtTime(e.ts)}</span></td>
                       <td className="px-3 py-3.5"><span className="flex items-center gap-2.5 min-w-0"><span className="size-7 rounded-full bg-tint text-brand grid place-items-center text-[12px] font-medium shrink-0" aria-hidden="true">{e.actor_name.slice(0, 1).toUpperCase()}</span><span className="truncate">{e.actor_name}</span></span></td>
@@ -152,9 +152,7 @@ export default function ActivityClient() {
                     </tr>); })}
                 </tbody>
               </table>
-              {items.length > shown && (
-                <div className="pt-4 text-center"><button onClick={() => setShown((s) => s + 100)} className="min-h-[44px] px-5 rounded-lg border border-line text-[13.5px] hover:bg-tint">Show more ({(items.length - shown).toLocaleString()} left)</button></div>
-              )}
+              <Pagination pager={pager} noun="events" />
             </div>
           )}
       </Panel>

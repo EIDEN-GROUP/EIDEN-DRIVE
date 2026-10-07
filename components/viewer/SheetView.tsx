@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
+import Pagination, { usePagination } from "../ui/Pagination";
 
-const MAX_ROWS = 2000, MAX_COLS = 60;
+const MAX_ROWS = 10000, MAX_COLS = 60;
 const colName = (i: number) => { let s = ""; for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s; return s; };
 
 /** Spreadsheets (xlsx · xlsm · xlsb · xls · ods · numbers): every sheet as a tab, values shown as formatted in the file. */
@@ -36,6 +37,7 @@ export default function SheetView({ bytes }: { bytes: ArrayBuffer }) {
     return n ? r.filter((x) => x.some((c) => c.toLowerCase().includes(n))) : r;
   }, [wb, name, q]);
   const cols = Math.max(0, ...rows.slice(0, 300).map((r) => r.length));
+  const pager = usePagination(rows, { defaultSize: 100, sizes: [50, 100, 250, 500], storageKey: "sheet", resetKey: `${name}|${q}` });
 
   if (err) return <p className="p-8 text-center text-[14px] text-muted">This workbook couldn’t be read ({err}). It may be password-protected or damaged.</p>;
   if (!wb) return <div className="p-6 space-y-3" aria-label="Reading workbook"><div className="skel h-5 w-1/3" /><div className="skel h-40 w-full" /></div>;
@@ -57,9 +59,9 @@ export default function SheetView({ bytes }: { bytes: ArrayBuffer }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
+              {pager.pageItems.map((r, i) => (
                 <tr key={i} className="hover:bg-tint/40">
-                  <td className="bg-head/60 text-center text-muted tabular-nums border-b border-line/60 px-1 h-7">{i + 1}</td>
+                  <td className="bg-head/60 text-center text-muted tabular-nums border-b border-line/60 px-1 h-7">{pager.from + i}</td>
                   {Array.from({ length: cols }, (_, c) => <td key={c} className="px-3 h-7 border-b border-l border-line/60 max-w-[320px] truncate whitespace-nowrap" title={r[c]}>{r[c]}</td>)}
                 </tr>
               ))}
@@ -68,6 +70,7 @@ export default function SheetView({ bytes }: { bytes: ArrayBuffer }) {
         )}
         {wb.cut[name!] && <p className="p-3 text-center text-[12px] text-muted">Showing the first {MAX_ROWS.toLocaleString()} rows and {MAX_COLS} columns. Download for the full sheet.</p>}
       </div>
+      <div className="shrink-0 border-t border-line px-3"><Pagination pager={pager} noun="rows" /></div>
       <div role="tablist" aria-label="Sheets" className="flex gap-1 px-2 py-1.5 border-t border-line bg-soft overflow-x-auto shrink-0">
         {wb.names.map((n, i) => (
           <button key={n} role="tab" aria-selected={tab === i} onClick={() => { setTab(i); setQ(""); }}

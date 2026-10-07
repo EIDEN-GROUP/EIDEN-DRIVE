@@ -6,6 +6,7 @@ import { toast } from "@/components/ui/Toast";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import InviteMember from "@/components/users/InviteMember";
 import Select from "@/components/ui/Select";
+import Pagination, { usePagination } from "@/components/ui/Pagination";
 import { Kpi, KpiRow, PageHead } from "@/components/dash/Dash";
 
 export interface DirectoryUser {
@@ -56,6 +57,7 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
     });
   }, [rows, q, dept, role, status]);
 
+  const pager = usePagination(filtered, { defaultSize: 15, sizes: [10, 15, 25, 50], storageKey: "users", resetKey: `${q}|${dept}|${role}|${status}` });
   const input = "min-h-[44px] rounded-md border border-line bg-surface px-3 text-[13px] focus:border-brand focus:outline-none";
 
   return (
@@ -99,7 +101,7 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
               </tr>
             </thead>
             <tbody>
-              {filtered.map((u) => {
+              {pager.pageItems.map((u) => {
                 const on = activeSince(u.last_sign_in_at);
                 return (
                   <tr key={u.id} onClick={() => setSelected(u)}
@@ -140,6 +142,7 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
           </table>
         </div>
         {filtered.length === 0 && <p className="p-6 text-sm text-muted text-center">No users match these filters.</p>}
+        <div className="px-4 border-t border-line"><Pagination pager={pager} noun="people" /></div>
       </div>
 
       {selected && (

@@ -6,6 +6,7 @@ import Modal from "../ui/Modal";
 import Select from "../ui/Select";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import { toast } from "../ui/Toast";
+import Pagination, { usePagination } from "../ui/Pagination";
 
 type Phase = "loading" | "locked" | "enroll" | "unlocked";
 interface Item { id: string; label: string; username: string | null; url: string | null; hasNotes: boolean; owner: string | null; ownerName: string | null; createdBy: string | null; created_at: string; broken?: boolean }
@@ -134,6 +135,8 @@ function Unlocked({ expires, onLock, onLocked }: { expires: string | null; onLoc
     return (items ?? []).filter((i) => !n || `${i.label} ${i.username ?? ""} ${i.url ?? ""} ${i.ownerName ?? ""}`.toLowerCase().includes(n));
   }, [items, q]);
 
+  const pager = usePagination(shown, { defaultSize: 12, sizes: [6, 12, 24, 48], storageKey: "vault", resetKey: q });
+
   async function remove() {
     const it = del; setDel(null);
     if (!it) return;
@@ -186,8 +189,9 @@ function Unlocked({ expires, onLock, onLocked }: { expires: string | null; onLoc
         </div>
       )}
       <ul className="grid gap-3 lg:grid-cols-2" aria-label="Secrets">
-        {shown.map((it) => <SecretCard key={it.id} item={it} canDelete={canCreate} onDelete={() => setDel(it)} />)}
+        {pager.pageItems.map((it) => <SecretCard key={it.id} item={it} canDelete={canCreate} onDelete={() => setDel(it)} />)}
       </ul>
+      <Pagination pager={pager} noun="secrets" />
 
       {creating && <NewSecret onClose={() => setCreating(false)} onCreated={() => { setCreating(false); load(); }} />}
       <ConfirmDialog open={!!del} title={`Delete “${del?.label}”?`} body="The encrypted secret is removed permanently. This can’t be undone." confirmLabel="Delete secret" onClose={() => setDel(null)} onConfirm={remove} />
