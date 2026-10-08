@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { getAccounts, quotaFor, rootKind, clientFor, bustAccountCache } from "@/lib/drive-accounts";
+import { getAccounts, quotaFor, rootKind, clientFor, bustAccountCache, purgeAccountRows } from "@/lib/drive-accounts";
 import { rootFor } from "@/lib/google-drive";
 import { parseJson } from "@/lib/http";
 
@@ -87,8 +87,9 @@ export async function PATCH(req: Request) {
 
 const Remove = z.object({ id: z.string().uuid() });
 
-// Managers+: disconnect a drive entirely. Indexed file rows are kept but
-// unpinned (drive_account_id → null, legacy resolution); Google copies are
+// Managers+: disconnect a drive entirely. Its pure mirrors are purged (they'd
+// be ghosts otherwise — the drive is gone so they can never re-sync); hybrid
+// rows keep their Storage bytes and lose the Google pin. Google copies are
 // untouched — this only removes FileOS's access (the token row).
 export async function DELETE(req: Request) {
   const me = await getProfile();
@@ -97,10 +98,15 @@ export async function DELETE(req: Request) {
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
   const db = adminClient();
-  await db.from("file_index").update({ drive_account_id: null }).eq("drive_account_id", p.data.id);
+  let purged = { deleted: 0, unpinned: 0 };
+  try {
+    purged = await purgeAccountRows(db, p.data.id);
+  } catch (e) {
+    return Response.json({ error: e instanceof Error ? e.message : "purge failed" }, { status: 500 });
+  }
   const { error } = await db.from("drive_accounts").delete().eq("id", p.data.id);
   if (error) return Response.json({ error: error.message }, { status: 500 });
   bustAccountCache();
-  await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { drive_account: p.data.id } });
-  return Response.json({ ok: true });
+  await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { drive_account: p.data.id, ...purged } });
+  return Response.json({ ok: true, ...purged });
 }

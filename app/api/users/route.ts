@@ -4,6 +4,7 @@ import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
+import { signedDownloadUrl } from "@/lib/storage";
 import { parseJson } from "@/lib/http";
 
 // Managers/Admins: full directory incl. emails + sign-in info (auth data is
@@ -14,15 +15,19 @@ export async function GET() {
   if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
   const db = adminClient();
-  const { data: profiles } = await db.from("profiles").select("id,username,role,department_tag").order("username").limit(200);
+  const { data: profiles } = await db.from("profiles").select("id,username,role,department_tag,avatar_path").order("username").limit(200);
   const { data: users } = await db.auth.admin.listUsers();
   const byId = new Map((users?.users ?? []).map((u) => [u.id, u]));
-  return Response.json({
-    results: (profiles ?? []).map((p: { id: string; username: string; role: string; department_tag: string | null }) => {
-      const u = byId.get(p.id) as { email?: string; created_at?: string; last_sign_in_at?: string } | undefined;
-      return { ...p, email: u?.email ?? null, created_at: u?.created_at ?? null, last_sign_in_at: u?.last_sign_in_at ?? null };
-    })
-  });
+  const results = [];
+  for (const p of (profiles ?? []) as { id: string; username: string; role: string; department_tag: string | null; avatar_path: string | null }[]) {
+    const u = byId.get(p.id) as { email?: string; created_at?: string; last_sign_in_at?: string } | undefined;
+    let avatarUrl: string | null = null;
+    if (p.avatar_path) {
+      try { avatarUrl = await signedDownloadUrl(p.avatar_path); } catch { avatarUrl = null; }
+    }
+    results.push({ ...p, avatar_path: undefined, avatarUrl, email: u?.email ?? null, created_at: u?.created_at ?? null, last_sign_in_at: u?.last_sign_in_at ?? null });
+  }
+  return Response.json({ results });
 }
 
 const Update = z.object({

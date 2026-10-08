@@ -1,6 +1,19 @@
 {
   "name": "eiden-mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "MCP server: per-member AI scope — add+view private only, no edit/delete"
+  "description": "Eiden MCP server: per-member AI scope — own files only, every call audited",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@supabase/supabase-js": "^2.47.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
 }

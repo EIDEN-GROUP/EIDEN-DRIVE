@@ -23,13 +23,14 @@ async function gate() {
 interface Row { id: string; owner: string | null; created_by: string | null; created_at: string; enc_blob: string }
 
 // List: labels / usernames / urls only. Passwords are never in the list — they need an explicit, audited reveal.
+// Visibility: your own items + ones you created for others. Admins see all labels (break-glass metadata only).
 export async function GET() {
   const g = await gate();
   if (g.error) return g.error;
   const { me, key } = g;
   const db = adminClient();
   let q = db.from("vault_items").select("id,owner,created_by,created_at,enc_blob").order("created_at", { ascending: false }).limit(200);
-  if (!can(me.role, "create-vault")) q = q.eq("owner", me.id); // members see only their own
+  if (me.role !== "admin") q = q.or(`owner.eq.${me.id},created_by.eq.${me.id}`);
   const { data, error } = await q;
   if (error) return Response.json({ error: error.message }, { status: 500 });
   const rows = (data ?? []) as Row[];
@@ -87,22 +88,31 @@ export async function DELETE(req: Request) {
   if (!can(me.role, "create-vault")) return Response.json({ error: "managers only" }, { status: 403 });
   const p = await parseJson(req, z.object({ id: z.string().uuid() }));
   if (p.error) return p.error;
+  const db = adminClient();
+  // Delete your own items, ones you created, or anything as admin — never someone else's.
+  const { data: target } = await db.from("vault_items").select("id,owner,created_by").eq("id", p.data.id).maybeSingle();
+  const t = target as { id: string; owner: string | null; created_by: string | null } | null;
+  if (!t || (t.owner !== me.id && t.created_by !== me.id && me.role !== "admin")) {
+    return Response.json({ error: "not found" }, { status: 404 });
+  }
   const { error } = await adminClient().from("vault_items").delete().eq("id", p.data.id);
   if (error) return Response.json({ error: error.message }, { status: 500 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { vault_item: p.data.id } });
   return Response.json({ ok: true });
 }
 
-// Reveal one item's secret + notes. Own items, or any item for managers. Every reveal is audited.
+// Reveal one item's secret + notes. Your own items, ones you created for
+// others, or anything as admin (break-glass — always audited). Managers can no
+// longer open another person's personal items.
 export async function PATCH(req: Request) {
   const g = await gate();
   if (g.error) return g.error;
   const { me, key } = g;
   const p = await parseJson(req, z.object({ id: z.string().uuid() }));
   if (p.error) return p.error;
-  const { data } = await adminClient().from("vault_items").select("id,owner,enc_blob").eq("id", p.data.id).maybeSingle();
-  const row = data as { id: string; owner: string | null; enc_blob: string } | null;
-  if (!row || (row.owner !== me.id && !can(me.role, "create-vault"))) return Response.json({ error: "not found" }, { status: 404 });
+  const { data } = await adminClient().from("vault_items").select("id,owner,created_by,enc_blob").eq("id", p.data.id).maybeSingle();
+  const row = data as { id: string; owner: string | null; created_by: string | null; enc_blob: string } | null;
+  if (!row || (row.owner !== me.id && row.created_by !== me.id && me.role !== "admin")) return Response.json({ error: "not found" }, { status: 404 });
   let doc;
   try { doc = await openItem(row.enc_blob, key); } catch { return Response.json({ error: "this item can't be decrypted (wrong key or damaged data)" }, { status: 422 }); }
   await logAudit({ actor: me.id, actor_name: me.username, action: "vault-view", req, detail: { vault_item: row.id, label: doc.label, result: "revealed" } });

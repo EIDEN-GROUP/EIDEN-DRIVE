@@ -12,6 +12,19 @@ import { Kpi, KpiRow, PageHead } from "@/components/dash/Dash";
 export interface DirectoryUser {
   id: string; username: string; role: string; department_tag: string | null;
   email?: string | null; created_at?: string | null; last_sign_in_at?: string | null;
+  avatarUrl?: string | null;
+}
+
+function Avatar({ u, size }: { u: { username: string; avatarUrl?: string | null }; size: string }) {
+  if (u.avatarUrl) {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={u.avatarUrl} alt="" className={`${size} rounded-full object-cover shrink-0`} />;
+  }
+  return (
+    <span className={`${size} rounded-full bg-tint text-brand grid place-items-center font-medium shrink-0`} aria-hidden="true">
+      {u.username.slice(0, 1).toUpperCase()}
+    </span>
+  );
 }
 
 function rel(iso: string | null | undefined): string {
@@ -108,9 +121,7 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
                     className="border-t border-line/70 first:border-0 hover:bg-tint/40 cursor-pointer transition-colors">
                     <td className="px-4 py-2.5">
                       <span className="flex items-center gap-2.5 min-w-0">
-                        <span className="size-9 rounded-full bg-tint text-brand grid place-items-center text-[13px] font-medium shrink-0" aria-hidden="true">
-                          {u.username.slice(0, 1).toUpperCase()}
-                        </span>
+                        <Avatar u={u} size="size-9 text-[13px]" />
                         <span className="min-w-0">
                           <span className="block font-medium truncate">{u.username}{u.username === me && <span className="text-muted font-normal"> (you)</span>}</span>
                           {u.email && <span className="block text-[12px] text-muted truncate">{u.email}</span>}
@@ -249,9 +260,7 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
       <div className="pop-in relative w-full max-w-lg max-h-[88vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
         <div className="p-5 pb-0">
           <div className="flex items-start gap-3">
-            <span className="size-12 rounded-full bg-tint text-brand grid place-items-center text-[18px] font-medium shrink-0" aria-hidden="true">
-              {u.username.slice(0, 1).toUpperCase()}
-            </span>
+            <Avatar u={u} size="size-12 text-[18px]" />
             <div className="min-w-0 flex-1">
               <p className="text-[17px] font-semibold truncate">{u.username}</p>
               {u.email && <p className="text-[12.5px] text-muted truncate">{u.email}</p>}

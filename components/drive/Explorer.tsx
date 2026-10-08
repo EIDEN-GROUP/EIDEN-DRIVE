@@ -108,6 +108,13 @@ export default function Explorer() {
   const [deptOpen, setDeptOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selKey, setSelKey] = useState<string | null>(null);
+  // Multi-select: selKey is the anchor/primary (details pane), multi holds the rest.
+  const [multi, setMulti] = useState<string[]>([]);
+  const anchorRef = useRef<number>(-1);
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const selSet = useMemo(() => new Set([selKey, ...multi].filter(Boolean) as string[]), [selKey, multi]);
+  function clearSel() { setSelKey(null); setMulti([]); anchorRef.current = -1; }
   const [infoOpen, setInfoOpen] = useState(false);
   const [pane, setPane] = useState<boolean | null>(null); // null = decide after mount (responsive default)
   const [favOpen, setFavOpen] = useState(true);
@@ -357,6 +364,94 @@ export default function Explorer() {
     else if (e.key === "ArrowLeft" && r.kind === "folder" && expanded.has(r.id)) toggleExpand(r.id);
   }
 
+  // Click selection: plain = single, Ctrl/Cmd = toggle, Shift = range from anchor.
+  function clickRow(e: React.MouseEvent, r: Row, idx: number) {
+    e.stopPropagation();
+    const items = pg.pageItems;
+    if (e.shiftKey && anchorRef.current >= 0 && items.length) {
+      const [a, b] = [anchorRef.current, idx].sort((x, y) => x - y);
+      const range = items.slice(a, b + 1).map((x) => x.key);
+      setSelKey(r.key);
+      setMulti(range.filter((k) => k !== r.key));
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      anchorRef.current = idx;
+      if (multi.includes(r.key)) {
+        setMulti(multi.filter((k) => k !== r.key));
+      } else if (selKey === r.key) {
+        setSelKey(multi[0] ?? null);
+        setMulti(multi.slice(1));
+      } else {
+        if (selKey) setMulti([...multi, selKey]);
+        setSelKey(r.key);
+      }
+      return;
+    }
+    anchorRef.current = idx;
+    setSelKey(r.key);
+    setMulti([]);
+  }
+
+  const selRows = useMemo(
+    () => rows.filter((r) => selSet.has(r.key) && r.kind === "file" && r.file && !r.id.startsWith("g:")),
+    [rows, selSet]
+  );
+
+  async function bulkTrash() {
+    setConfirmBulk(false);
+    if (!selRows.length) return;
+    let ok = 0;
+    for (const r of selRows) {
+      const res = await fetch("/api/drive/trash", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: r.id }) });
+      if (res.ok) ok++;
+    }
+    clearSel();
+    toast({ text: ok === selRows.length ? `${ok} file${ok === 1 ? "" : "s"} moved to Recovery Bin.` : `${ok}/${selRows.length} trashed — the rest failed.`, tone: ok ? "ok" : "err" });
+    load(q);
+  }
+
+  function bulkDownload() {
+    const downs = selRows.filter((r) => r.file?.storage_path);
+    if (!downs.length) { toast({ text: "Nothing downloadable — these need a Storage copy first.", tone: "err" }); return; }
+    downs.forEach((r, i) => setTimeout(() => {
+      const a = document.createElement("a");
+      a.href = `/api/drive/download?file_id=${r.id}`;
+      a.download = r.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }, i * 400));
+    toast({ text: `Downloading ${downs.length} file${downs.length === 1 ? "" : "s"}…`, tone: "ok" });
+    if (downs.length < selRows.length) toast({ text: "Google-only files were skipped — sync them for a local copy.", tone: "err" });
+  }
+
+  // Keyboard shortcuts (ignored while typing, viewing, or editing).
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (viewFile || editFile) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "c") {
+        const f = selRows[0]?.file;
+        if (f) { e.preventDefault(); copyFile(f); }
+      } else if (mod && e.key.toLowerCase() === "v") {
+        e.preventDefault(); pasteClip();
+      } else if (mod && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        const keys = pg.pageItems.map((x) => x.key);
+        if (keys.length) { setSelKey(keys[keys.length - 1]); setMulti(keys.slice(0, -1)); anchorRef.current = 0; }
+      } else if ((e.key === "Delete" || e.key === "Backspace") && selSet.size > 0 && nav.kind !== "bin") {
+        e.preventDefault(); setConfirmBulk(true);
+      } else if (e.key === "Escape") {
+        clearSel();
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  });
+
   // ── actions (same endpoints as before) ──
   async function trash(f: FileRow) {
     const r = await fetch("/api/drive/trash", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: f.id }) });
@@ -400,31 +495,35 @@ export default function Explorer() {
   }
 
   async function uploadPicked(list: FileList | null) {
-    const file = list?.[0];
-    if (!file) return;
-    setUploading(file.name);
-    try {
-      const hash = await sha256(file);
-      const init = await fetch("/api/drive/upload-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size }) });
-      const dj = await init.json();
-      if (!init.ok) throw new Error(dj.error ?? "upload init failed");
-      const put = await fetch(dj.signedUrl, { method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file });
-      if (!put.ok) throw new Error("byte upload failed");
-      const meta = await fetch("/api/drive/upload", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: driveSel || undefined })
-      });
-      const mj = await meta.json().catch(() => ({}));
-      if (!meta.ok) throw new Error(mj.error ?? "indexing failed");
-      if (mj.push_error) toast({ text: `"${file.name}" saved locally — Google mirror skipped: ${mj.push_error}`, tone: "err" });
-      else toast({ text: `"${file.name}" uploaded and indexed.`, tone: "ok" });
-      load(q);
-    } catch (e) {
-      toast({ text: e instanceof Error ? e.message : "Upload failed.", tone: "err" });
-    } finally {
-      setUploading(null);
-      if (fileRef.current) fileRef.current.value = "";
+    const files = list ? Array.from(list) : [];
+    if (!files.length) return;
+    let ok = 0;
+    for (const file of files) {
+      setUploading(files.length > 1 ? `${file.name} (${ok + 1}/${files.length})` : file.name);
+      try {
+        const hash = await sha256(file);
+        const init = await fetch("/api/drive/upload-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size }) });
+        const dj = await init.json();
+        if (!init.ok) throw new Error(dj.error ?? "upload init failed");
+        const put = await fetch(dj.signedUrl, { method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file });
+        if (!put.ok) throw new Error("byte upload failed");
+        const meta = await fetch("/api/drive/upload", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: driveSel || undefined })
+        });
+        const mj = await meta.json().catch(() => ({}));
+        if (!meta.ok) throw new Error(mj.error ?? "indexing failed");
+        if (mj.push_error) toast({ text: `"${file.name}" saved locally — Google mirror skipped: ${mj.push_error}`, tone: "err" });
+        ok++;
+      } catch (e) {
+        toast({ text: `"${file.name}": ${e instanceof Error ? e.message : "upload failed."}`, tone: "err" });
+      }
     }
+    setUploading(null);
+    if (fileRef.current) fileRef.current.value = "";
+    if (ok === files.length) toast({ text: files.length === 1 ? `"${files[0].name}" uploaded and indexed.` : `${ok} files uploaded and indexed.`, tone: "ok" });
+    else if (ok > 0) toast({ text: `${ok}/${files.length} uploaded — the rest failed.`, tone: "err" });
+    load(q);
   }
 
   function copyLink(r: Row) {
@@ -616,7 +715,7 @@ export default function Explorer() {
         {drivesOpen && (
           <div className="flex flex-col gap-0.5 mb-2 max-h-[300px] overflow-y-auto shrink-0">
             {accounts.length === 0 && <p className="px-3 py-2 text-[12px] text-muted leading-snug">No Google drive connected. Ask an admin to connect one in Storage.</p>}
-            {accounts.map((a) => {
+            {accounts.filter((a) => a.status === "active").map((a) => {
               const on = driveView?.accountId === a.id;
               const total = a.limit ?? null;
               const used = a.usage ?? null;
@@ -640,6 +739,11 @@ export default function Explorer() {
                 </button>
               );
             })}
+            {accounts.some((a) => a.status !== "active") && (
+              <p className="px-3 py-1.5 text-[11px] text-muted">
+                {accounts.filter((a) => a.status !== "active").length} disabled — re-enable in Storage to browse {accounts.filter((a) => a.status !== "active").length === 1 ? "it" : "them"} again.
+              </p>
+            )}
           </div>
         )}
 
@@ -772,7 +876,7 @@ export default function Explorer() {
                 { label: syncing ? "Syncing from Google…" : "Sync from Google", icon: <CloudDownload size={14} />, onSelect: syncGoogle },
                 { label: "Refresh", icon: <RefreshCw size={14} />, onSelect: () => load(q) }
               ]} />
-            <input ref={fileRef} type="file" className="hidden" aria-label="Choose file to upload" onChange={(e) => uploadPicked(e.target.files)} />
+            <input ref={fileRef} type="file" multiple className="hidden" aria-label="Choose files to upload" onChange={(e) => uploadPicked(e.target.files)} />
           </div>
         </div>
 
@@ -811,14 +915,26 @@ export default function Explorer() {
                 ))}
               </div>
             )}
-            <div className="flex-1 min-h-0 overflow-auto"
-              onClick={() => { setSelKey(null); setInfoOpen(false); }}
+            <div className="relative flex-1 min-h-0 overflow-auto"
+              onClick={() => { clearSel(); setInfoOpen(false); }}
+              onDragOver={(e) => { e.preventDefault(); if (e.dataTransfer.types.includes("Files")) setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOver(false);
+                if (e.dataTransfer.files.length) uploadPicked(e.dataTransfer.files);
+              }}
               onContextMenu={(e) => {
                 // Canvas menu — rows stop propagation and show the file menu instead.
                 e.preventDefault();
                 setSelKey(null); setInfoOpen(false); setCtx(null);
                 setCanvasCtx({ x: Math.min(e.clientX, window.innerWidth - 220), y: Math.min(e.clientY, window.innerHeight - 220) });
               }}>
+              {dragOver && (
+                <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-lg border-2 border-dashed border-brand bg-brand/5" role="status">
+                  <p className="px-4 py-2 rounded-md bg-surface border border-line text-[14px] font-medium">Drop to upload</p>
+                </div>
+              )}
               {loading || (driveView && treeLoading) ? (
                 <div aria-busy="true" aria-label="Loading files" className="p-4 flex flex-col gap-2">
                   {Array.from({ length: 8 }).map((_, i) => (
@@ -865,12 +981,12 @@ export default function Explorer() {
                     <button role="columnheader" aria-sort={ariaSort("size")} onClick={(e) => { e.stopPropagation(); sortBy("size"); }} className="text-left flex items-center gap-1">Size {arrow("size")}</button>
                     <button role="columnheader" aria-sort={ariaSort("kind")} onClick={(e) => { e.stopPropagation(); sortBy("kind"); }} className="frow-hide text-left items-center gap-1">Kind {arrow("kind")}</button>
                   </div>
-                  {pg.pageItems.map((r) => {
-                    const on = selKey === r.key;
+                  {pg.pageItems.map((r, ri) => {
+                    const on = selSet.has(r.key);
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
                     return (
                       <div key={r.key} role="row" tabIndex={0} aria-selected={on}
-                        onClick={(e) => { e.stopPropagation(); setSelKey(r.key); }}
+                        onClick={(e) => clickRow(e, r, ri)}
                         onDoubleClick={() => open(r)}
                         onKeyDown={(e) => onRowKey(e, r)}
                         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
@@ -894,12 +1010,12 @@ export default function Explorer() {
                 </div>
               ) : (
                 <div role="grid" aria-label={`${rows.length} items`} className="p-4 grid gap-1 content-start" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))" }}>
-                  {pg.pageItems.map((r) => {
-                    const on = selKey === r.key;
+                  {pg.pageItems.map((r, ri) => {
+                    const on = selSet.has(r.key);
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
                     return (
                       <button key={r.key} role="gridcell" aria-selected={on}
-                        onClick={(e) => { e.stopPropagation(); setSelKey(r.key); }}
+                        onClick={(e) => clickRow(e, r, ri)}
                         onDoubleClick={() => open(r)}
                         onKeyDown={(e) => onRowKey(e, r)}
                         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
@@ -926,6 +1042,18 @@ export default function Explorer() {
               {nav.kind === "bin" ? `${bin.length} in bin` : `${folderCount} folders · ${fileRows.length} files · ${formatBytes(totalSize)}`}
             </p>
           </div>
+          {/* Bulk action bar */}
+          {selSet.size > 1 && (
+            <div className="shrink-0 px-3 py-2 border-t border-line bg-surface flex items-center gap-2" role="toolbar" aria-label={`${selSet.size} selected`}>
+              <span className="text-[13px] font-medium">{selSet.size} selected</span>
+              <span className="flex-1" />
+              <button onClick={bulkDownload} className="min-h-[40px] px-3 rounded-md border border-line text-[13px] hover:bg-tint">Download</button>
+              {nav.kind !== "bin" && (
+                <button onClick={() => setConfirmBulk(true)} className="min-h-[40px] px-3 rounded-md border border-danger/40 text-danger text-[13px]">Trash</button>
+              )}
+              <button onClick={clearSel} className="min-h-[40px] px-3 rounded-md text-[13px] text-muted hover:bg-tint">Clear</button>
+            </div>
+          )}
 
           {/* Details */}
           {showInfo && sel && (
@@ -1083,6 +1211,9 @@ export default function Explorer() {
       <ConfirmDialog open={!!confirmTrash} title="Move to Recovery Bin?"
         body={`"${confirmTrash?.name}" stays recoverable for 90 days. Members can never delete permanently.`}
         confirmLabel="Move to Bin" onClose={() => setConfirmTrash(null)} onConfirm={() => confirmTrash && trash(confirmTrash)} />
+      <ConfirmDialog open={confirmBulk} title={`Trash ${selRows.length} files?`}
+        body="They stay recoverable in the Recovery Bin for 90 days."
+        confirmLabel="Move all to Bin" onClose={() => setConfirmBulk(false)} onConfirm={bulkTrash} />
 
       <Modal open={!!renameTarget} title={renameTarget?.kind === "folder" ? "Rename folder" : "Rename file"} onClose={() => setRenameTarget(null)} labelId="rn-title" width={400}>
         <form onSubmit={doRename} className="flex flex-col gap-4">

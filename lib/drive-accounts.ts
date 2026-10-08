@@ -1,6 +1,9 @@
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { driveClient, driveClientFor, aboutFor, rootFor, type DriveLike, type DriveRoot } from "@/lib/google-drive";
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Db = import("@supabase/supabase-js").SupabaseClient<any, "public", any>;
+
 export interface DriveAccount {
   id: string; label: string; email: string | null; root_id: string | null;
   status: string; priority: number;
@@ -65,8 +68,39 @@ export async function quotaFor(acct: DriveAccount & { refresh_token: string }): 
   return { usage: a.usage, limit: a.limit, free, email: a.email ?? acct.email };
 }
 
-// Upload routing: skip full/down drives, prefer explicit choice, else most free
-// space (priority breaks ties). Returns the account or a human reason.
+// Drop one account's Google-mirrored index rows (FK-safe, chunked).
+// Pure mirrors are deleted; hybrid rows (Storage bytes exist) keep the bytes and
+// lose the Google pin. Returns { deleted, unpinned }.
+export async function purgeAccountRows(db: Db, accountId: string): Promise<{ deleted: number; unpinned: number }> {
+  const targetIds: string[] = [];
+  for (let off = 0; ; off += 1000) {
+    const { data: chunk, error: cErr } = await db.from("file_index").select("id")
+      .eq("drive_account_id", accountId).not("google_file_id", "is", null).is("storage_path", null).range(off, off + 999);
+    if (cErr) throw new Error(cErr.message);
+    if (!chunk?.length) break;
+    targetIds.push(...chunk.map((c) => c.id));
+    if (chunk.length < 1000) break;
+  }
+  for (let i = 0; i < targetIds.length; i += 200) {
+    const inList = targetIds.slice(i, i + 200);
+    const { error: bErr } = await db.from("recovery_bin").delete().in("file_id", inList);
+    if (bErr) throw new Error(bErr.message);
+    const { error: aErr } = await db.from("approvals").delete().in("file_id", inList);
+    if (aErr) throw new Error(aErr.message);
+    const { error: dErr } = await db.from("file_index").delete().in("id", inList);
+    if (dErr) throw new Error(dErr.message);
+  }
+  // Hybrid rows (Storage copy + Google pin): keep bytes, drop the Google pin.
+  const { data: hybrid } = await db.from("file_index").select("id,backends")
+    .eq("drive_account_id", accountId).not("storage_path", "is", null).limit(5000);
+  let unpinned = 0;
+  for (const h of (hybrid ?? []) as { id: string; backends: string[] }[]) {
+    const backends = (h.backends ?? []).filter((b) => b !== "google");
+    await db.from("file_index").update({ google_file_id: null, google_parent_id: null, drive_account_id: null, backends: backends.length ? backends : ["local"] }).eq("id", h.id);
+    unpinned++;
+  }
+  return { deleted: targetIds.length, unpinned };
+}
 export async function pickUploadAccount(size: number, preferId?: string | null): Promise<{ account: (DriveAccount & { refresh_token: string }) | null; reason?: string; quotas?: Record<string, AccountQuota> }> {
   const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
   const live = accounts.filter((a) => a.status === "active");

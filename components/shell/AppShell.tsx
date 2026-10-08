@@ -12,7 +12,7 @@ import ProfileModal from "../profile/ProfileModal";
 import { browserClient } from "@/lib/supabase-client";
 import { formatBytes } from "@/lib/files";
 
-export interface ShellUser { username: string; role: string; dept: string | null }
+export interface ShellUser { username: string; role: string; dept: string | null; avatarUrl?: string | null }
 
 const NAV = [
   { href: "/drive", label: "File Management", short: "Drive", icon: FolderClosed },
@@ -209,7 +209,12 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
             <div ref={menuRef} className="relative">
               <button onClick={() => { setProfileOpen(true); setUserMenu(false); }} aria-haspopup="dialog" aria-label="Open your profile"
                 className="min-h-[44px] flex items-center gap-1 pl-1 pr-2 rounded-full hover:bg-tint">
-                <span className="size-9 rounded-full bg-brand text-white grid place-items-center text-[15px] font-medium">{initial}</span>
+                {user?.avatarUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={user.avatarUrl} alt="" className="size-9 rounded-full object-cover" />
+                ) : (
+                  <span className="size-9 rounded-full bg-brand text-white grid place-items-center text-[15px] font-medium">{initial}</span>
+                )}
                 <ChevronDown size={17} className="text-ink/70" />
               </button>
               {userMenu && (

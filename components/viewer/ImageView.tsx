@@ -4,7 +4,7 @@ import { Maximize, Minus, Plus, RotateCw, Code2 } from "lucide-react";
 import TextView from "./TextView";
 
 /** Images with zoom (wheel / pinch-free buttons), drag-to-pan, rotate, fit/100%. Falls back to decoding HEIC and TIFF in the browser. */
-export default function ImageView({ url, name, bytesUrl, isSvg }: { url: string; name: string; bytesUrl: string; isSvg?: boolean }) {
+export default function ImageView({ url, name, bytesUrl, isSvg, googleId }: { url: string; name: string; bytesUrl: string; isSvg?: boolean; googleId?: string | null }) {
   const [src, setSrc] = useState(url);
   const [zoom, setZoom] = useState(1);
   const [rot, setRot] = useState(0);
@@ -65,7 +65,12 @@ export default function ImageView({ url, name, bytesUrl, isSvg }: { url: string;
         onPointerMove={(e) => { if (drag.current) setPos({ x: drag.current.px + e.clientX - drag.current.x, y: drag.current.py + e.clientY - drag.current.y }); }}
         onPointerUp={() => { drag.current = null; }} onDoubleClick={() => (zoom === 1 ? setZoom(2) : reset())}>
         {state === "decoding" && <p className="text-[13px] text-muted bg-surface px-3 py-2 rounded-md">Converting this format for display…</p>}
-        {state === "failed" && <p className="text-[13.5px] text-muted bg-surface px-4 py-3 rounded-md">This image format can’t be displayed in the browser. Download it to open it.</p>}
+        {state === "failed" && (googleId ? (
+          <iframe src={`https://drive.google.com/file/d/${googleId}/preview`} title={`Preview of ${name}`}
+            className="w-full h-full min-h-[50vh] border-0 bg-black" allow="autoplay; fullscreen" allowFullScreen />
+        ) : (
+          <p className="text-[13.5px] text-muted bg-surface px-4 py-3 rounded-md">This image format can’t be displayed in the browser. Download it to open it.</p>
+        ))}
         {state === "ok" && (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={src} alt={`Preview of ${name}`} draggable={false} onError={onError}

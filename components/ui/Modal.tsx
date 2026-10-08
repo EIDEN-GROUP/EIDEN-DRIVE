@@ -7,9 +7,12 @@ export default function Modal({ open, title, onClose, children, width = 440, lab
   open: boolean; title: string; onClose: () => void; children: ReactNode; width?: number; labelId?: string;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
-    closeRef.current?.focus();
+    // Focus the form, not the ×: if the content declares autofocus, honor it.
+    const auto = boxRef.current?.querySelector<HTMLElement>("[autofocus]");
+    (auto ?? closeRef.current)?.focus();
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
@@ -17,7 +20,7 @@ export default function Modal({ open, title, onClose, children, width = 440, lab
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[90] grid place-items-center bg-black/30 backdrop-blur-[3px] p-4" onClick={onClose}>
-      <div role="dialog" aria-modal="true" aria-labelledby={labelId} style={{ maxWidth: width }}
+      <div ref={boxRef} role="dialog" aria-modal="true" aria-labelledby={labelId} style={{ maxWidth: width }}
         className="pop-in w-full rounded-xl bg-surface shadow-pop border border-line" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 h-14 border-b border-line">
           <h2 id={labelId} className="text-[15px] font-medium">{title}</h2>

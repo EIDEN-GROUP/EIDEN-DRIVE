@@ -106,7 +106,7 @@ export default function FileViewer({ file, onClose, onEdit }: { file: ViewFile; 
   else if (needBytes && error) body = <Problem msg={tooLarge ? `This file is ${fmtBytes(file.size)} — too large to open in the browser. Download it to read it.` : error} dl={!isLive ? dl : null} />;
   else if (!needBytes && embedErr) body = <Problem msg={embedErr} dl={!isLive ? dl : null} />;
   else if (urlKind && !src) body = <Loading />;
-  else if (eff === "image" && src) body = <ImageView url={src} name={file.name} bytesUrl={rawUrl} isSvg={file.name.toLowerCase().endsWith(".svg")} />;
+  else if (eff === "image" && src) body = <ImageView url={src} name={file.name} bytesUrl={rawUrl} isSvg={file.name.toLowerCase().endsWith(".svg")} googleId={file.googleId} />;
   else if (eff === "video" && src) body = <VideoPlayer src={src} fileName={file.name} googleId={file.googleId} size={file.size} canDownload={!isLive} downloadHref={dl} />;
   else if (eff === "audio" && src) body = (
     <div className="p-8 sm:p-14 max-w-xl mx-auto text-center">

@@ -1,19 +1,31 @@
 import { createClient } from "@/lib/supabase-server";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
+import { signedDownloadUrl } from "@/lib/storage";
 import UsersClient, { type DirectoryUser } from "@/components/users/UsersClient";
 
 export const dynamic = "force-dynamic";
 
+async function withAvatars<T extends { avatar_path?: string | null }>(rows: T[]): Promise<(Omit<T, "avatar_path"> & { avatarUrl: string | null })[]> {
+  return Promise.all(rows.map(async (r) => {
+    let avatarUrl: string | null = null;
+    if (r.avatar_path) {
+      try { avatarUrl = await signedDownloadUrl(r.avatar_path); } catch { avatarUrl = null; }
+    }
+    const { avatar_path: _drop, ...rest } = r;
+    return { ...rest, avatarUrl };
+  }));
+}
+
 export default async function UsersPage() {
   const me = await getProfile();
   const supa = createClient();
-  const { data } = await supa.from("profiles").select("id,username,role,department_tag").order("username").limit(200);
-  const base: DirectoryUser[] = ((data ?? []) as { id: string; username: string; role: string; department_tag: string | null }[]).map((r) => ({ ...r }));
+  const { data } = await supa.from("profiles").select("id,username,role,department_tag,avatar_path").order("username").limit(200);
+  const base = await withAvatars(((data ?? []) as { id: string; username: string; role: string; department_tag: string | null; avatar_path: string | null }[]));
   const depts = Array.from(new Set(base.map((r) => r.department_tag).filter(Boolean) as string[])).sort();
 
   // Managers/admins additionally see emails + join/last-active (service role, server-side only).
-  let rows = base;
+  let rows: DirectoryUser[] = base;
   const privileged = !!me && can(me.role, "manage-users") && hasAdminClient();
   if (privileged) {
     try {

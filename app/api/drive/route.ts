@@ -17,7 +17,14 @@ export async function GET(req: Request) {
   const supa = createClient();
 
   // 1) indexed files (Google + Local + Backup badges)
-  const { data: rows } = await supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id").ilike("name", `%${escapeLike(q)}%`).range(offset, offset + limit - 1);
+  // Disabled drives are invisible: their rows are excluded (deleted drives
+  // leave no pure mirrors behind — DELETE purges them; hybrids keep local bytes).
+  const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
+  const labelOf = new Map(accounts.map((a) => [a.id, a.label]));
+  const inactive = accounts.filter((a) => a.status !== "active").map((a) => a.id);
+  let filesQuery = supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id").ilike("name", `%${escapeLike(q)}%`);
+  if (inactive.length) filesQuery = filesQuery.not("drive_account_id", "in", `(${inactive.join(",")})`);
+  const { data: rows } = await filesQuery.range(offset, offset + limit - 1);
 
   // 2) live Google fallback, across EVERY connected account — NEVER allowed to
   // 500 the route. A dead token or unreachable root degrades that account to
@@ -44,8 +51,6 @@ export async function GET(req: Request) {
         : `"${label}": unreachable (${m})`);
     }
   }
-  const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
-  const labelOf = new Map(accounts.map((a) => [a.id, a.label]));
   if (accounts.some((a) => a.status === "active")) {
     for (const a of accounts.filter((x) => x.status === "active")) {
       if (live.length >= 10) break;
