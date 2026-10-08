@@ -67,7 +67,16 @@ export async function GET(req: Request) {
     updated: (r as { updated_at?: string }).updated_at,
     accountLabel: r.drive_account_id ? labelOf.get(r.drive_account_id) ?? undefined : undefined
   }));
-  const merged = [...indexed, ...live];
+  // Dedupe: a synced file appears as BOTH its index row and a live g: row.
+  // The index row wins (it has actions); live rows only fill gaps for unsynced files.
+  const knownGoogle = new Set(
+    ((rows ?? []) as { google_file_id?: string | null }[]).map((r) => r.google_file_id).filter(Boolean)
+  );
+  const fresh = live.filter((l) => {
+    const gid = l.id.startsWith("g:") ? l.id.slice(l.id.lastIndexOf(":") + 1) : l.id;
+    return !knownGoogle.has(gid);
+  });
+  const merged = [...indexed, ...fresh];
 
   await logAudit({ actor: me.id, actor_name: me.username, action: "view", req, detail: { q } });
   return Response.json({ q, results: merged, google: googleNote, google_error });

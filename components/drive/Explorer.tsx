@@ -128,8 +128,13 @@ export default function Explorer() {
   const [driveSel, setDriveSel] = useState(""); // "" = Auto (roomiest drive)
   // Office-USB mirror toggle (persisted): uploads also queue an async agent job.
   const [usbTarget, setUsbTarget] = useState(false);
+  // Google mirror toggle (persisted): off = Supabase-only uploads.
+  const [mirrorOff, setMirrorOff] = useState(false);
   useEffect(() => {
-    try { if (localStorage.getItem("eiden-usb") === "1") setUsbTarget(true); } catch { /* ignore */ }
+    try {
+      if (localStorage.getItem("eiden-usb") === "1") setUsbTarget(true);
+      if (localStorage.getItem("eiden-mirror") === "0") setMirrorOff(true);
+    } catch { /* ignore */ }
   }, []);
   function toggleUsb() {
     setUsbTarget((v) => {
@@ -137,6 +142,22 @@ export default function Explorer() {
       if (!v) toast({ text: "Uploads will also queue a copy to the office USB (agent picks it up when online).", tone: "ok" });
       return !v;
     });
+  }
+  function toggleMirror() {
+    setMirrorOff((v) => {
+      try { localStorage.setItem("eiden-mirror", v ? "1" : "0"); } catch { /* ignore */ }
+      if (!v) toast({ text: "Google mirror off — uploads stay in Supabase only.", tone: "ok" });
+      return !v;
+    });
+  }
+  function destSummary(): string {
+    const parts = ["Supabase"];
+    if (!mirrorOff) {
+      const a = driveSel ? accounts.find((x) => x.id === driveSel) : [...accounts].filter((x) => x.status === "active").sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0];
+      parts.push(`Drive: ${a ? a.label : "Auto"}`);
+    }
+    if (usbTarget) parts.push("USB");
+    return `Upload → ${parts.join(" + ")}`;
   }
   const [driveView, setDriveView] = useState<{ accountId: string; folderId: string | null; path: { id: string; name: string }[] } | null>(null);
   const [tree, setTree] = useState<{ id: string; name: string; mime: string; size: number; googleId: string; parent: string | null }[] | null>(null);
@@ -231,6 +252,11 @@ export default function Explorer() {
   function chooseUploadDrive(id: string) {
     setDriveSel(id);
     try { localStorage.setItem("eiden-upload-drive", id); } catch { /* ignore */ }
+    // Picking a drive implies the mirror is wanted.
+    if (id && mirrorOff) {
+      setMirrorOff(false);
+      try { localStorage.setItem("eiden-mirror", "1"); } catch { /* ignore */ }
+    }
   }
 
   const loadRef = useRef(load);
@@ -530,7 +556,7 @@ export default function Explorer() {
         if (!put.ok) throw new Error("byte upload failed");
         const meta = await fetch("/api/drive/upload", {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: driveSel || undefined, usb: usbTarget || undefined })
+          body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: mirrorOff ? null : (driveSel || undefined), usb: usbTarget || undefined })
         });
         const mj = await meta.json().catch(() => ({}));
         if (!meta.ok) throw new Error(mj.error ?? "indexing failed");
@@ -876,32 +902,32 @@ export default function Explorer() {
               <button onClick={() => setView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
             </div>
             <span className="h-5 border-l border-line mx-0.5" />
-            {/* Upload: one pill, two equal-height segments (action | destination). */}
+            {/* Upload: action + destination picker (Supabase always, Drive + USB selectable). */}
             <div className="flex items-stretch h-11 rounded-lg bg-brand text-white shadow-[0_1px_2px_rgba(60,30,140,.3)]">
               <button onClick={() => fileRef.current?.click()} disabled={!!uploading}
-                title={driveSel ? `Uploads mirror to ${accounts.find((a) => a.id === driveSel)?.label ?? "the chosen drive"}` : accounts.length > 1 ? "Uploads mirror to the drive with the most free space" : "Upload a file"}
-                className={`px-3.5 flex items-center gap-2 text-[13.5px] font-medium hover:bg-white/12 active:bg-white/20 disabled:opacity-60 transition-colors ${accounts.length > 1 ? "rounded-l-lg" : "rounded-lg"}`}>
+                title={destSummary()}
+                className="px-3.5 flex items-center gap-2 text-[13.5px] font-medium hover:bg-white/12 active:bg-white/20 disabled:opacity-60 transition-colors rounded-l-lg">
                 <Upload size={16} strokeWidth={2.2} /> <span className="hidden sm:inline">{uploading ? "Uploading…" : "Upload"}</span>
               </button>
-              {accounts.length > 1 && (
-                <>
-                  <span className="my-2.5 w-px bg-white/30" aria-hidden="true" />
-                  <Menu label="Choose upload drive" align="right" rootClassName="h-full"
-                    triggerClassName="h-full w-9 grid place-items-center rounded-r-lg hover:bg-white/12 active:bg-white/20 transition-colors"
-                    trigger={<ChevronDown size={15} strokeWidth={2.4} />}
-                    items={[
-                      { label: `Auto · most free space${(() => { const r = [...accounts].filter((a) => a.status === "active").sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0]; return r ? ` (${r.label})` : ""; })()}`,
-                        icon: driveSel === "" ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive("") },
-                      "sep",
-                      ...accounts.filter((a) => a.status === "active").map((a) => ({
-                        label: `${a.label} · ${a.free !== null ? `${formatBytes(a.free)} free` : "quota unknown"}`,
-                        icon: driveSel === a.id ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive(a.id)
-                      })),
-                      "sep",
-                      { label: "Also copy to office USB (agent)", icon: usbTarget ? <Check size={14} /> : undefined, onSelect: toggleUsb }
-                    ]} />
-                </>
-              )}
+              <span className="my-2.5 w-px bg-white/30" aria-hidden="true" />
+              <Menu label="Choose upload destinations" align="right" rootClassName="h-full"
+                triggerClassName="h-full w-9 grid place-items-center rounded-r-lg hover:bg-white/12 active:bg-white/20 transition-colors"
+                trigger={<ChevronDown size={15} strokeWidth={2.4} />}
+                items={[
+                  { label: "Supabase", hint: "Always on — every upload lands here first", icon: <Check size={14} />, disabled: true, onSelect: () => {} },
+                  "sep",
+                  { label: "Mirror to Google Drive", hint: mirrorOff ? "Off — Supabase only" : "On", icon: !mirrorOff ? <Check size={14} /> : undefined, onSelect: toggleMirror },
+                  ...(!mirrorOff ? [
+                    { label: `Auto · most free space${(() => { const r = [...accounts].filter((a) => a.status === "active").sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0]; return r ? ` (${r.label})` : ""; })()}`,
+                      icon: driveSel === "" ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive("") },
+                    ...accounts.filter((a) => a.status === "active").map((a) => ({
+                      label: `${a.label} · ${a.free !== null ? `${formatBytes(a.free)} free` : "quota unknown"}`,
+                      icon: driveSel === a.id ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive(a.id)
+                    }))
+                  ] : []),
+                  "sep",
+                  { label: "Also copy to office USB", hint: "Queued — agent copies when online", icon: usbTarget ? <Check size={14} /> : undefined, onSelect: toggleUsb }
+                ]} />
             </div>
             <Menu label="Sort and filter" align="right" active={`${sort.key}:${sort.dir}`}
               trigger={<span className="flex items-center gap-0.5 text-ink/80"><Rows3 size={20} strokeWidth={1.6} /><ChevronDown size={12} /></span>}
@@ -1186,34 +1212,67 @@ export default function Explorer() {
         </div>
       </div>
 
-      {/* Context menu (right-click) */}
+      {/* Context menu (right-click). Unavailable actions stay visible but disabled
+          with the reason — nothing silently missing, nothing silently dead. */}
       {ctx && (
         <div role="menu" style={{ left: ctx.x, top: ctx.y }} onClick={(e) => e.stopPropagation()}
-          className="pop-in fixed z-[70] w-[184px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
-          {[
-            { label: "Open", on: () => open(ctx.row), show: ctx.row.kind === "file" },
-            { label: "View", icon: <Eye size={14} />, on: () => ctx.row.file && setViewFile(toViewFile(ctx.row.file)), show: ctx.row.kind === "file" },
-            { label: "Edit", icon: <Pencil size={14} />, on: () => ctx.row.file && setEditFile(toViewFile(ctx.row.file)),
-              show: ctx.row.kind === "file" && !!ctx.row.file && !ctx.row.id.startsWith("g:") && editable(ctx.row.file.name, ctx.row.file.mime) },
-            { label: "Copy", icon: <Copy size={14} />, on: () => ctx.row.file && copyFile(ctx.row.file),
-              show: ctx.row.kind === "file" && !!ctx.row.file && !ctx.row.id.startsWith("g:") },
-            { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(ctx.row.key); setInfoOpen(true); }, show: true },
-            { label: "Tags…", icon: <TagIcon size={14} />, on: () => setTagPicker({ kind: ctx.row.kind, id: ctx.row.id, name: ctx.row.name }), show: taggable(ctx.row) },
-            { label: "Rename", icon: <Pencil size={14} />, on: () => ctx.row.kind === "folder" && ctx.row.folder
-              ? openRename("folder", ctx.row.folder.id, ctx.row.folder.name)
-              : ctx.row.file && openRename("file", ctx.row.id, ctx.row.file.name),
-              show: ctx.row.kind === "folder" || (ctx.row.kind === "file" && !ctx.row.id.startsWith("g:")) },
-            { label: "Download", icon: <Download size={14} />, on: () => { window.location.href = `/api/drive/download?file_id=${ctx.row.id}`; }, show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") },
-            { label: "Copy to office USB", icon: <HardDrive size={14} />, on: () => copyToUsb(ctx.row), show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") && !!ctx.row.file?.storage_path },
-            { label: "Copy link", icon: <Link2 size={14} />, on: () => copyLink(ctx.row), show: !ctx.row.id.startsWith("g:") && ctx.row.kind === "file" },
-            { label: "Delete", icon: <Trash2 size={14} />, danger: true, on: () => ctx.row.file && setConfirmTrash(ctx.row.file), show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") },
-            { label: "Delete folder", icon: <Trash2 size={14} />, danger: true, on: () => ctx.row.folder && setConfirmFolderDelete(ctx.row.folder), show: ctx.row.kind === "folder" }
-          ].filter((i) => i.show).map((i) => (
-            <button key={i.label} role="menuitem" onClick={() => { const fn = i.on; setCtx(null); fn(); }}
-              className={`w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint ${"danger" in i && i.danger ? "text-danger" : "text-ink"}`}>
-              <span>{i.label}</span>{"icon" in i && i.icon ? <span className="text-muted">{i.icon}</span> : null}
-            </button>
-          ))}
+          className="pop-in fixed z-[70] w-[218px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
+          {(() => {
+            const r = ctx.row;
+            const isLive = r.id.startsWith("g:") && !r.id.startsWith("gdrive:");
+            const isGFolder = r.id.startsWith("gdrive:");
+            const indexed = !isLive && !isGFolder;
+            const needSync = "Sync the drive first — this file isn't indexed yet";
+            const items: { label: string; icon?: React.ReactNode; on?: () => void; disabled?: boolean; why?: string; danger?: boolean; show?: boolean }[] = [
+              { label: "Open", on: () => open(r), show: true },
+              { label: "View", icon: <Eye size={14} />, on: () => r.file && setViewFile(toViewFile(r.file)), show: r.kind === "file" },
+              { label: "Edit", icon: <Pencil size={14} />,
+                on: r.file && indexed && editable(r.file.name, r.file.mime) ? () => setEditFile(toViewFile(r.file!)) : undefined,
+                disabled: !(r.file && indexed && editable(r.file.name, r.file.mime)),
+                why: !r.file ? undefined : !indexed ? needSync : "This format is view-only",
+                show: r.kind === "file" },
+              { label: "Copy", icon: <Copy size={14} />,
+                on: r.file && indexed ? () => copyFile(r.file!) : undefined,
+                disabled: !(r.file && indexed), why: needSync,
+                show: r.kind === "file" },
+              { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(r.key); setInfoOpen(true); }, show: true },
+              { label: "Tags…", icon: <TagIcon size={14} />, on: () => setTagPicker({ kind: r.kind, id: r.id, name: r.name }), show: taggable(r) },
+              { label: "Rename", icon: <Pencil size={14} />,
+                on: r.kind === "folder" && r.folder ? () => openRename("folder", r.folder!.id, r.folder!.name)
+                  : r.file && indexed ? () => openRename("file", r.id, r.file!.name) : undefined,
+                disabled: isLive ? true : isGFolder ? true : !(r.kind === "folder" || (r.kind === "file" && r.file)),
+                why: isLive ? needSync : isGFolder ? "Google folders are renamed in Drive itself" : undefined,
+                show: r.kind === "folder" || r.kind === "file" },
+              { label: "Download", icon: <Download size={14} />,
+                on: indexed && r.kind === "file" ? () => { window.location.href = `/api/drive/download?file_id=${r.id}`; } : undefined,
+                disabled: !(indexed && r.kind === "file"),
+                why: r.kind === "file" ? "Preview it instead — direct download needs a sync" : undefined,
+                show: r.kind === "file" },
+              { label: "Copy to office USB", icon: <HardDrive size={14} />,
+                on: r.file?.storage_path ? () => copyToUsb(r) : undefined,
+                disabled: !r.file?.storage_path,
+                why: "Needs a Supabase copy first (Google-only file)",
+                show: r.kind === "file" && indexed },
+              { label: "Copy link", icon: <Link2 size={14} />, on: () => copyLink(r),
+                show: !isLive && !isGFolder && r.kind === "file" },
+              { label: "Delete", icon: <Trash2 size={14} />, danger: true,
+                on: r.file && indexed ? () => setConfirmTrash(r.file!) : undefined,
+                disabled: !(r.file && indexed), why: needSync,
+                show: r.kind === "file" },
+              { label: "Delete folder", icon: <Trash2 size={14} />, danger: true,
+                on: r.folder ? () => setConfirmFolderDelete(r.folder!) : undefined,
+                disabled: !r.folder,
+                why: isGFolder ? "Google folders are deleted in Drive itself" : undefined,
+                show: r.kind === "folder" }
+            ];
+            return items.filter((i) => i.show !== false).map((i) => (
+              <button key={i.label} role="menuitem" disabled={i.disabled} title={i.disabled ? i.why : undefined}
+                onClick={() => { if (i.disabled) return; const fn = i.on; setCtx(null); fn?.(); }}
+                className={`w-full flex items-center justify-between gap-2 px-3.5 py-2 text-left hover:bg-tint disabled:opacity-45 disabled:hover:bg-transparent ${i.danger ? "text-danger" : "text-ink"}`}>
+                <span className="truncate">{i.label}</span>{i.icon ? <span className="text-muted shrink-0">{i.icon}</span> : null}
+              </button>
+            ));
+          })()}
         </div>
       )}
 

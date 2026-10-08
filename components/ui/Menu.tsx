@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-export interface MenuItem { label: string; icon?: ReactNode; onSelect: () => void; danger?: boolean; hidden?: boolean }
+export interface MenuItem { label: string; hint?: string; icon?: ReactNode; onSelect: () => void; danger?: boolean; hidden?: boolean; disabled?: boolean }
 
 interface Pos { top?: number; bottom?: number; left?: number; right?: number }
 
@@ -46,9 +46,10 @@ export default function Menu({ trigger, items, label, align = "right", active, t
         <div ref={panel} role="menu" aria-label={label} style={pos!}
           className="pop-in fixed z-[90] w-max min-w-[188px] max-w-[320px] py-1.5 rounded-lg bg-surface border border-line shadow-pop">
           {items.map((it, i) => it === "sep" ? <div key={i} className="my-1 border-t border-line" /> : it.hidden ? null : (
-            <button key={it.label} role="menuitem" onClick={() => { setPos(null); it.onSelect(); }}
-              className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 text-[13px] text-left hover:bg-tint ${it.danger ? "text-danger" : "text-ink"} ${active === it.label ? "text-brand font-medium" : ""}`}>
-              <span>{it.label}</span>{it.icon && <span className="text-muted">{it.icon}</span>}
+            <button key={it.label} role="menuitem" disabled={it.disabled} title={it.hint}
+              onClick={() => { setPos(null); it.onSelect(); }}
+              className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 text-[13px] text-left hover:bg-tint disabled:opacity-70 disabled:hover:bg-transparent ${it.danger ? "text-danger" : "text-ink"} ${active === it.label ? "text-brand font-medium" : ""}`}>
+              <span>{it.label}{it.hint && <span className="block text-[11px] text-muted font-normal">{it.hint}</span>}</span>{it.icon && <span className="text-muted">{it.icon}</span>}
             </button>
           ))}
         </div>,
