@@ -1,5 +1,5 @@
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
-import { driveClient, driveClientFor, aboutFor, rootFor, type DriveLike, type DriveRoot } from "@/lib/google-drive";
+import { driveClient, driveClientFor, aboutFor, rootFor, accessTokenFor, type DriveLike, type DriveRoot } from "@/lib/google-drive";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Db = import("@supabase/supabase-js").SupabaseClient<any, "public", any>;
@@ -35,6 +35,25 @@ export async function getAccounts(): Promise<DriveAccount[]> {
   return accounts;
 }
 export function bustAccountCache() { cache = null; }
+
+// Refresh token for an account id (service-side only — never leaves the server).
+// Null accountId = legacy env connection. Unknown/deleted ids resolve to null
+// (callers treat that as "unavailable", never as another drive).
+export async function refreshTokenFor(accountId?: string | null): Promise<string | null> {
+  if (accountId) {
+    const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
+    const a = accounts.find((x) => x.id === accountId && x.status === "active");
+    return a?.refresh_token ?? null;
+  }
+  return process.env.GOOGLE_REFRESH_TOKEN ?? null;
+}
+
+// Short-lived bearer for direct REST calls on an account's behalf.
+export async function accountAccessToken(accountId?: string | null): Promise<string> {
+  const rt = await refreshTokenFor(accountId);
+  if (!rt) throw new Error("google not configured");
+  return accessTokenFor(rt);
+}
 
 export function clientFor(acct: DriveAccount & { refresh_token: string }): DriveLike {
   return driveClientFor(acct.refresh_token);

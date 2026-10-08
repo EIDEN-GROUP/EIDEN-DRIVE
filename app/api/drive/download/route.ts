@@ -6,10 +6,10 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { signedDownloadUrl, UPLOAD_BUCKET } from "@/lib/storage";
-import { driveCtxFor } from "@/lib/drive-accounts";
+import { driveCtxFor, accountAccessToken } from "@/lib/drive-accounts";
 import { parseQuery } from "@/lib/http";
 
-const Q = z.object({ file_id: z.string().max(300), raw: z.string().optional(), json: z.string().optional() });
+const Q = z.object({ file_id: z.string().max(300), raw: z.string().optional(), json: z.string().optional(), thumb: z.string().optional() });
 
 // Raw bytes are served from the app's own origin, and the MIME type is whatever the uploader declared — so treat it as
 // hostile: never let the browser sniff, and anything that can run script (HTML/SVG/XML/JS) is download-only and
@@ -26,6 +26,33 @@ function rawHeaders(mime: string, name: string): Record<string, string> {
 }
 
 const RAW_MAX = 25 * 1024 * 1024; // in-app preview cap — bigger files use Download
+
+// Google-generated cover (?thumb=1): Drive renders thumbnails server-side for
+// nearly every visual format — RAW photos, PSD, TIFF, HEIC, videos incl.
+// AVI/MKV/WMV, PDF first pages — things no browser can decode itself.
+// Resolved for indexed rows and live g: ids; 404 when Google has no thumb.
+async function googleThumb(googleId: string, accountId: string | null): Promise<Response> {
+  const token = await accountAccessToken(accountId);
+  const meta = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(googleId)}?fields=thumbnailLink,mimeType&supportsAllDrives=true`,
+    { headers: { authorization: `Bearer ${token}` } }
+  );
+  if (!meta.ok) throw new Error("Google has no thumbnail for this file");
+  const mj = (await meta.json()) as { thumbnailLink?: string };
+  if (!mj.thumbnailLink) throw new Error("Google has no thumbnail for this file");
+  // Ask for a 400px cover instead of the default 220px stamp.
+  const url = mj.thumbnailLink.replace(/=s\d+$/, "=s400");
+  const img = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+  if (!img.ok) throw new Error("thumbnail fetch failed");
+  const buf = Buffer.from(await img.arrayBuffer());
+  return new Response(buf, {
+    headers: {
+      "content-type": img.headers.get("content-type") ?? "image/jpeg",
+      "cache-control": "private, max-age=3600",
+      "x-content-type-options": "nosniff"
+    }
+  });
+}
 
 // Parses live (not yet synced) Google ids: g:<accountId>:<googleFileId>
 // (legacy single-connection rows are g:<googleFileId>).
@@ -48,6 +75,21 @@ export async function GET(req: Request) {
   const p = parseQuery(req, Q);
   if (p.error) return p.error;
   const { file_id } = p.data;
+  if (p.data.thumb) {
+    // Cover art: Google's server-side thumbnail (RAW, PSD, HEIC, any video, PDF page 1...).
+    try {
+      const liveId = parseLiveId(file_id);
+      if (liveId) return await googleThumb(liveId.googleId, liveId.accountId);
+      const supa = createClient();
+      const { data: tf } = await supa.from("file_index").select("google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
+      const gid = (tf as { google_file_id?: string | null } | null)?.google_file_id;
+      if (!gid) throw new Error("this file lives in Supabase, not Google — no Drive thumbnail exists");
+      const aid = (tf as { drive_account_id?: string | null } | null)?.drive_account_id ?? null;
+      return await googleThumb(gid, aid);
+    } catch (e) {
+      return Response.json({ error: e instanceof Error ? e.message : "no thumbnail", noThumb: true }, { status: 404 });
+    }
+  }
   const live = parseLiveId(file_id);
   if (live && p.data.raw) {
     try {

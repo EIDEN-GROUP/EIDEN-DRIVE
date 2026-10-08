@@ -8,14 +8,24 @@ export function extOf(name: string): string {
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
 }
 
-const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "heic", "heif"]);
+const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "heic", "heif",
+  "tif", "tiff", "psd", "psb", "jp2", "j2k", "jpx", "jxr", "hdp", "wdp",
+  "tga", "dds", "exr",
+  "cr2", "cr3", "nef", "arw", "dng", "rw2", "orf", "pef", "srw", "raf",
+  "ppm", "pgm", "pbm", "xbm", "cur", "pcx"]);
+// Formats NO browser decodes directly (RAW photos, PSD, TIFF, EXR…): covers for
+// these come from Google's server-side thumbnails, or in-browser decode for
+// TIFF (utif) / HEIC (heic2any) on Storage files.
+const NEEDS_HELP = new Set(["tif", "tiff", "psd", "psb", "jp2", "j2k", "jpx", "jxr", "hdp", "wdp",
+  "tga", "dds", "exr", "cr2", "cr3", "nef", "arw", "dng", "rw2", "orf", "pef", "srw", "raf",
+  "ppm", "pgm", "pbm", "xbm", "cur", "pcx", "heic", "heif"]);
 // NOTE: RAW camera files (cr2, nef, arw, dng) intentionally excluded — browsers
 // can't decode them, so they get the honest download fallback instead of a
 // broken image icon.
 // Full container list (Wikipedia "Video file format"): browsers natively decode
 // only a few of these — the viewer falls back to Drive-preview transcoding or
 // in-browser conversion for the rest. Never silently mislabel one as playable.
-const VIDEO = new Set(["mp4", "m4v", "webm", "ogv", "ogg", "mov", "avi", "wmv", "flv", "f4v", "mkv", "mpg", "mpeg", "m2ts", "mts", "ts", "3gp", "3g2", "asf", "rm", "rmvb", "vob", "ogm", "divx", "xvid", "amv"]);
+const VIDEO = new Set(["mp4", "m4v", "webm", "ogv", "ogg", "mov", "avi", "wmv", "flv", "f4v", "mkv", "mpg", "mpeg", "m2ts", "mts", "m2t", "ts", "wtv", "3gp", "3g2", "asf", "rm", "rmvb", "vob", "ogm", "divx", "xvid", "amv", "dav"]);
 // Containers a <video> tag can actually decode without help (H.264/VP9/Theora + AAC/Vorbis/Opus inside).
 const NATIVE_VIDEO = new Set(["mp4", "m4v", "webm", "ogv", "ogg"]);
 const AUDIO = new Set(["mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "opus", "weba", "aiff", "aif", "mid", "midi"]);
@@ -50,6 +60,24 @@ export function nativeVideo(name: string, mime?: string): boolean {
   if (e === "mov") return true;
   if (mime?.startsWith("video/") && (mime.includes("mp4") || mime.includes("webm") || mime.includes("ogg"))) return true;
   return false;
+}
+
+// True when no <img>/<video> tag can show this file directly (RAW, PSD, TIFF,
+// EXR, exotic video…). Covers for these must come from Google thumbs or decode.
+export function needsHelp(name: string, mime?: string): boolean {
+  const e = extOf(name);
+  if (NEEDS_HELP.has(e)) return true;
+  if (mime && /^image\/(x-(canon|nikon|minolta|sony|fuji|olympus|pentax|samsung)-|x-dcraw|vnd\.adobe\.photoshop)/i.test(mime)) return true;
+  return false;
+}
+
+// Google file id for any row shape (indexed column, or live g:[account:]id).
+export function googleIdOf(id: string, col?: string | null): string | null {
+  if (col) return col;
+  if (!id.startsWith("g:")) return null;
+  const rest = id.slice(2);
+  const i = rest.indexOf(":");
+  return (i >= 0 ? rest.slice(i + 1) : rest) || null;
 }
 
 export function viewKind(name: string, mime?: string): ViewKind {

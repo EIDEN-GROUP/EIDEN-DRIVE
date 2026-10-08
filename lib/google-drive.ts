@@ -22,6 +22,15 @@ export function driveClient() {
   return google.drive({ version: "v3", auth });
 }
 
+// Short-lived bearer for direct REST calls (thumbnail fetch). Throws when creds missing.
+export async function accessTokenFor(refreshToken: string): Promise<string> {
+  const auth = oauthFor(refreshToken);
+  if (!auth) throw new Error("google not configured");
+  const { token } = await auth.getAccessToken();
+  if (!token) throw new Error("google token exchange failed");
+  return token;
+}
+
 export type DriveLike = ReturnType<typeof driveClient>;
 
 // Per-account client (multi-drive). Null when app-level client id/secret missing.
