@@ -3,6 +3,8 @@ import { UPLOAD_BUCKET } from "@/lib/storage";
 import { driveCtxFor, accountAccessToken } from "@/lib/drive-accounts";
 import { resolveShare, throttled } from "@/lib/share";
 
+export const dynamic = "force-dynamic";
+
 // Public bytes for a share link (the token IS the auth). Capped like the
 // in-app preview; anything bigger must open the Drive page signed in.
 const RAW_MAX = 25 * 1024 * 1024;

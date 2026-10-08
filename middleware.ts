@@ -12,8 +12,11 @@ const PUBLIC = [
   "/api/auth/login-attempt",   // public failed-login reporter (IP-throttled, insert-only)
   "/api/auth/callback",
   "/api/auth/google",          // start route self-gates (admin/manager session or setup key)
+  "/api/auth/link",            // public sign-in link sender (throttled, generic replies)
   "/api/agent",                // bearer AGENT_TOKEN (POST); GET self-gates with session
   "/api/drive/webhook",        // x-goog-channel-token
+  "/s",                        // public share pages — the unguessable token IS the auth
+  "/api/share",                // manage API self-gates with session; /api/share/<token>/* is token-authed + throttled
   "/manifest.json",
   "/sw.js",
   "/logo.svg",
