@@ -23,11 +23,12 @@ export async function GET() {
 
 const Update = z.object({
   phone: z.string().max(40).nullable().optional(),
-  avatar_path: z.string().max(600).nullable().optional()
+  avatar_path: z.string().max(600).nullable().optional(),
+  username: z.string().trim().min(3).max(40).regex(/^[a-z0-9._-]+$/i).optional()
 });
 
-// Editable today: phone + avatar. Username/role/dept stay admin-managed
-// (username is the login identity, role/dept are permission boundaries).
+// Editable today: username (unique, yours to pick at onboarding), phone, avatar.
+// Role/dept stay admin-managed (permission boundaries).
 export async function PATCH(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -40,8 +41,13 @@ export async function PATCH(req: Request) {
   const patch: Record<string, unknown> = {};
   if (p.data.phone !== undefined) patch.phone = p.data.phone;
   if (p.data.avatar_path !== undefined) patch.avatar_path = p.data.avatar_path;
-  if (!Object.keys(patch).length) return Response.json({ error: "nothing to update" }, { status: 400 });
   const db = adminClient();
+  if (p.data.username !== undefined && p.data.username.toLowerCase() !== me.username.toLowerCase()) {
+    const { data: taken } = await db.from("profiles").select("id").ilike("username", p.data.username).neq("id", me.id).maybeSingle();
+    if (taken) return Response.json({ error: "that name is taken — try another" }, { status: 409 });
+    patch.username = p.data.username;
+  }
+  if (!Object.keys(patch).length) return Response.json({ error: "nothing to update" }, { status: 400 });
   const { error } = await db.from("profiles").update(patch).eq("id", me.id);
   if (error) return Response.json({ error: error.message }, { status: 500 });
   return Response.json({ ok: true });

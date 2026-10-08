@@ -14,6 +14,41 @@ function usbJobName(j: Job): string {
 function usbJobError(j: Job): string | null {
   return j.status === "failed" ? (j.payload?.error ?? "agent reported failure") : null;
 }
+
+function SlackCard() {
+  const [st, setSt] = useState<{ configured: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    fetch("/api/integrations/slack").then((r) => r.json().catch(() => ({}))).then((d) => {
+      if (typeof d.configured === "boolean") setSt({ configured: d.configured });
+    }).catch(() => {});
+  }, []);
+  async function test() {
+    setBusy(true);
+    setMsg("");
+    const r = await fetch("/api/integrations/slack", { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    setBusy(false);
+    setMsg(r.ok ? "Test message sent — check the channel." : (d.error ?? "Couldn't send."));
+  }
+  if (!st) return <div className="skel h-12 w-full" role="status" aria-label="Reading Slack status" />;
+  return (
+    <div>
+      <p className="text-[13.5px]">
+        {st.configured
+          ? "Connected — new uploads post automatically."
+          : <>Not connected. Add an Incoming Webhook URL as <code>SLACK_WEBHOOK_URL</code> in Vercel env, then redeploy.</>}
+      </p>
+      {st.configured && (
+        <button onClick={test} disabled={busy} className="mt-3 min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint disabled:opacity-50">
+          {busy ? "Sending…" : "Send test message"}
+        </button>
+      )}
+      {msg && <p className="mt-2 text-[13px] text-muted" role="status">{msg}</p>}
+    </div>
+  );
+}
 interface Drive {
   id: string; label: string; email: string | null; status: string; rootKind?: string; rootId?: string | null;
   used: number; total: number; alert?: string | null;
@@ -229,6 +264,12 @@ export default function StoragePage() {
           )}
           <p className="mt-3 text-[12px] text-muted">Needs the office PC agent (<code>node src/index.js poll</code> in local-agent) with the router USB mounted. Setup: local-agent README.</p>
         </Panel>
+
+        {data?.canManage && (
+          <Panel title="Slack uploads" subtitle="Every upload posts who, what, where + link to the channel">
+            <SlackCard />
+          </Panel>
+        )}
       </div>
 
       {confirmDel && (

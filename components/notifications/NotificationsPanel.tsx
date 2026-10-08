@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { X, BellOff, CheckCheck, AlertTriangle, Info, ShieldCheck, CloudDownload } from "lucide-react";
+import { X, BellOff, CheckCheck, AlertTriangle, Info, ShieldCheck, CloudDownload, Upload } from "lucide-react";
 
 export interface Notice { id: string; kind: string; title: string; body: string | null; read: boolean; created_at: string }
 
@@ -8,6 +8,7 @@ function icon(kind: string) {
   if (kind === "error" || kind === "sync-error") return <AlertTriangle size={16} className="text-danger shrink-0 mt-0.5" />;
   if (kind === "approval") return <ShieldCheck size={16} className="text-brand shrink-0 mt-0.5" />;
   if (kind === "sync") return <CloudDownload size={16} className="text-brand shrink-0 mt-0.5" />;
+  if (kind === "upload") return <Upload size={16} className="text-brand shrink-0 mt-0.5" />;
   return <Info size={16} className="text-muted shrink-0 mt-0.5" />;
 }
 

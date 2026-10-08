@@ -1,6 +1,6 @@
 "use client";
-import { useState } from "react";
-import { Download, RefreshCw, Loader2, AlertTriangle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Download, RefreshCw, Loader2, AlertTriangle, Gauge } from "lucide-react";
 import { nativeVideo } from "./filetext";
 
 // Video that refuses to stay black. Chain:
@@ -10,18 +10,95 @@ import { nativeVideo } from "./filetext";
 //  3. in-browser conversion (ffmpeg.wasm, Storage-hosted files): converts to
 //     MP4 locally and plays the result — nothing uploads anywhere.
 // Caps are stated, never silent: >300 MB won't convert in a tab.
+//
+// Quality: Auto measures your real throughput once (first megabyte, timed) and
+// picks High (direct) or Saver. High forces direct, Saver forces the lightest
+// path (Drive preview, else convert). Choice persists; the badge always shows
+// what you are actually watching and why.
 const CONVERT_MAX = 300 * 1024 * 1024;
+const FAST_MBPS = 4;
+
+function useSpeedMbps(src: string): number | null | "measuring" {
+  const [out, setOut] = useState<number | null | "measuring">("measuring");
+  useEffect(() => {
+    let gone = false;
+    (async () => {
+      try {
+        const t0 = performance.now();
+        const ctl = new AbortController();
+        const kill = setTimeout(() => ctl.abort(), 10000);
+        const res = await fetch(src, { signal: ctl.signal });
+        if (!res.ok || !res.body) throw new Error("probe failed");
+        const rd = res.body.getReader();
+        let got = 0;
+        for (;;) {
+          const { done, value } = await rd.read();
+          if (value) got += value.length;
+          if (done || got >= 1024 * 1024) break;
+        }
+        clearTimeout(kill);
+        try { await rd.cancel(); } catch { /* ignore */ }
+        const secs = Math.max((performance.now() - t0) / 1000, 0.05);
+        const mbps = (got * 8) / secs / 1_000_000;
+        if (!gone) setOut(mbps);
+      } catch {
+        const nav = (navigator as Navigator & { connection?: { downlink?: number } }).connection;
+        if (!gone) setOut(typeof nav?.downlink === "number" && nav.downlink > 0 ? nav.downlink : null);
+      }
+    })();
+    return () => { gone = true; };
+  }, [src]);
+  return out;
+}
+
+type QMode = "auto" | "high" | "saver";
 
 export default function VideoPlayer({ src, fileName, googleId, size, canDownload, downloadHref }: {
   src: string; fileName: string; googleId?: string | null; size?: number;
   canDownload: boolean; downloadHref: string;
 }) {
   const directOk = nativeVideo(fileName);
+  const [mode, setMode] = useState<QMode>(() => {
+    try { const v = localStorage.getItem("eiden-video-q"); return v === "high" || v === "saver" ? v : "auto"; }
+    catch { return "auto"; }
+  });
+  const speed = useSpeedMbps(src);
   const [phase, setPhase] = useState<"direct" | "drive" | "convert-offer">(directOk ? "direct" : googleId ? "drive" : "convert-offer");
+
+  function pick(m: QMode) {
+    setMode(m);
+    try { localStorage.setItem("eiden-video-q", m); } catch { /* ignore */ }
+    if (m === "high") setPhase("direct");
+    else if (m === "saver") setPhase(googleId ? "drive" : "convert-offer");
+    else setPhase(typeof speed === "number" && speed < FAST_MBPS && googleId ? "drive" : directOk ? "direct" : googleId ? "drive" : "convert-offer");
+  }
+
+  // Auto reacts once the measurement lands (manual choices always win after).
+  useEffect(() => {
+    if (mode !== "auto" || typeof speed !== "number") return;
+    if (speed < FAST_MBPS && googleId && directOk) setPhase("drive");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speed]);
+
+  const quality = phase === "drive" ? "Saver · Google transcode" : phase === "convert-offer" ? "Convert" : "High · direct";
+  const speedTxt = speed === "measuring" ? "measuring…" : typeof speed === "number" ? `${speed >= 10 ? Math.round(speed) : speed.toFixed(1)} Mbps` : "speed unknown";
+
+  const bar = (
+    <div className="flex items-center gap-1.5 px-3 py-1.5 text-[11.5px] text-muted">
+      <Gauge size={13} aria-hidden="true" />
+      <span className="tabular-nums">{mode === "auto" ? `Auto · ${quality} · ${speedTxt}` : `${mode === "high" ? "High" : "Saver"} · ${speedTxt}`}</span>
+      <span className="flex-1" />
+      {(["auto", "high", "saver"] as QMode[]).map((m) => (
+        <button key={m} onClick={() => pick(m)} aria-pressed={mode === m}
+          className={`min-h-[32px] px-2 rounded capitalize ${mode === m ? "bg-tint text-brand font-medium" : "hover:bg-tint/60"}`}>{m}</button>
+      ))}
+    </div>
+  );
 
   if (phase === "drive" && googleId) {
     return (
       <div>
+        {bar}
         <iframe src={`https://drive.google.com/file/d/${googleId}/preview`} title={`Video ${fileName}`}
           className="w-full h-[70vh] border-0 bg-black" allow="autoplay; fullscreen" allowFullScreen />
         <p className="px-4 py-2 text-[12px] text-muted">Playing via Google's preview transcoding — original file untouched.</p>
@@ -29,11 +106,14 @@ export default function VideoPlayer({ src, fileName, googleId, size, canDownload
     );
   }
   if (phase === "convert-offer") {
-    return <ConvertOffer src={src} fileName={fileName} size={size} canDownload={canDownload} downloadHref={downloadHref} />;
+    return <div>{bar}<ConvertOffer src={src} fileName={fileName} size={size} canDownload={canDownload} downloadHref={downloadHref} /></div>;
   }
   return (
-    <video src={src} controls className="w-full max-h-[70vh] bg-black" preload="metadata"
-      onError={() => setPhase(googleId ? "drive" : "convert-offer")} />
+    <div>
+      {bar}
+      <video src={src} controls className="w-full max-h-[70vh] bg-black" preload="metadata"
+        onError={() => setPhase(googleId ? "drive" : "convert-offer")} />
+    </div>
   );
 }
 

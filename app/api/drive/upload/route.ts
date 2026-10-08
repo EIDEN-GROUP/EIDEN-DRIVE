@@ -10,6 +10,7 @@ import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { queueUsbUpload } from "@/lib/usb";
 import { pickUploadAccount, clientFor } from "@/lib/drive-accounts";
+import { postSlack } from "@/lib/slack";
 import { parseJson } from "@/lib/http";
 
 // Metadata-only: bytes already went to Supabase Storage via a signed URL (or the agent staged them).
@@ -110,5 +111,37 @@ export async function POST(req: Request) {
       usb_queued = e instanceof Error ? e.message : "usb queue failed";
     }
   }
+  // Upload fan-out (never blocks the response): in-app notifications for
+  // managers/admins + Slack channel post, both with who/where/what details.
+  try {
+    const origin = process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin;
+    let where = "Root";
+    if (body.folder) {
+      const { data: fol } = await db.from("folders").select("name").eq("id", body.folder).maybeSingle();
+      if ((fol as { name?: string } | null)?.name) where = `folder “${(fol as { name: string }).name}”`;
+    }
+    const sizeTxt = body.size ? ` · ${formatBytes(body.size)}` : "";
+    const link = `${origin}/drive/${data.id}`;
+    const { data: staff } = await db.from("profiles").select("id").in("role", ["admin", "manager"]).limit(20);
+    for (const s of (staff ?? []) as { id: string }[]) {
+      if (s.id === me.id) continue; // uploader doesn't notify themselves
+      await db.from("notifications").insert({
+        user_id: s.id, kind: "upload",
+        title: `${me.username} uploaded ${body.name}`,
+        body: `${where}${sizeTxt} · ${link}`
+      });
+    }
+    postSlack(`📤 *${me.username}* uploaded *${body.name}* (${where}${sizeTxt})\n${link}`).then((r) => {
+      if (!r.ok) console.error("[slack-upload]", r.error);
+    });
+  } catch { /* fan-out never fails the upload */ }
   return Response.json({ ok: true, id: data.id, push_error, usb_queued });
+}
+
+function formatBytes(n: number): string {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v >= 10 ? Math.round(v) : Math.round(v * 10) / 10} ${u[i]}`;
 }

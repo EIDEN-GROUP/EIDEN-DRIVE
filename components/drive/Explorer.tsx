@@ -4,12 +4,13 @@ import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
   Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload,
-  Eye, Copy, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon
+  Eye, Copy, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon, Image as ImageIcon
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import Modal from "../ui/Modal";
 import Menu from "../ui/Menu";
+import FileThumb from "./FileThumb";
 import FileViewer, { type ViewFile } from "./FileViewer";
 import FileEditor from "./FileEditor";
 import { editable, viewKind } from "./filetext";
@@ -97,6 +98,14 @@ export default function Explorer() {
   const [hist, setHist] = useState<Nav[]>([{ kind: "root", path: [] }]);
   const [hi, setHi] = useState(0);
   const [view, setView] = useState<View>("list");
+  // Covers (Windows-style thumbnails), persisted. Off = classic icons.
+  const [thumbs, setThumbs] = useState(true);
+  useEffect(() => {
+    try { if (localStorage.getItem("eiden-thumbs") === "0") setThumbs(false); } catch { /* ignore */ }
+  }, []);
+  function toggleThumbs() {
+    setThumbs((v) => { try { localStorage.setItem("eiden-thumbs", v ? "0" : "1"); } catch { /* ignore */ } return !v; });
+  }
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
   const [tagFilter, setTagFilter] = useState<string | null>(null); // department filter (manager-set folder.dept)
   const tg = useTags();                                            // user-created tags
@@ -900,6 +909,9 @@ export default function Explorer() {
             <div role="group" aria-label="View" className="flex rounded-md overflow-hidden">
               <button onClick={() => setView("list")} aria-pressed={view === "list"} aria-label="List view" className={`size-11 grid place-items-center ${view === "list" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutList size={19} strokeWidth={1.6} /></button>
               <button onClick={() => setView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
+              <button onClick={toggleThumbs} aria-pressed={thumbs} aria-label={thumbs ? "Hide file covers" : "Show file covers"}
+                title={thumbs ? "Hide covers" : "Show covers (images, video frames)"}
+                className={`size-11 grid place-items-center ${thumbs ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><ImageIcon size={19} strokeWidth={1.6} /></button>
             </div>
             <span className="h-5 border-l border-line mx-0.5" />
             {/* Upload: action + destination picker (Supabase always, Drive + USB selectable). */}
@@ -1086,7 +1098,9 @@ export default function Explorer() {
                             ? <button onClick={(e) => { e.stopPropagation(); toggleExpand(r.id); }} aria-label={expanded.has(r.id) ? `Collapse ${r.name}` : `Expand ${r.name}`} aria-expanded={expanded.has(r.id)}
                                 className="size-[18px] grid place-items-center text-muted hover:text-brand shrink-0">{expanded.has(r.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
                             : <span className="w-[18px] shrink-0" />}
-                          <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={26} className="shrink-0" />
+                          {thumbs && r.file
+                            ? <FileThumb file={r.file} size={40} />
+                            : <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={26} className="shrink-0" />}
                           <span className="text-[15px] truncate">{r.name}</span>
                         </div>
                         <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
@@ -1110,7 +1124,9 @@ export default function Explorer() {
                         onKeyDown={(e) => onRowKey(e, r)}
                         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
                         className={`flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors min-h-[104px] ${on ? "bg-tint text-brand" : "hover:bg-tint/40"}`}>
-                        <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={64} />
+                        {thumbs && r.file
+                          ? <FileThumb file={r.file} size={72} />
+                          : <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={64} />}
                         <span className="text-[12.5px] leading-tight break-all line-clamp-2">{r.name}</span>
                         {rowTags(r).length > 0 && <TagDots tags={rowTags(r)} />}
                       </button>

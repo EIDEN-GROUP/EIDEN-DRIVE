@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   ChevronDown, Menu as MenuIcon, FolderClosed, Activity, ShieldCheck, KeyRound, Users, HardDrive,
-  Moon, Sun, ChevronsRight, ChevronsLeft, Bell, CircleCheck, CalendarDays, LogOut, X
+  Moon, Sun, ChevronsRight, ChevronsLeft, Bell, CircleCheck, LogOut, X
 } from "lucide-react";
 import Logo from "../ui/Logo";
 import NotificationsPanel from "../notifications/NotificationsPanel";
@@ -20,7 +20,6 @@ const NAV = [
   { href: "/security", label: "Security Center", short: "Security", icon: ShieldCheck },
   { href: "/vault", label: "Vault", short: "Vault", icon: KeyRound },
   { href: "/users", label: "Users & Departments", short: "Users", icon: Users },
-  { href: "/calendar", label: "Calendar & Plans", short: "Calendar", icon: CalendarDays },
   { href: "/storage", label: "Storage & Backups", short: "Storage", icon: HardDrive }
 ];
 
@@ -251,7 +250,6 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
                 )}
               </button>
               <Link href="/security" aria-label="Security approvals" className="size-11 grid place-items-center rounded-md hover:bg-tint text-brand"><CircleCheck size={20} strokeWidth={1.7} /></Link>
-              <Link href="/calendar" aria-label="Calendar" className="size-11 grid place-items-center rounded-md hover:bg-tint text-muted"><CalendarDays size={20} strokeWidth={1.7} /></Link>
             </aside>
           )}
         </div>
