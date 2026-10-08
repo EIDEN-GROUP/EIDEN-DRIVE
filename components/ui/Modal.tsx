@@ -8,15 +8,23 @@ export default function Modal({ open, title, onClose, children, width = 440, lab
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
+  // Stable onClose: parents pass inline arrows (new identity every keystroke) —
+  // the open-effect must NOT re-run because of that, or focus gets stolen while typing.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     if (!open) return;
-    // Focus the form, not the ×: if the content declares autofocus, honor it.
-    const auto = boxRef.current?.querySelector<HTMLElement>("[autofocus]");
-    (auto ?? closeRef.current)?.focus();
-    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    // Focus the form's first field once, on open — never again while typing.
+    // (React handles autoFocus without leaving an [autofocus] attribute behind,
+    // so query the field directly instead of the attribute.)
+    const field = boxRef.current?.querySelector<HTMLElement>(
+      "input:not([type=hidden]):not([disabled]), textarea:not([disabled]), select:not([disabled])"
+    );
+    (field ?? closeRef.current)?.focus();
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onCloseRef.current(); };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[90] grid place-items-center bg-black/30 backdrop-blur-[3px] p-4" onClick={onClose}>
