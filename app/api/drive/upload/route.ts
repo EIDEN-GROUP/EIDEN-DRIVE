@@ -1,11 +1,13 @@
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
+import { Readable } from "node:stream";
 import { adminClient } from "@/lib/supabase-admin";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { UPLOAD_BUCKET } from "@/lib/storage";
 import { rootFor } from "@/lib/google-drive";
+import { googleErrorMessage } from "@/lib/errors";
 import { pickUploadAccount, clientFor } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
@@ -76,7 +78,9 @@ export async function POST(req: Request) {
               mimeType: body.mime ?? "application/octet-stream",
               ...(root.kind === "folder" ? { parents: [root.id] } : {})
             },
-            media: { mimeType: body.mime ?? "application/octet-stream", body: Buffer.from(await blob.arrayBuffer()) },
+            // googleapis media bodies must be streams — a Buffer has no .pipe
+            // and dies with "t.body.pipe is not a function".
+            media: { mimeType: body.mime ?? "application/octet-stream", body: Readable.from(Buffer.from(await blob.arrayBuffer())) },
             fields: "id"
           });
           if (!created.data.id) throw new Error("google create returned no id");
@@ -86,7 +90,7 @@ export async function POST(req: Request) {
             backends: ["local", "google"]
           }).eq("id", data.id);
         } catch (e) {
-          push_error = e instanceof Error ? e.message : "google mirror failed";
+          push_error = googleErrorMessage(e instanceof Error ? e.message : "google mirror failed");
         }
       }
     }

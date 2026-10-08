@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { createClient } from "@/lib/supabase-server";
 import { listDriveFiles } from "@/lib/google-drive";
 import { getAccounts, clientFor, type DriveAccount } from "@/lib/drive-accounts";
+import { withTimeout, googleErrorMessage } from "@/lib/errors";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { escapeLike } from "@/lib/http";
@@ -36,7 +37,8 @@ export async function GET(req: Request) {
   const errors: string[] = [];
   async function liveFrom(label: string, accountId: string | null, fn: () => Promise<{ files?: Live[]; note?: string }>) {
     try {
-      const g = await fn();
+      // Live search must never stall the page: 12s then degrade to index-only.
+      const g = await withTimeout(12_000, fn(), `"${label}" live search`);
       if (g.note) googleNote = g.note;
       for (const f of (g.files ?? []).slice(0, 10)) {
         // Live (not yet synced) rows carry their account: g:<accountId>:<fileId>.
@@ -46,9 +48,7 @@ export async function GET(req: Request) {
       }
     } catch (e) {
       const m = e instanceof Error ? e.message : "google request failed";
-      errors.push(/invalid_grant/i.test(m)
-        ? `"${label}": token rejected — reconnect it from /api/auth/google?label=${encodeURIComponent(label)}`
-        : `"${label}": unreachable (${m})`);
+      errors.push(`"${label}": ${googleErrorMessage(m)}`);
     }
   }
   if (accounts.some((a) => a.status === "active")) {

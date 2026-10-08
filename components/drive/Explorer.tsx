@@ -129,6 +129,7 @@ export default function Explorer() {
   const [driveView, setDriveView] = useState<{ accountId: string; folderId: string | null; path: { id: string; name: string }[] } | null>(null);
   const [tree, setTree] = useState<{ id: string; name: string; mime: string; size: number; googleId: string; parent: string | null }[] | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
+  const [treeError, setTreeError] = useState<string | null>(null);
   const [confirmTrash, setConfirmTrash] = useState<FileRow | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newName, setNewName] = useState("");
@@ -143,6 +144,8 @@ export default function Explorer() {
   const PAGE = 50;
   const [uploading, setUploading] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Load failure worth showing (with Retry) — silent background refreshes only toast.
+  const [loadError, setLoadError] = useState<string | null>(null);
   // Clipboard survives reloads; silent 60s auto-refresh (no skeleton flash).
   const qRef = useRef(q);
   qRef.current = q;
@@ -153,24 +156,24 @@ export default function Explorer() {
 
   const load = useCallback(async (query: string, from = 0, append = false, silent = false) => {
     if (append) setLoadingMore(true);
-    else if (!silent) setLoading(true);
+    else if (!silent) { setLoading(true); setLoadError(null); }
+    // Every leg has a timeout: a stalled server must fail loudly with Retry,
+    // never spin the skeletons forever (the "root stopped responding" bug).
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(new Error("request timed out after 30s")), 30_000);
+    const get = (url: string) => fetch(url, { signal: c.signal }).then(async (r) => {
+      if (r.status === 401) throw new Error("signed out — sign in again and retry");
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error ?? `server error ${r.status}`);
+      }
+      return r.json();
+    });
     try {
       const [fr, dr, br] = await Promise.all([
-        append ? null : fetch("/api/folders").then(async (r) => {
-          if (!r.ok) throw new Error(`folders ${r.status}`);
-          return r.json();
-        }),
-        fetch(`/api/drive?q=${encodeURIComponent(query)}&limit=${PAGE}&offset=${from}`).then(async (r) => {
-          if (!r.ok) {
-            const d = await r.json().catch(() => ({}));
-            throw new Error((d as { error?: string }).error ?? `drive ${r.status}`);
-          }
-          return r.json();
-        }),
-        append ? null : fetch("/api/drive/bin").then(async (r) => {
-          if (!r.ok) throw new Error(`bin ${r.status}`);
-          return r.json();
-        })
+        append ? null : get("/api/folders"),
+        get(`/api/drive?q=${encodeURIComponent(query)}&limit=${PAGE}&offset=${from}`),
+        append ? null : get("/api/drive/bin")
       ]);
       if (fr) setFolders(fr.results ?? []);
       setFiles((prev) => append ? [...prev, ...(dr.results ?? [])] : (dr.results ?? []));
@@ -181,8 +184,14 @@ export default function Explorer() {
         toast({ text: dr.google_error, tone: "err" });
       }
     } catch (e) {
-      toast({ text: e instanceof Error ? e.message : "Couldn't reach the server.", tone: "err" });
+      const msg = e instanceof Error
+        ? /abort|timed out/i.test(e.message) ? "The server took too long (>30s) — it may be waking up or stuck. Retry, and check /api/health if it repeats."
+        : e.message
+        : "Couldn't reach the server.";
+      if (silent) toast({ text: `Background refresh failed: ${msg}`, tone: "err" });
+      else setLoadError(msg);
     } finally {
+      clearTimeout(t);
       setLoading(false);
       setLoadingMore(false);
     }
@@ -196,7 +205,7 @@ export default function Explorer() {
 
   useEffect(() => {
     let dead = false;
-    fetch("/api/drive/accounts").then((r) => r.json().catch(() => ({}))).then((d) => {
+    fetch("/api/drive/accounts", { signal: AbortSignal.timeout(15_000) }).then((r) => r.json().catch(() => ({}))).then((d) => {
       if (!dead) setAccounts(d.results ?? []);
     }).catch(() => { /* picker stays hidden */ });
     return () => { dead = true; };
@@ -602,8 +611,15 @@ export default function Explorer() {
     let dead = false;
     setTree(null);
     setTreeLoading(true);
-    fetch(`/api/drive/tree?accountId=${driveView.accountId}`)
-      .then((r) => r.json().catch(() => ({})))
+    setTreeError(null);
+    fetch(`/api/drive/tree?accountId=${driveView.accountId}`, { signal: AbortSignal.timeout(30_000) })
+      .then(async (r) => {
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          throw new Error(d.error ?? `tree ${r.status}`);
+        }
+        return r.json().catch(() => ({}));
+      })
       .then((d) => {
         if (dead) return;
         setTree((d.results ?? []).map((t: { id: string; name: string; mime: string; size: number; google_file_id: string; google_parent_id: string | null }) => ({
@@ -611,7 +627,11 @@ export default function Explorer() {
         })));
         setTreeLoading(false);
       })
-      .catch(() => { if (!dead) setTreeLoading(false); });
+      .catch((e) => {
+        if (dead) return;
+        setTreeLoading(false);
+        setTreeError(e instanceof Error ? e.message : "Couldn't load this drive's tree.");
+      });
     return () => { dead = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [driveView?.accountId]);
@@ -621,6 +641,7 @@ export default function Explorer() {
     setTagSel([]); setTagFilter(null); setQ("");
     setDriveView({ accountId, folderId: null, path: [] });
     setSelKey(null); setInfoOpen(false); setCtx(null);
+    setLoadError(null);
   }
   const taggable = (r: Row) => (r.kind === "file" ? !r.id.startsWith("g:") : !r.id.startsWith("gdrive:"));
   const rowTags = (r: Row): Tag[] => taggable(r) ? tg.idsOf(r.kind, r.id).map((id) => tg.byId.get(id)).filter(Boolean) as Tag[] : [];
@@ -915,6 +936,12 @@ export default function Explorer() {
                 ))}
               </div>
             )}
+            {driveView && treeError && !treeLoading && (
+              <div className="shrink-0 mx-3 mt-2 p-3 rounded-lg border border-danger/40 bg-danger/5 text-[13px]" role="alert">
+                <strong>Couldn't load this drive's folders:</strong> {treeError}{" "}
+                <button onClick={() => openDrive(driveView.accountId)} className="text-brand font-medium hover:underline min-h-[36px]">Retry</button>
+              </div>
+            )}
             <div className="relative flex-1 min-h-0 overflow-auto"
               onClick={() => { clearSel(); setInfoOpen(false); }}
               onDragOver={(e) => { e.preventDefault(); if (e.dataTransfer.types.includes("Files")) setDragOver(true); }}
@@ -946,6 +973,17 @@ export default function Explorer() {
                     </div>
                   ))}
                   <span className="sr-only" role="status">Reading drive…</span>
+                </div>
+              ) : loadError ? (
+                <div className="h-full min-h-[260px] grid place-items-center p-8 text-center" role="alert">
+                  <div className="max-w-sm">
+                    <p className="text-[15px] font-medium">Couldn't load this view</p>
+                    <p className="mt-2 text-[13px] text-muted leading-relaxed">{loadError}</p>
+                    <div className="mt-4 flex gap-2 justify-center flex-wrap">
+                      <button onClick={() => load(q)} className="min-h-[44px] px-5 rounded-md bg-brand text-white text-sm font-medium">Retry</button>
+                      <a href="/api/health" target="_blank" rel="noreferrer" className="min-h-[44px] px-4 inline-flex items-center rounded-md border border-line text-sm hover:bg-tint">Check server health</a>
+                    </div>
+                  </div>
                 </div>
               ) : nav.kind === "bin" ? (
                 bin.length === 0

@@ -7,6 +7,7 @@ import { getProfile, can } from "@/lib/roles";
 import { UPLOAD_BUCKET } from "@/lib/storage";
 import { driveClient, resolveRoot } from "@/lib/google-drive";
 import { getAccounts, quotaFor, rootKind, clientFor, type DriveAccount } from "@/lib/drive-accounts";
+import { withTimeout, googleErrorMessage } from "@/lib/errors";
 
 // Managers+: "check everything" in one call. Reports NAMES and booleans only —
 // never secret values. Pinpoint which setup step is missing instead of guessing.
@@ -64,23 +65,24 @@ export async function GET() {
     for (const a of accounts) {
       if (a.status !== "active") { drives.push({ label: a.label, reachable: false, cause: "disabled" }); continue; }
       try {
-        const d = clientFor(a);
-        if (!d) throw new Error("google not configured");
-        const about = await d.about.get({ fields: "user(emailAddress)" });
-        const kind = (await rootKind(d, a.root_id ?? "")).kind;
-        const q = await quotaFor(a).catch(() => ({ usage: null, limit: null, free: null, email: a.email }));
+        const probed = await withTimeout(15_000, (async () => {
+          const d = clientFor(a);
+          if (!d) throw new Error("google not configured");
+          const about = await d.about.get({ fields: "user(emailAddress)" });
+          const kind = (await rootKind(d, a.root_id ?? "")).kind;
+          const q = await quotaFor(a).catch(() => ({ usage: null, limit: null, free: null, email: a.email }));
+          return { email: about.data.user?.emailAddress ?? a.email, kind, q };
+        })(), `health probe ${a.label}`);
         drives.push({
-          label: a.label, reachable: true, connected_as: about.data.user?.emailAddress ?? a.email,
-          root: kind, free: q.free, limit: q.limit
+          label: a.label, reachable: true, connected_as: probed.email,
+          root: probed.kind, free: probed.q.free, limit: probed.q.limit
         });
       } catch (e) {
         const m = e instanceof Error ? e.message : "google probe failed";
         drives.push({
           label: a.label, reachable: false,
           cause: /invalid_grant/i.test(m) ? "refresh-token-rejected" : "unreachable",
-          hint: /invalid_grant/i.test(m)
-            ? `Reconnect it: open /api/auth/google?label=${encodeURIComponent(a.label)} as admin (same Gmail refreshes its token).`
-            : m
+          hint: googleErrorMessage(m)
         });
       }
     }

@@ -5,6 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { listDrivePage } from "@/lib/google-drive";
+import { withTimeout, googleErrorMessage } from "@/lib/errors";
 import { getAccounts, clientFor, type DriveAccount } from "@/lib/drive-accounts";
 
 // Manager+: incremental Google → file_index sync (upsert by google_file_id).
@@ -37,7 +38,7 @@ export async function POST(req: Request) {
   try {
     const d = clientFor(acct);
     if (!d) throw new Error("google not configured");
-    page = await listDrivePage(v.data.pageToken ?? undefined, { drive: d, rootId: acct.root_id ?? "" });
+    page = await withTimeout(25_000, listDrivePage(v.data.pageToken ?? undefined, { drive: d, rootId: acct.root_id ?? "" }), `sync page (${acct.label})`);
   } catch (e) {
     return syncError(e);
   }
@@ -83,13 +84,7 @@ export async function POST(req: Request) {
 
 function syncError(e: unknown) {
   const m = e instanceof Error ? e.message : "google request failed";
-  if (/invalid_grant/i.test(m)) {
-    return Response.json({ error: "Google rejected a refresh token — reconnect that account from /api/auth/google?label=… (same Gmail refreshes its token)." }, { status: 502 });
-  }
-  if (/not.?found|404/i.test(m)) {
-    return Response.json({ error: "Google can't open that root — check the account's root folder/drive and /api/health to see which account is connected." }, { status: 502 });
-  }
-  return Response.json({ error: `Google Drive unreachable right now (${m}).` }, { status: 502 });
+  return Response.json({ error: googleErrorMessage(m) }, { status: 502 });
 }
 
 // Pre-migration single-env sync (no account pinning).

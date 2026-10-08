@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
+import { Readable } from "node:stream";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
@@ -47,7 +48,7 @@ export async function PATCH(req: Request) {
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
       const g = ctx?.drive;
       if (!g) throw new Error("google not configured");
-      await g.files.update({ fileId: f.google_file_id, supportsAllDrives: true, media: { mimeType: f.mime ?? "text/plain", body: Buffer.from(bytes) } });
+      await g.files.update({ fileId: f.google_file_id, supportsAllDrives: true, media: { mimeType: f.mime ?? "text/plain", body: Readable.from(bytes) } });
     } else {
       return Response.json({ error: "no writable copy yet" }, { status: 404 });
     }

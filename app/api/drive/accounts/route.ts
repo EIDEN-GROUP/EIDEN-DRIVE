@@ -5,6 +5,7 @@ import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { getAccounts, quotaFor, rootKind, clientFor, bustAccountCache, purgeAccountRows } from "@/lib/drive-accounts";
+import { withTimeout } from "@/lib/errors";
 import { rootFor } from "@/lib/google-drive";
 import { parseJson } from "@/lib/http";
 
@@ -20,9 +21,15 @@ export async function GET() {
     let rootKindName: string = a.status === "active" ? "mydrive" : "unknown";
     if (a.status === "active") {
       try {
-        quota = await quotaFor(a);
-        const d = clientFor(a);
-        if (d) rootKindName = (await rootKind(d, a.root_id ?? "")).kind;
+        // Bounded: a stalled Google must mark the drive down, not hang the page.
+        const probed = await withTimeout(12_000, (async () => {
+          const q = await quotaFor(a);
+          const d = clientFor(a);
+          const kind = d ? (await rootKind(d, a.root_id ?? "")).kind : "mydrive";
+          return { q, kind };
+        })(), `probe ${a.label}`);
+        quota = probed.q;
+        if (probed.kind) rootKindName = probed.kind;
       } catch {
         rootKindName = "unreachable";
       }
