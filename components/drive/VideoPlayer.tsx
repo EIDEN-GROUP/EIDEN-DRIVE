@@ -16,7 +16,6 @@ import { nativeVideo } from "./filetext";
 // path (Drive preview, else convert). Choice persists; the badge always shows
 // what you are actually watching and why.
 const CONVERT_MAX = 300 * 1024 * 1024;
-const FAST_MBPS = 4;
 
 function useSpeedMbps(src: string): number | null | "measuring" {
   const [out, setOut] = useState<number | null | "measuring">("measuring");
@@ -64,23 +63,25 @@ export default function VideoPlayer({ src, fileName, googleId, size, canDownload
   });
   const speed = useSpeedMbps(src);
   const [phase, setPhase] = useState<"direct" | "drive" | "convert-offer">(directOk ? "direct" : googleId ? "drive" : "convert-offer");
+  const [stalls, setStalls] = useState(0);
 
   function pick(m: QMode) {
     setMode(m);
     try { localStorage.setItem("eiden-video-q", m); } catch { /* ignore */ }
+    setStalls(0);
     if (m === "high") setPhase("direct");
     else if (m === "saver") setPhase(googleId ? "drive" : "convert-offer");
-    else setPhase(typeof speed === "number" && speed < FAST_MBPS && googleId ? "drive" : directOk ? "direct" : googleId ? "drive" : "convert-offer");
+    else setPhase(directOk ? "direct" : googleId ? "drive" : "convert-offer");
   }
 
-  // Auto reacts once the measurement lands (manual choices always win after).
-  useEffect(() => {
-    if (mode !== "auto" || typeof speed !== "number") return;
-    if (speed < FAST_MBPS && googleId && directOk) setPhase("drive");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speed]);
+  // Stall detector: buffering twice on Auto surfaces a one-tap Saver switch —
+  // but the call is the viewer's, never automatic. Original pixels stay default.
+  function onStall() {
+    setStalls((s) => s + 1);
+  }
+  const showSaverHint = stalls >= 2 && (phase === "direct" && !!googleId);
 
-  const quality = phase === "drive" ? "Saver · Google transcode" : phase === "convert-offer" ? "Convert" : "High · direct";
+  const quality = phase === "drive" ? "Saver · Google transcode" : phase === "convert-offer" ? "Convert" : "Original · direct";
   const speedTxt = speed === "measuring" ? "measuring…" : typeof speed === "number" ? `${speed >= 10 ? Math.round(speed) : speed.toFixed(1)} Mbps` : "speed unknown";
 
   const bar = (
@@ -100,7 +101,7 @@ export default function VideoPlayer({ src, fileName, googleId, size, canDownload
       <div>
         {bar}
         <iframe src={`https://drive.google.com/file/d/${googleId}/preview`} title={`Video ${fileName}`}
-          className="w-full h-[70vh] border-0 bg-black" allow="autoplay; fullscreen" allowFullScreen />
+          className="w-full h-[min(66vh,720px)] border-0 bg-black" allow="autoplay; fullscreen" allowFullScreen />
         <p className="px-4 py-2 text-[12px] text-muted">Playing via Google's preview transcoding — original file untouched.</p>
       </div>
     );
@@ -111,8 +112,17 @@ export default function VideoPlayer({ src, fileName, googleId, size, canDownload
   return (
     <div>
       {bar}
-      <video src={src} controls className="w-full max-h-[70vh] bg-black" preload="metadata"
-        onError={() => setPhase(googleId ? "drive" : "convert-offer")} />
+      <div className="relative bg-black">
+        <video src={src} controls className="w-full max-h-[66vh] bg-black" preload="metadata"
+          onError={() => setPhase(googleId ? "drive" : "convert-offer")}
+          onWaiting={onStall} onStalled={onStall} />
+        {showSaverHint && (
+          <button onClick={() => pick("saver")}
+            className="absolute bottom-14 left-1/2 -translate-x-1/2 min-h-[40px] px-4 rounded-full bg-surface/95 border border-line text-[13px] shadow-pop">
+            Buffering? Switch to Saver
+          </button>
+        )}
+      </div>
     </div>
   );
 }

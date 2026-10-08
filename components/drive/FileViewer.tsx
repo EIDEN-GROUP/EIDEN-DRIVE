@@ -146,10 +146,10 @@ export default function FileViewer({ file, onClose, onEdit }: { file: ViewFile; 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-5" role="dialog" aria-modal="true" aria-label={`Preview ${file.name}`}>
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
-      <div className="pop-in relative w-full max-w-6xl h-[92vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
-        <div className="flex items-center gap-2 px-4 min-h-[56px] border-b border-line shrink-0">
-          <div className="min-w-0 flex-1">
-            <p className="text-[14px] font-medium truncate">{file.name}</p>
+      <div className="pop-in relative w-full max-w-5xl h-[88vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-2 min-h-[56px] border-b border-line shrink-0 flex-wrap">
+          <div className="min-w-0 flex-1 basis-40">
+            <p className="text-[14px] font-medium truncate" title={file.name}>{file.name}</p>
             <p className="text-[11.5px] text-muted truncate">{LABEL[eff]}{sn && kind0 === "unknown" ? ` · detected: ${sn.label}` : ""}{file.size ? ` · ${fmtBytes(file.size)}` : ""}</p>
           </div>
           {canEdit && <button onClick={() => onEdit(file)} className="min-h-[40px] px-3 rounded-md border border-line text-[13px] flex items-center gap-1.5 hover:bg-tint"><Pencil size={14} /> Edit</button>}

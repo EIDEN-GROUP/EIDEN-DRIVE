@@ -20,7 +20,8 @@ describe("API contracts (anonymous)", () => {
       ["/api/drive/upload-url", "POST"], ["/api/drive/rename", "PATCH"], ["/api/drive/sync", "POST"],
       ["/api/drive/copy", "POST"], ["/api/drive/content", "PATCH"], ["/api/drive/usb", "POST"],
       ["/api/drive/resync-clean", "POST"], ["/api/drive/accounts", "PATCH"], ["/api/drive/accounts", "DELETE"],
-      ["/api/agent/complete", "POST"],
+      ["/api/agent/complete", "POST"], ["/api/auth/link", "POST"], ["/api/auth/otp-code", "POST"],
+      ["/api/share", "POST"], ["/api/share", "DELETE"], ["/api/integrations/slack", "POST"], ["/api/integrations/smtp", "POST"],
       ["/api/folders", "POST"], ["/api/folders", "PATCH"], ["/api/folders", "DELETE"],
       ["/api/users", "PATCH"], ["/api/users", "DELETE"], ["/api/users/invite", "POST"],
       ["/api/approvals", "POST"], ["/api/storage", "POST"]

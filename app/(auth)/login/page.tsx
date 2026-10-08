@@ -4,7 +4,7 @@ import { useSearchParams } from "next/navigation";
 import { browserClient } from "@/lib/supabase-client";
 import Logo from "@/components/ui/Logo";
 
-type Step = "email" | "method" | "code" | "request";
+type Step = "email" | "method" | "request";
 type Method = "otp" | "password";
 
 function LoginForm() {
@@ -13,8 +13,7 @@ function LoginForm() {
   const [method, setMethod] = useState<Method>("otp");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
-  const [code, setCode] = useState("");
-  const [state, setState] = useState<"idle" | "sending" | "sent" | "verifying" | "error">("idle");
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [error, setError] = useState("");
   // request-access form
   const [reqName, setReqName] = useState("");
@@ -53,7 +52,7 @@ function LoginForm() {
       return "No account for this email yet. Request access below and a manager will invite you.";
     }
     if (/invalid login credentials|invalid.*password/i.test(m)) {
-      return "Incorrect email or password. No password set? Go back and use a code instead.";
+      return "Incorrect email or password. No password set? Go back and use the email link instead.";
     }
     return m;
   }
@@ -71,29 +70,21 @@ function LoginForm() {
     if (cool > 0) return;
     setState("sending");
     setError("");
-    setCode("");
-    const supa = browserClient();
-    // Code flow (no redirect link): Supabase emails a 6-digit code, entered below.
-    // Dashboard requirement: Auth → Email Templates → Magic Link must contain {{ .Token }}.
-    const { error } = await supa.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
-    if (error) { setError(mapError(error.message)); setState("error"); reportFailure("otp"); }
-    else {
-      localStorage.setItem("eiden-otp-at", String(Date.now()));
-      setCool(COOLDOWN);
-      setState("sent");
-      setStep("code");
+    // Our SMTP sends the sign-in link (Supabase never emails for this app).
+    const r = await fetch("/api/auth/link", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, next })
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      setError(d.error ?? "Couldn't send the link.");
+      setState("error");
+      reportFailure("link");
+      return;
     }
-  }
-
-  async function verifyCode(e: React.FormEvent) {
-    e.preventDefault();
-    if (!/^\d{6}$/.test(code.trim())) { setError("Enter the 6-digit code from the email."); return; }
-    setState("verifying");
-    setError("");
-    const supa = browserClient();
-    const { error } = await supa.auth.verifyOtp({ email, token: code.trim(), type: "email" });
-    if (error) { setError(mapError(error.message)); setState("error"); reportFailure("otp-code"); }
-    else window.location.replace(next);
+    localStorage.setItem("eiden-otp-at", String(Date.now()));
+    setCool(COOLDOWN);
+    setState("sent");
   }
 
   async function signInPassword(e: React.FormEvent) {
@@ -166,25 +157,11 @@ function LoginForm() {
             </form>
           )}
         </div>
-      ) : step === "code" ? (
-        <form className="mt-10 flex flex-col" onSubmit={verifyCode}>
-          <p className="text-center text-[15px] text-muted">Code sent to <strong className="text-ink">{email}</strong> <button type="button" onClick={() => { setStep("email"); setError(""); }} className="underline text-[13px]">change</button></p>
-          <div className="mt-5">
-            <label className="block text-[17px] text-muted" htmlFor="otp-code">6-digit code</label>
-            <input id="otp-code" inputMode="numeric" autoComplete="one-time-code" placeholder="••••••"
-              value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              maxLength={6} className={`${underline} tracking-[0.5em] text-center`} />
-            <p className="text-[12.5px] text-muted mt-2">Expires in 1 hour. Didn't get it? Check spam{cool > 0 ? `, or resend in ${cool}s` : ""}.</p>
-          </div>
-          {error && <p className="text-[14px] text-danger mt-4" role="alert">{error}</p>}
-          <button disabled={state === "verifying" || code.trim().length !== 6}
-            className="mt-6 min-h-[44px] py-3 w-full rounded-[6px] bg-[var(--login)] text-white text-[17px] tracking-wide uppercase hover:brightness-110 transition disabled:opacity-60">
-            {state === "verifying" ? "Verifying…" : "Verify & sign in"}
-          </button>
-          <button type="button" disabled={cool > 0} onClick={sendOtp} className="mt-3 min-h-[44px] text-[14px] text-muted underline disabled:opacity-60 disabled:no-underline">
-            {cool > 0 ? `Resend code in ${cool}s` : "Resend code"}
-          </button>
-        </form>
+      ) : state === "sent" ? (
+        <p className="text-center text-[16px] mt-14 text-ink/80 leading-relaxed" role="status">
+          Check <strong className="font-medium">{email}</strong> for your sign-in link.<br />
+          <span className="text-muted text-[14px]">It expires in 1 hour and works once.</span>
+        </p>
       ) : step === "email" ? (
         <form className="mt-12 flex flex-col" onSubmit={(e) => { e.preventDefault(); if (email) setStep("method"); }}>
           <div>
@@ -213,7 +190,7 @@ function LoginForm() {
           <div className="mt-5 grid grid-cols-2 gap-3" role="group" aria-label="Choose sign-in method">
             <button onClick={() => { setMethod("otp"); setError(""); }} aria-pressed={method === "otp"}
               className={`min-h-[52px] rounded-[8px] border text-[15px] font-medium ${method === "otp" ? "border-[var(--login)] text-[var(--login)] bg-tint" : "border-line text-muted"}`}>
-              Code
+              Email link
             </button>
             <button onClick={() => { setMethod("password"); setError(""); }} aria-pressed={method === "password"}
               className={`min-h-[52px] rounded-[8px] border text-[15px] font-medium ${method === "password" ? "border-[var(--login)] text-[var(--login)] bg-tint" : "border-line text-muted"}`}>
@@ -222,11 +199,11 @@ function LoginForm() {
           </div>
           {method === "otp" ? (
             <form className="mt-5" onSubmit={sendOtp}>
-              <p className="text-[13px] text-muted">We email you a 6-digit code. No password to remember.</p>
+              <p className="text-[13px] text-muted">We email you a one-time sign-in link from our own mail server. No password to remember.</p>
               {error && <p className="text-[14px] text-danger mt-3" role="alert">{error}</p>}
               <button disabled={cool > 0}
                 className="mt-4 min-h-[44px] py-3 w-full rounded-[6px] bg-[var(--login)] text-white text-[17px] tracking-wide uppercase hover:brightness-110 transition disabled:opacity-60">
-                {cool > 0 ? `Resend in ${cool}s` : "Send code"}
+                {cool > 0 ? `Resend in ${cool}s` : "Send sign-in link"}
               </button>
             </form>
           ) : (
@@ -253,7 +230,7 @@ function LoginForm() {
         </div>
       )}
 
-      {step !== "request" && step !== "code" && (
+      {step !== "request" && state !== "sent" && (
         <p className="text-center text-[15px] text-muted mt-10">
           No account yet? <button onClick={() => { setStep("request"); setReqName(""); setReqMsg(""); setReqState("idle"); }} className="text-[var(--login)] border-b border-[var(--login)] min-h-[44px]">Request access</button>
         </p>

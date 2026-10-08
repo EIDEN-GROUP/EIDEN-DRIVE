@@ -170,6 +170,7 @@ export default function Explorer() {
   }
   const [driveView, setDriveView] = useState<{ accountId: string; folderId: string | null; path: { id: string; name: string }[] } | null>(null);
   const [tree, setTree] = useState<{ id: string; name: string; mime: string; size: number; googleId: string; parent: string | null }[] | null>(null);
+  const [treeRoot, setTreeRoot] = useState<string | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [confirmTrash, setConfirmTrash] = useState<FileRow | null>(null);
@@ -329,11 +330,15 @@ export default function Explorer() {
     if (nav.kind === "recent") return sortFiles(files).sort((a, b) => String(b.updated_at ?? b.updated ?? "").localeCompare(String(a.updated_at ?? a.updated ?? ""))).slice(0, 50).map((f) => fileRowOf(f, 0));
     if (nav.kind === "docs") return sortFiles(files.filter((f) => DOC_KINDS.includes(classify(f.name, f.mime)))).map((f) => fileRowOf(f, 0));
     // Drive tree view: one account's Google folders/files from the index.
+    // Top level = children of the account's configured root ONLY. A folder
+    // scope must never leak the rest of My Drive (the old parent-null fallback
+    // did exactly that). Whole-My-Drive roots (rootId null) keep the heuristic.
     if (driveView && nav.kind === "root" && !q.trim()) {
       if (!tree) return [];
       const acctLabel = accounts.find((a) => a.id === driveView.accountId)?.label ?? "Drive";
       const idSet = new Set(tree.map((t) => t.googleId));
-      const kids = tree.filter((t) => driveView.folderId ? t.parent === driveView.folderId : (!t.parent || !idSet.has(t.parent)));
+      const top = (t: { parent: string | null }) => treeRoot ? t.parent === treeRoot : (!t.parent || !idSet.has(t.parent));
+      const kids = tree.filter((t) => driveView.folderId ? t.parent === driveView.folderId : top(t));
       const gFolders = kids.filter((k) => k.mime === "application/vnd.google-apps.folder");
       const gFiles = kids.filter((k) => k.mime !== "application/vnd.google-apps.folder");
       const toFile = (t: { id: string; name: string; mime: string; size: number; googleId: string }): FileRow =>
@@ -367,7 +372,7 @@ export default function Explorer() {
     };
     walk(curFolder, 0);
     return out;
-  }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, curFolder, deptOf, driveView, tree, accounts]);
+  }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, curFolder, deptOf, driveView, tree, treeRoot, accounts]);
 
   // Pagination: files/folders (list + grid) and the Recovery Bin page independently; any navigation/filter/sort resets to page 1.
   const pg = usePagination(rows, { defaultSize: 50, sizes: [25, 50, 100, 200], storageKey: "files",
@@ -656,9 +661,10 @@ export default function Explorer() {
 
   // Drive tree data: fetched once per opened drive (folders + files, capped).
   useEffect(() => {
-    if (!driveView) { setTree(null); return; }
+    if (!driveView) { setTree(null); setTreeRoot(null); return; }
     let dead = false;
     setTree(null);
+    setTreeRoot(null);
     setTreeLoading(true);
     setTreeError(null);
     fetch(`/api/drive/tree?accountId=${driveView.accountId}`, { signal: AbortSignal.timeout(30_000) })
@@ -671,6 +677,7 @@ export default function Explorer() {
       })
       .then((d) => {
         if (dead) return;
+        setTreeRoot(typeof d.rootId === "string" && d.rootId ? d.rootId : null);
         setTree((d.results ?? []).map((t: { id: string; name: string; mime: string; size: number; google_file_id: string; google_parent_id: string | null }) => ({
           id: t.id, name: t.name, mime: t.mime, size: t.size ?? 0, googleId: t.google_file_id, parent: t.google_parent_id
         })));
@@ -742,8 +749,8 @@ export default function Explorer() {
 
   // ── view helpers ──
   const title = nav.kind === "recent" ? "Recent" : nav.kind === "docs" ? "Documents" : nav.kind === "bin" ? "Recovery Bin"
-    : curFolder ? folderById.get(curFolder)?.name ?? "Folder" : "Root";
-  const crumbs: { label: string; onClick?: () => void; folder?: boolean }[] = [{ label: "Root", onClick: () => go({ kind: "root", path: [] }) }];
+    : curFolder ? folderById.get(curFolder)?.name ?? "Folder" : "Workspace";
+  const crumbs: { label: string; onClick?: () => void; folder?: boolean }[] = [{ label: "Workspace", onClick: () => go({ kind: "root", path: [] }) }];
   if (nav.kind === "root") nav.path.forEach((id, i) => crumbs.push({ label: folderById.get(id)?.name ?? "Folder", folder: true, onClick: i < nav.path.length - 1 ? () => go({ kind: "root", path: nav.path.slice(0, i + 1) }) : undefined }));
   else crumbs.push({ label: title, folder: nav.kind === "bin" });
 
@@ -779,7 +786,7 @@ export default function Explorer() {
             {favItem(nav.kind === "recent", () => go({ kind: "recent", path: [] }), <Clock size={19} strokeWidth={1.6} />, "Recent")}
             {favItem(nav.kind === "docs", () => go({ kind: "docs", path: [] }), <FileText size={19} strokeWidth={1.6} />, "Documents")}
             {favItem(nav.kind === "bin", () => go({ kind: "bin", path: [] }), <Trash2 size={19} strokeWidth={1.6} />, "Recovery Bin", bin.length)}
-            {favItem(nav.kind === "root" && !tagFilter && tagSel.length === 0 && !driveView, () => { setDriveView(null); setTagSel([]); setTagFilter(null); go({ kind: "root", path: [] }); }, <House size={19} strokeWidth={1.6} />, "Root")}
+            {favItem(nav.kind === "root" && !tagFilter && tagSel.length === 0 && !driveView, () => { setDriveView(null); setTagSel([]); setTagFilter(null); go({ kind: "root", path: [] }); }, <House size={19} strokeWidth={1.6} />, "Workspace")}
           </div>
         )}
         {/* Drives: every connected Google account, with live free space. Click = browse that drive. */}

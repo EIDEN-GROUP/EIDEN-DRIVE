@@ -38,6 +38,20 @@ export default function Welcome() {
       setName((pr.username && !pr.username.includes("-") ? pr.username : user.email.split("@")[0]).replace(/[^a-z0-9._-]/gi, ""));
       setPhase("details");
     };
+    // Invite links land here with ?token_hash=…&type=invite — exchange first.
+    const sp = new URLSearchParams(window.location.search);
+    const token_hash = sp.get("token_hash");
+    const type = sp.get("type");
+    if (token_hash && (type === "invite" || type === "magiclink" || type === "recovery")) {
+      supa.auth.verifyOtp({ token_hash, type: type as "invite" }).then(({ error }) => {
+        if (error) { setFailed(true); setMsg("This invite link has expired or was already used. Ask a manager to send a new one."); }
+        else finish();
+      });
+      const t = setTimeout(() => {
+        if (!done.current) { setFailed(true); setMsg("This invite link has expired or was already used. Ask a manager to send a new one."); }
+      }, 10000);
+      return () => clearTimeout(t);
+    }
     const { data: sub } = supa.auth.onAuthStateChange((evt, session) => { if (session && (evt === "SIGNED_IN" || evt === "INITIAL_SESSION")) finish(); });
     supa.auth.getSession().then(({ data }) => { if (data.session) finish(); });
     const t = setTimeout(() => {
@@ -102,9 +116,13 @@ export default function Welcome() {
   async function sendCode() {
     if (cool > 0) return;
     setError("");
-    const supa = browserClient();
-    const { error } = await supa.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
-    if (error) { setError("Couldn't send the code — try again in a minute."); return; }
+    // Code goes through OUR smtp (Supabase never emails for this app).
+    const r = await fetch("/api/auth/otp-code", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "send" })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { setError(d.error ?? "Couldn't send the code — try again in a minute."); return; }
     setCool(60);
     setCode("");
     setPhase("verify");
@@ -115,10 +133,13 @@ export default function Welcome() {
     if (!/^\d{6}$/.test(code.trim())) { setError("Enter the 6-digit code."); return; }
     setBusy(true);
     setError("");
-    const supa = browserClient();
-    const { error } = await supa.auth.verifyOtp({ email, token: code.trim(), type: "email" });
+    const r = await fetch("/api/auth/otp-code", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "check", code: code.trim() })
+    });
+    const d = await r.json().catch(() => ({}));
     setBusy(false);
-    if (error) { setError("Wrong or expired code — check it and try again."); return; }
+    if (!r.ok) { setError(d.error ?? "Wrong or expired code — check it and try again."); return; }
     setPhase("done");
     window.location.replace("/drive");
   }

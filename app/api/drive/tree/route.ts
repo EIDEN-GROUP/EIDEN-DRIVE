@@ -28,5 +28,7 @@ export async function GET(req: Request) {
     .order("name")
     .limit(2000);
   if (error) return Response.json({ error: error.message }, { status: 500 });
-  return Response.json({ results: data ?? [] });
+  // The client scopes the tree top to this root: children of rootId only.
+  // (parent-less legacy rows predate scoping — resync-clean removes them.)
+  return Response.json({ results: data ?? [], rootId: acct.root_id ?? null });
 }

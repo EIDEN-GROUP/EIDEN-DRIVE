@@ -1,9 +1,11 @@
 export const dynamic = "force-dynamic";
 
 import { createClient } from "@/lib/supabase-server";
+import { adminClient } from "@/lib/supabase-admin";
 import { listDriveFiles } from "@/lib/google-drive";
 import { getAccounts, clientFor, type DriveAccount } from "@/lib/drive-accounts";
 import { withTimeout, googleErrorMessage } from "@/lib/errors";
+import { visibleFolderIds, loadFolders, fileOrClause, inScopeGoogleIds, isManager } from "@/lib/visibility";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { escapeLike } from "@/lib/http";
@@ -20,12 +22,34 @@ export async function GET(req: Request) {
   // 1) indexed files (Google + Local + Backup badges)
   // Disabled drives are invisible: their rows are excluded (deleted drives
   // leave no pure mirrors behind — DELETE purges them; hybrids keep local bytes).
+  // Members additionally see only: own files, Workspace commons (no folder),
+  // and their department's folders. Google rows are company drives: members see
+  // whatever is inside each active account's configured scope.
   const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
   const labelOf = new Map(accounts.map((a) => [a.id, a.label]));
   const inactive = accounts.filter((a) => a.status !== "active").map((a) => a.id);
+  const folders = await loadFolders(supa);
+  const visible = visibleFolderIds(folders, me);
   let filesQuery = supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id").ilike("name", `%${escapeLike(q)}%`);
   if (inactive.length) filesQuery = filesQuery.not("drive_account_id", "in", `(${inactive.join(",")})`);
+  const orClause = fileOrClause(me, visible);
+  if (orClause) filesQuery = filesQuery.or(orClause);
   const { data: rows } = await filesQuery.range(offset, offset + limit - 1);
+  // Google rows must sit inside their account's scope (pre-scope leftovers hide).
+  type Row = { id: string; name: string; mime: string; size: number; backends: string[]; drive_account_id?: string | null; google_file_id?: string | null };
+  let scoped = ((rows ?? []) as Row[]);
+  if (!isManager(me.role)) {
+    const live = accounts.filter((a) => a.status === "active" && a.root_id);
+    if (live.length) {
+      const db = adminClient();
+      const allowed = new Set<string>();
+      for (const a of live) {
+        const ids = await inScopeGoogleIds(db, a.id, a.root_id);
+        if (ids) for (const id of ids) allowed.add(id);
+      }
+      scoped = scoped.filter((r) => !r.google_file_id || !r.drive_account_id || allowed.has(r.google_file_id));
+    }
+  }
 
   // 2) live Google fallback, across EVERY connected account — NEVER allowed to
   // 500 the route. A dead token or unreachable root degrades that account to
@@ -62,7 +86,7 @@ export async function GET(req: Request) {
     await liveFrom("Primary", null, () => listDriveFiles(q));
   }
   if (errors.length) google_error = `${errors.join(" ")} Showing indexed files.`;
-  const indexed = (rows ?? []).map((r: { id: string; name: string; mime: string; size: number; backends: string[]; drive_account_id?: string | null }) => ({
+  const indexed = scoped.map((r: Row) => ({
     ...r,
     updated: (r as { updated_at?: string }).updated_at,
     accountLabel: r.drive_account_id ? labelOf.get(r.drive_account_id) ?? undefined : undefined
@@ -70,7 +94,7 @@ export async function GET(req: Request) {
   // Dedupe: a synced file appears as BOTH its index row and a live g: row.
   // The index row wins (it has actions); live rows only fill gaps for unsynced files.
   const knownGoogle = new Set(
-    ((rows ?? []) as { google_file_id?: string | null }[]).map((r) => r.google_file_id).filter(Boolean)
+    (scoped as { google_file_id?: string | null }[]).map((r) => r.google_file_id).filter(Boolean)
   );
   const fresh = live.filter((l) => {
     const gid = l.id.startsWith("g:") ? l.id.slice(l.id.lastIndexOf(":") + 1) : l.id;

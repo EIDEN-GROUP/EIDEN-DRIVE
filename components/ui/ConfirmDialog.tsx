@@ -10,10 +10,10 @@ export default function ConfirmDialog({ open, title, body, confirmLabel = "Confi
   useEffect(() => { if (open) btnRef.current?.focus(); }, [open]);
   return (
     <Modal open={open} title={title} onClose={onClose} width={400} labelId="cf-title">
-      <p className="text-sm text-muted leading-relaxed">{body}</p>
-      <div className="mt-5 flex justify-end gap-2">
+      <p className="text-sm text-muted leading-relaxed break-words">{body}</p>
+      <div className="mt-5 flex justify-end gap-2 flex-wrap">
         <button onClick={onClose} className="min-h-[40px] px-4 rounded-md border border-line text-sm hover:bg-tint">Cancel</button>
-        <button ref={btnRef} onClick={onConfirm} className="min-h-[40px] px-4 rounded-md bg-danger text-white text-sm font-medium">{confirmLabel}</button>
+        <button ref={btnRef} onClick={onConfirm} className="min-h-[40px] px-4 rounded-md bg-danger text-white text-sm font-medium max-w-full break-words">{confirmLabel}</button>
       </div>
     </Modal>
   );

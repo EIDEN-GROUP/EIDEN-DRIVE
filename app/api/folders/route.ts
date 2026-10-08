@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
+import { visibleFolderIds, isManager } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 export async function GET() {
@@ -13,7 +14,11 @@ export async function GET() {
   const supa = createClient();
   const { data, error } = await supa.from("folders").select("id,name,parent,dept,classification").order("name").limit(500);
   if (error) return Response.json({ error: error.message }, { status: 500 });
-  return Response.json({ results: data ?? [] });
+  // Members see only their department's folders (same rule as file rows).
+  const rows = (data ?? []) as { id: string; name: string; parent: string | null; dept: string | null; classification: string | null }[];
+  if (isManager(me.role)) return Response.json({ results: rows });
+  const vis = visibleFolderIds(rows, me);
+  return Response.json({ results: rows.filter((f) => vis!.has(f.id)) });
 }
 
 const Body = z.object({

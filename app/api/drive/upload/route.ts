@@ -122,6 +122,12 @@ export async function POST(req: Request) {
     }
     const sizeTxt = body.size ? ` · ${formatBytes(body.size)}` : "";
     const link = `${origin}/drive/${data.id}`;
+    const ext = (body.name.split(".").pop() ?? "").toUpperCase() || "FILE";
+    const typeTxt = /^(PDF|DOCX|XLSX|PPTX)$/.test(ext) ? `${ext} Document`
+      : /^(MP4|MOV|AVI|MKV|WEBM)$/.test(ext) ? `${ext} Video`
+      : /^(PNG|JPG|JPEG|GIF|WEBP|SVG|HEIC|TIFF?)$/.test(ext) ? `${ext === "JPG" ? "JPG" : ext} Image`
+      : /^(MP3|WAV|FLAC|OGG)$/.test(ext) ? `${ext} Audio`
+      : `${ext} File`;
     const { data: staff } = await db.from("profiles").select("id").in("role", ["admin", "manager"]).limit(20);
     for (const s of (staff ?? []) as { id: string }[]) {
       if (s.id === me.id) continue; // uploader doesn't notify themselves
@@ -131,7 +137,7 @@ export async function POST(req: Request) {
         body: `${where}${sizeTxt} · ${link}`
       });
     }
-    postSlack(`📤 *${me.username}* uploaded *${body.name}* (${where}${sizeTxt})\n${link}`).then((r) => {
+    postSlack(`:outbox_tray: File uploaded\n\n${body.name}\nUploaded by ${me.username}\n\n:file_folder: Location: ${where} :page_facing_up: Type: ${typeTxt} :floppy_disk: Size: ${body.size ? formatBytes(body.size) : "unknown"}\n:link: <${link}|View file in Drive>`).then((r) => {
       if (!r.ok) console.error("[slack-upload]", r.error);
     });
   } catch { /* fan-out never fails the upload */ }

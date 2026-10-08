@@ -27,6 +27,32 @@ function rawHeaders(mime: string, name: string): Record<string, string> {
 
 const RAW_MAX = 25 * 1024 * 1024; // in-app preview cap — bigger files use Download
 
+// Video/audio seeking needs HTTP Range (206). Without it the player downloads
+// from zero on every seek and big files spin forever.
+function ranged(req: Request, buf: Buffer, mime: string, name: string): Response {
+  const base = { "content-type": mime, "accept-ranges": "bytes" } as Record<string, string>;
+  // Copy into a plain resizable ArrayBuffer: Buffer's shared-memory typing
+  // isn't accepted as Response body init, slices are exact either way.
+  const ab = new ArrayBuffer(buf.byteLength);
+  new Uint8Array(ab).set(buf);
+  const range = req.headers.get("range");
+  if (range) {
+    const m = /bytes=(\d*)-(\d*)/.exec(range);
+    if (m) {
+      const start = m[1] ? Number(m[1]) : 0;
+      const end = m[2] ? Math.min(Number(m[2]), ab.byteLength - 1) : ab.byteLength - 1;
+      if (!Number.isNaN(start) && !Number.isNaN(end) && start <= end && start < ab.byteLength) {
+        return new Response(ab.slice(start, end + 1), {
+          status: 206,
+          headers: { ...base, "content-length": String(end - start + 1), "content-range": `bytes ${start}-${end}/${ab.byteLength}`, ...rawHeaders(mime, name) }
+        });
+      }
+      return new Response("range not satisfiable", { status: 416 });
+    }
+  }
+  return new Response(ab, { headers: { ...base, "content-length": String(ab.byteLength), ...rawHeaders(mime, name) } });
+}
+
 // Google-generated cover (?thumb=1): Drive renders thumbnails server-side for
 // nearly every visual format — RAW photos, PSD, TIFF, HEIC, videos incl.
 // AVI/MKV/WMV, PDF first pages — things no browser can decode itself.
@@ -104,9 +130,7 @@ export async function GET(req: Request) {
       const name = String(meta.data.name ?? "file");
       const mime = String(meta.data.mimeType ?? "application/octet-stream");
       await logAudit({ actor: me.id, actor_name: me.username, action: "download", req, detail: { live_google: live.googleId } });
-      return new Response(Buffer.from(dl.data as ArrayBuffer), {
-        headers: rawHeaders(mime, name)
-      });
+      return ranged(req, Buffer.from(dl.data as ArrayBuffer), mime, name);
     } catch (e) {
       const m = e instanceof Error ? e.message : "preview failed";
       if (/not.?found|404/i.test(m)) return Response.json({ error: "Google copy missing — the Drive file was deleted or unshared", gone: true }, { status: 404 });
@@ -140,7 +164,7 @@ export async function GET(req: Request) {
         const db = adminClient();
         const { data: blob, error } = await db.storage.from(UPLOAD_BUCKET).download(f.storage_path);
         if (error || !blob) throw new Error(error?.message ?? "storage read failed");
-        return new Response(blob, { headers: rawHeaders(f.mime ?? "application/octet-stream", f.name) });
+        return ranged(req, Buffer.from(await blob.arrayBuffer()), f.mime ?? "application/octet-stream", f.name);
       }
       if (f.google_file_id) {
         const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
@@ -151,9 +175,7 @@ export async function GET(req: Request) {
           return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });
         }
         const dl = await g.files.get({ fileId: f.google_file_id, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" });
-        return new Response(Buffer.from(dl.data as ArrayBuffer), {
-          headers: rawHeaders(f.mime ?? (meta.data.mimeType as string) ?? "application/octet-stream", f.name)
-        });
+        return ranged(req, Buffer.from(dl.data as ArrayBuffer), f.mime ?? (meta.data.mimeType as string) ?? "application/octet-stream", f.name);
       }
     } catch (e) {
       const m = e instanceof Error ? e.message : "preview failed";
