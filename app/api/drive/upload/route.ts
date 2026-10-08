@@ -8,6 +8,7 @@ import { getProfile } from "@/lib/roles";
 import { UPLOAD_BUCKET } from "@/lib/storage";
 import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
+import { queueUsbUpload } from "@/lib/usb";
 import { pickUploadAccount, clientFor } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
@@ -26,7 +27,10 @@ const Body = z.object({
   backends: z.array(z.enum(["google", "local", "backup"])).min(1).max(3).optional(),
   folder: z.string().uuid().nullable().optional(),
   storage_path: z.string().max(600).nullable().optional(),
-  drive_account: z.string().max(40).nullable().optional()
+  drive_account: z.string().max(40).nullable().optional(),
+  // Office USB: after the Supabase upload, queue an async agent job that copies
+  // the bytes to the router USB share. Never blocks the upload itself.
+  usb: z.boolean().optional()
 });
 
 // Server-side mirror cap: above this the Vercel round-trip gets flaky —
@@ -96,5 +100,15 @@ export async function POST(req: Request) {
     }
   }
   await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: data.id, req, detail: { backends: body.backends, push_error } });
-  return Response.json({ ok: true, id: data.id, push_error });
+  // Office-USB copy: queued, never blocking. Agent-offline just means "pending".
+  let usb_queued: boolean | string = false;
+  if (body.usb && body.storage_path) {
+    try {
+      await queueUsbUpload({ id: data.id, storage_path: body.storage_path, name: body.name, size: body.size ?? 0, owner: me.id, ownerName: me.username });
+      usb_queued = true;
+    } catch (e) {
+      usb_queued = e instanceof Error ? e.message : "usb queue failed";
+    }
+  }
+  return Response.json({ ok: true, id: data.id, push_error, usb_queued });
 }

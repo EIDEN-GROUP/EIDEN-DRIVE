@@ -18,6 +18,9 @@ describe("API contracts (anonymous)", () => {
     for (const [p, m] of [
       ["/api/drive/trash", "POST"], ["/api/drive/restore", "POST"], ["/api/drive/upload", "POST"],
       ["/api/drive/upload-url", "POST"], ["/api/drive/rename", "PATCH"], ["/api/drive/sync", "POST"],
+      ["/api/drive/copy", "POST"], ["/api/drive/content", "PATCH"], ["/api/drive/usb", "POST"],
+      ["/api/drive/resync-clean", "POST"], ["/api/drive/accounts", "PATCH"], ["/api/drive/accounts", "DELETE"],
+      ["/api/agent/complete", "POST"],
       ["/api/folders", "POST"], ["/api/folders", "PATCH"], ["/api/folders", "DELETE"],
       ["/api/users", "PATCH"], ["/api/users", "DELETE"], ["/api/users/invite", "POST"],
       ["/api/approvals", "POST"], ["/api/storage", "POST"]

@@ -19,6 +19,7 @@ export function badge(backends: string[]): string {
   if (backends.includes("google")) b.push("☁ Google");
   if (backends.includes("local")) b.push("💾 Local");
   if (backends.includes("backup")) b.push("🛡 Backup");
+  if (backends.includes("usb")) b.push("🔌 USB");
   return b.join(" · ");
 }
 

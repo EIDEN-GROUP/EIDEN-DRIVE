@@ -5,7 +5,15 @@ import { EmptyNote, IconBadge, Kpi, KpiRow, PageHead, Panel, StatusPill, relTime
 import { toast } from "@/components/ui/Toast";
 import { formatBytes } from "@/lib/files";
 
-interface Job { kind: string; status: string; created_at: string }
+interface Job { kind: string; status: string; created_at: string; payload?: { name?: string; error?: string } | null }
+
+function usbJobName(j: Job): string {
+  const n = j.payload?.name;
+  return n ? `USB copy · ${n}` : "USB copy";
+}
+function usbJobError(j: Job): string | null {
+  return j.status === "failed" ? (j.payload?.error ?? "agent reported failure") : null;
+}
 interface Drive {
   id: string; label: string; email: string | null; status: string; rootKind?: string; rootId?: string | null;
   used: number; total: number; alert?: string | null;
@@ -86,6 +94,8 @@ export default function StoragePage() {
 
   const backups = (data?.jobs ?? []).filter((j) => j.kind.startsWith("backup") || j.kind === "agent-heartbeat");
   const lastBackup = backups.find((j) => j.kind.startsWith("backup"));
+  const usbJobs = (data?.jobs ?? []).filter((j) => j.kind === "usb-upload");
+  const usbPending = usbJobs.filter((j) => j.status === "pending").length;
 
   async function setStatus(d: Drive, status: "active" | "disabled") {
     const r = await fetch("/api/drive/accounts", {
@@ -199,6 +209,25 @@ export default function StoragePage() {
               {!data && <li className="py-3 text-[13px] text-muted" role="status">Reading jobs…</li>}
             </ul>
           )}
+        </Panel>
+
+        <Panel title="Office USB" subtitle={data?.agent.online ? `Agent online — copies run on each heartbeat${usbPending ? ` · ${usbPending} waiting` : ""}` : "Agent offline — copies queue up and run when it checks in"}>
+          {!data ? <div className="skel h-20 w-full" role="status" aria-label="Reading USB jobs" /> : usbJobs.length === 0 ? (
+            <EmptyNote>No USB copies yet. Right-click any file → “Copy to office USB”, or switch the upload toggle on.</EmptyNote>
+          ) : (
+            <ul className="divide-y divide-line/60 -my-1">
+              {usbJobs.slice(0, 8).map((j, i) => (
+                <li key={i} className="py-3 flex items-center gap-3">
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[14px] truncate">{usbJobName(j)}</span>
+                    <span className="block text-[12px] text-muted">{relTime(j.created_at)}{usbJobError(j) ? ` · ${usbJobError(j)}` : ""}</span>
+                  </span>
+                  <StatusPill tone={jobTone(j.status)}>{j.status}</StatusPill>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-3 text-[12px] text-muted">Needs the office PC agent (<code>node src/index.js poll</code> in local-agent) with the router USB mounted. Setup: local-agent README.</p>
         </Panel>
       </div>
 

@@ -42,11 +42,14 @@ export function clientFor(acct: DriveAccount & { refresh_token: string }): Drive
 
 // Resolve the working {drive, rootId} for a file operation: the file's pinned
 // account when set, else the legacy single env connection. Null = unconfigured.
+// A pinned-but-unknown account (deleted drive) resolves to null — NEVER silently
+// to another drive, which would run operations against the wrong account.
 export async function driveCtxFor(accountId?: string | null): Promise<{ drive: DriveLike; rootId: string; label: string } | null> {
   if (accountId) {
     const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
     const a = accounts.find((x) => x.id === accountId && x.status === "active");
     if (a) return { drive: clientFor(a), rootId: a.root_id ?? "", label: a.label };
+    return null;
   }
   if (process.env.GOOGLE_REFRESH_TOKEN) {
     return { drive: driveClient(), rootId: process.env.GOOGLE_SHARED_DRIVE_ID ?? "", label: "Primary" };

@@ -42,7 +42,7 @@ export async function GET() {
   let agentMin: number | null = null;
   if (hasAdminClient()) {
     const db = adminClient();
-    const { data } = await db.from("jobs").select("kind,status,created_at,payload").order("created_at", { ascending: false }).limit(10);
+    const { data } = await db.from("jobs").select("kind,status,created_at,payload").order("created_at", { ascending: false }).limit(30);
     jobs = data ?? [];
     const hb = (data ?? []).find((j: { kind: string }) => j.kind === "agent-heartbeat") as { created_at: string } | undefined;
     agentMin = hb ? Math.round((Date.now() - new Date(hb.created_at).getTime()) / 60000) : null;

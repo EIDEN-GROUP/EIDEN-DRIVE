@@ -126,6 +126,18 @@ export default function Explorer() {
   const [editFile, setEditFile] = useState<ViewFile | null>(null);
   const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; usage?: number | null; limit?: number | null; status: string }[]>([]);
   const [driveSel, setDriveSel] = useState(""); // "" = Auto (roomiest drive)
+  // Office-USB mirror toggle (persisted): uploads also queue an async agent job.
+  const [usbTarget, setUsbTarget] = useState(false);
+  useEffect(() => {
+    try { if (localStorage.getItem("eiden-usb") === "1") setUsbTarget(true); } catch { /* ignore */ }
+  }, []);
+  function toggleUsb() {
+    setUsbTarget((v) => {
+      try { localStorage.setItem("eiden-usb", v ? "0" : "1"); } catch { /* ignore */ }
+      if (!v) toast({ text: "Uploads will also queue a copy to the office USB (agent picks it up when online).", tone: "ok" });
+      return !v;
+    });
+  }
   const [driveView, setDriveView] = useState<{ accountId: string; folderId: string | null; path: { id: string; name: string }[] } | null>(null);
   const [tree, setTree] = useState<{ id: string; name: string; mime: string; size: number; googleId: string; parent: string | null }[] | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
@@ -518,11 +530,13 @@ export default function Explorer() {
         if (!put.ok) throw new Error("byte upload failed");
         const meta = await fetch("/api/drive/upload", {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: driveSel || undefined })
+          body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: driveSel || undefined, usb: usbTarget || undefined })
         });
         const mj = await meta.json().catch(() => ({}));
         if (!meta.ok) throw new Error(mj.error ?? "indexing failed");
         if (mj.push_error) toast({ text: `"${file.name}" saved locally — Google mirror skipped: ${mj.push_error}`, tone: "err" });
+        if (mj.usb_queued === true) toast({ text: `"${file.name}" queued for office-USB copy (agent picks it up).`, tone: "ok" });
+        else if (typeof mj.usb_queued === "string") toast({ text: `"${file.name}" USB queue failed: ${mj.usb_queued}`, tone: "err" });
         ok++;
       } catch (e) {
         toast({ text: `"${file.name}": ${e instanceof Error ? e.message : "upload failed."}`, tone: "err" });
@@ -658,6 +672,14 @@ export default function Explorer() {
     setClip(c);
     try { localStorage.setItem("eiden-clip", JSON.stringify(c)); } catch { /* ignore */ }
     toast({ text: `Copied "${f.name}" — right-click → Paste to duplicate it.`, tone: "ok" });
+  }
+
+  async function copyToUsb(r: Row) {
+    if (!r.file) return;
+    const res = await fetch("/api/drive/usb", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: r.id }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) toast({ text: d.error ?? "Couldn't queue USB copy.", tone: "err" });
+    else toast({ text: `"${r.name}" queued for office-USB copy (agent picks it up).`, tone: "ok" });
   }
 
   async function pasteClip() {
@@ -874,7 +896,9 @@ export default function Explorer() {
                       ...accounts.filter((a) => a.status === "active").map((a) => ({
                         label: `${a.label} · ${a.free !== null ? `${formatBytes(a.free)} free` : "quota unknown"}`,
                         icon: driveSel === a.id ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive(a.id)
-                      }))
+                      })),
+                      "sep",
+                      { label: "Also copy to office USB (agent)", icon: usbTarget ? <Check size={14} /> : undefined, onSelect: toggleUsb }
                     ]} />
                 </>
               )}
@@ -895,7 +919,9 @@ export default function Explorer() {
                 { label: "New folder", icon: <FolderPlus size={14} />, onSelect: () => setShowNewFolder(true), hidden: nav.kind !== "root" },
                 "sep",
                 { label: syncing ? "Syncing from Google…" : "Sync from Google", icon: <CloudDownload size={14} />, onSelect: syncGoogle },
-                { label: "Refresh", icon: <RefreshCw size={14} />, onSelect: () => load(q) }
+                { label: "Refresh", icon: <RefreshCw size={14} />, onSelect: () => load(q) },
+                "sep",
+                { label: "Also copy uploads to office USB", icon: usbTarget ? <Check size={14} /> : undefined, onSelect: toggleUsb }
               ]} />
             <input ref={fileRef} type="file" multiple className="hidden" aria-label="Choose files to upload" onChange={(e) => uploadPicked(e.target.files)} />
           </div>
@@ -1178,6 +1204,7 @@ export default function Explorer() {
               : ctx.row.file && openRename("file", ctx.row.id, ctx.row.file.name),
               show: ctx.row.kind === "folder" || (ctx.row.kind === "file" && !ctx.row.id.startsWith("g:")) },
             { label: "Download", icon: <Download size={14} />, on: () => { window.location.href = `/api/drive/download?file_id=${ctx.row.id}`; }, show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") },
+            { label: "Copy to office USB", icon: <HardDrive size={14} />, on: () => copyToUsb(ctx.row), show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") && !!ctx.row.file?.storage_path },
             { label: "Copy link", icon: <Link2 size={14} />, on: () => copyLink(ctx.row), show: !ctx.row.id.startsWith("g:") && ctx.row.kind === "file" },
             { label: "Delete", icon: <Trash2 size={14} />, danger: true, on: () => ctx.row.file && setConfirmTrash(ctx.row.file), show: ctx.row.kind === "file" && !ctx.row.id.startsWith("g:") },
             { label: "Delete folder", icon: <Trash2 size={14} />, danger: true, on: () => ctx.row.folder && setConfirmFolderDelete(ctx.row.folder), show: ctx.row.kind === "folder" }
