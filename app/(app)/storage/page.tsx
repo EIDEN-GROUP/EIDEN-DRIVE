@@ -54,6 +54,47 @@ interface Drive {
   used: number; total: number; alert?: string | null;
 }
 
+// Per-drive label editor: the short name shown everywhere (Explorer drive
+// list, upload picker, Location column "Google (label)").
+function LabelEditor({ drive, onSaved }: { drive: Drive; onSaved: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [label, setLabel] = useState(drive.label);
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    const v = label.trim();
+    if (!v || v === drive.label || busy) { setEditing(false); setLabel(drive.label); return; }
+    setBusy(true);
+    const r = await fetch("/api/drive/accounts", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: drive.id, label: v })
+    });
+    const j = await r.json().catch(() => ({}));
+    setBusy(false);
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't rename drive.", tone: "err" }); return; }
+    toast({ text: `Drive renamed to “${v}”.`, tone: "ok" });
+    setEditing(false);
+    onSaved();
+  }
+
+  if (!editing) {
+    return (
+      <button onClick={() => { setLabel(drive.label); setEditing(true); }} aria-label={`Rename ${drive.label}`}
+        className="min-h-[40px] px-3.5 rounded-lg border border-line text-[13px] hover:bg-tint transition-colors">Edit</button>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={40} autoFocus
+        aria-label={`New name for ${drive.label}`} placeholder="Drive name"
+        onKeyDown={(e) => { if (e.key === "Enter") void save(); if (e.key === "Escape") { setEditing(false); setLabel(drive.label); } }}
+        className="min-h-[40px] w-36 rounded-lg border border-line bg-surface px-2.5 text-[13px] focus:border-brand focus:outline-none" />
+      <button onClick={save} disabled={!label.trim() || busy}
+        className="min-h-[40px] px-3.5 rounded-lg bg-brand text-white text-[13px] font-medium disabled:opacity-50">{busy ? "Saving…" : "Save"}</button>
+    </span>
+  );
+}
+
 // Per-drive scope editor: pin the account to one folder/drive ID (paste it from
 // the Drive URL), or resync-clean after re-scoping. Whole-My-Drive requires the
 // explicit checkbox — that scope is what floods indexes with system dirs.
@@ -207,7 +248,8 @@ export default function StoragePage() {
                         : d.rootKind === "folder" ? <StatusPill tone="brand">Folder root</StatusPill>
                         : d.rootKind === "drive" ? <StatusPill tone="good">Shared drive</StatusPill> : <StatusPill tone="neutral">My Drive</StatusPill>}
                       {data.canManage && d.id !== "legacy" && (
-                        <span className="inline-flex gap-2">
+                        <span className="inline-flex gap-2 flex-wrap">
+                          <LabelEditor drive={d} onSaved={load} />
                           <button onClick={() => setStatus(d, d.status === "active" ? "disabled" : "active")} aria-label={`${d.status === "active" ? "Disable" : "Enable"} ${d.label}`}
                             className="min-h-[40px] px-3.5 rounded-lg border border-line text-[13px] hover:bg-tint transition-colors">{d.status === "active" ? "Disable" : "Enable"}</button>
                           <button onClick={() => setConfirmDel(d)} aria-label={`Disconnect ${d.label}`}

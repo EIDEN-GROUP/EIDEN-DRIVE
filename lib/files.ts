@@ -14,9 +14,9 @@ export function classify(name: string, mime = ""): string {
   return "FILE";
 }
 
-export function badge(backends: string[]): string {
+export function badge(backends: string[], accountLabel?: string | null): string {
   const b: string[] = [];
-  if (backends.includes("google")) b.push("☁ Google");
+  if (backends.includes("google")) b.push(`☁ Google${accountLabel ? ` (${accountLabel})` : ""}`);
   if (backends.includes("local")) b.push("💾 Local");
   if (backends.includes("backup")) b.push("🛡 Backup");
   if (backends.includes("usb")) b.push("🔌 USB");

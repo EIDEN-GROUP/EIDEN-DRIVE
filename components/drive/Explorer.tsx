@@ -492,19 +492,13 @@ export default function Explorer() {
   function toggleExpand(id: string) {
     setExpanded((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   }
-  // View switches own the tree state, always — even overriding a manual
-  // expand/collapse. Entering grid collapses everything (grid shows the
-  // current level only, like a collapsed list); entering list opens the whole
-  // tree again. Both views read the same state, so they can never disagree.
-  function expandAll() {
-    setExpanded(new Set(
-      folders.filter((f) => folders.some((x) => x.parent === f.id) || files.some((x) => x.folder === f.id)).map((f) => f.id)
-    ));
-  }
+  // View switches collapse the tree when entering grid — even overriding a
+  // manual expand — but entering list never touches it: whatever you
+  // collapsed (or left open) is exactly how you find it when you come back.
+  // Both views read the same state, so they can never disagree.
   function switchView(v: View) {
     if (v === view) return;
-    if (v === "list") expandAll();
-    else setExpanded(new Set());
+    if (v === "grid") setExpanded(new Set());
     setView(v);
   }
   function onRowKey(e: React.KeyboardEvent, r: Row) {
@@ -1291,7 +1285,7 @@ export default function Explorer() {
                           <span className="text-[15px] truncate">{r.name}</span>
                         </div>
                         <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
-                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.file ? badge(r.file.backends) || "--" : "--"}</div>
+                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.file ? badge(r.file.backends, r.file.accountLabel) || "--" : "--"}</div>
                         <div role="gridcell" className="text-[11px] text-ink/75 truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : "--"}</div>
                         <div role="gridcell" className="text-[11px] text-ink/75 tabular-nums">{r.file?.size ? formatBytes(r.file.size) : "--"}</div>
                         <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.file ? kindLabel(r.file.name, cls) : "Folder"}</div>
@@ -1381,7 +1375,7 @@ export default function Explorer() {
               <dl className="mt-3 text-[12px]">
                 {[
                   ["Modified", sel.file ? fmtDate(sel.file.updated_at ?? sel.file.updated) : "--"],
-                  ["Location", sel.file ? badge(sel.file.backends) || "--" : "--"],
+                  ["Location", sel.file ? badge(sel.file.backends, sel.file.accountLabel) || "--" : "--"],
                   ...(sel.file?.accountLabel ? [["Drive", sel.file.accountLabel] as [string, string] ] : []),
                   ["Owner", sel.file?.owner ? `${sel.file.owner.slice(0, 8)}…` : "--"],
                   ["SHA-256", sel.file?.hash ? `${sel.file.hash.slice(0, 12)}…` : "--"]
