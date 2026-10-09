@@ -55,6 +55,14 @@ export async function POST(req: Request) {
   if (body.storage_path && (!body.storage_path.startsWith(`${me.id}/`) || body.storage_path.includes(".."))) {
     return Response.json({ error: "storage_path must be inside your own upload folder" }, { status: 403 });
   }
+  // The profile-picture bucket is not a file destination: avatars are profile
+  // data (no index row, no notifications, no mirror) and go through upload-url
+  // + profile PATCH directly. Reject them here so a forged register call can
+  // never list/announce/mirror a picture.
+  const isAvatarBucket = body.storage_bucket === PFP_BUCKET;
+  if (isAvatarBucket) {
+    return Response.json({ error: "profile pictures are not files — set them from your profile" }, { status: 400 });
+  }
   // Supabase can be toggled off per uploader — but then the bytes must come
   // from somewhere: a Google drive (via the direct-upload path, since the
   // mirror reads its bytes back out of Storage). No destination = 400.

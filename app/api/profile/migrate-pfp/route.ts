@@ -49,6 +49,31 @@ export async function POST(req: Request) {
       failed.push({ user: p.username, error: e instanceof Error ? e.message : "migrate failed" });
     }
   }
-  await logAudit({ actor: me.id, actor_name: me.username, action: "edit", req, detail: { pfp_migrated: moved, pfp_already: already, pfp_failed: failed.length } });
-  return Response.json({ ok: true, moved, already, failed });
+  // Avatars are profile data, not files: drop any file_index rows that were
+  // registered for these pictures so they stop listing in Workspace (the
+  // bytes stay in eiden-pfp; avatar_path is untouched). Only rows that look
+  // like avatar registrations: avatar.* names, owner = the profile, no folder.
+  let unlisted = 0;
+  try {
+    const paths = ((profiles ?? []) as { avatar_path: string }[]).map((x) => x.avatar_path).filter(Boolean);
+    for (let i = 0; i < paths.length; i += 200) {
+      const chunk = paths.slice(i, i + 200);
+      const { data: rows } = await db.from("file_index").select("id,owner").in("storage_path", chunk);
+      const ids = ((rows ?? []) as { id: string; owner: string }[])
+        .filter((r) => (profiles ?? []).some((pp: { id: string }) => pp.id === r.owner))
+        .map((r) => r.id);
+      if (ids.length) {
+        for (let j = 0; j < ids.length; j += 200) {
+          await db.from("recovery_bin").delete().in("file_id", ids.slice(j, j + 200));
+          await db.from("approvals").delete().in("file_id", ids.slice(j, j + 200));
+          const { error: delErr } = await db.from("file_index").delete().in("id", ids.slice(j, j + 200));
+          if (!delErr) unlisted += ids.slice(j, j + 200).length;
+        }
+      }
+    }
+  } catch (e) {
+    failed.push({ user: "(cleanup)", error: e instanceof Error ? e.message : "unlist failed" });
+  }
+  await logAudit({ actor: me.id, actor_name: me.username, action: "edit", req, detail: { pfp_migrated: moved, pfp_already: already, pfp_unlisted: unlisted, pfp_failed: failed.length } });
+  return Response.json({ ok: true, moved, already, unlisted, failed });
 }

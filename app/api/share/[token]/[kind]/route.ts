@@ -1,5 +1,6 @@
 import { adminClient } from "@/lib/supabase-admin";
 import { bucketFor } from "@/lib/storage";
+import { isBinned } from "@/lib/visibility";
 import { driveCtxFor, accountAccessToken } from "@/lib/drive-accounts";
 import { resolveShare, throttled } from "@/lib/share";
 
@@ -27,6 +28,8 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
   const r = await load(token, ip);
   if ("error" in r) return r.error;
   const { file } = r.shared;
+  // A trashed file's public link dies with it (restore revives the link too).
+  if (await isBinned(adminClient(), file.id)) return denied();
 
   if (kind === "meta") {
     return Response.json({

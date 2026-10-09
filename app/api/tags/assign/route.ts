@@ -4,6 +4,8 @@ import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
+import { canTouch, folderUsable, googleInScope } from "@/lib/visibility";
+import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({
@@ -24,10 +26,28 @@ export async function POST(req: Request) {
   const db = adminClient();
   const [{ data: tag }, { data: item }] = await Promise.all([
     db.from("tags").select("id,name").eq("id", tag_id).maybeSingle(),
-    db.from(kind === "file" ? "file_index" : "folders").select("id,name").eq("id", id).maybeSingle()
+    (kind === "file"
+      ? db.from("file_index").select("id,name,owner,folder,google_file_id,drive_account_id").eq("id", id).maybeSingle()
+      : db.from("folders").select("id,name").eq("id", id).maybeSingle())
   ]);
   if (!tag) return Response.json({ error: "tag not found" }, { status: 404 });
   if (!item) return Response.json({ error: `${kind} not found` }, { status: 404 });
+  // Tags unlock: a dept tag on a file/folder grants its members access — so
+  // tagging obeys the same confinement as editing. Without this, any member
+  // could tag any UUID with their own department and read it (escalation).
+  if (kind === "file") {
+    const it = item as unknown as { id: string; owner: string; folder: string | null; google_file_id?: string | null; drive_account_id?: string | null };
+    const gate = await canTouch(db, me, it);
+    if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
+    if (it.google_file_id) {
+      if (!(await googleInScope(db, await getAccounts(), it.drive_account_id, it.google_file_id))) {
+        return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+      }
+    }
+  } else {
+    const dst = await folderUsable(db, me, id);
+    if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
+  }
 
   const table = kind === "file" ? "file_tags" : "folder_tags";
   const col = kind === "file" ? "file_id" : "folder_id";

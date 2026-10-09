@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
-import { avatarUrlFor } from "@/lib/storage";
+import { avatarUrlFor, PFP_BUCKET, UPLOAD_BUCKET } from "@/lib/storage";
 import { parseJson } from "@/lib/http";
 
 // Own profile + a fresh signed avatar URL (null when no picture set).
@@ -48,7 +48,20 @@ export async function PATCH(req: Request) {
     patch.username = p.data.username;
   }
   if (!Object.keys(patch).length) return Response.json({ error: "nothing to update" }, { status: 400 });
+  // Swapping pictures orphans the previous object — delete it (own prefix,
+  // either bucket) so replaced avatars don't pile up in Storage. Best effort:
+  // a missed delete never fails the profile update.
+  let oldAvatar: string | null = null;
+  if (p.data.avatar_path !== undefined) {
+    const { data: cur } = await db.from("profiles").select("avatar_path").eq("id", me.id).maybeSingle();
+    oldAvatar = (cur as { avatar_path?: string | null } | null)?.avatar_path ?? null;
+  }
   const { error } = await db.from("profiles").update(patch).eq("id", me.id);
   if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (oldAvatar && oldAvatar !== p.data.avatar_path && oldAvatar.startsWith(`${me.id}/`) && !oldAvatar.includes("..")) {
+    for (const bucket of [PFP_BUCKET, UPLOAD_BUCKET]) {
+      try { await db.storage.from(bucket).remove([oldAvatar]); } catch { /* ignore */ }
+    }
+  }
   return Response.json({ ok: true });
 }

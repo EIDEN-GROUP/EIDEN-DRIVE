@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
-import { canTouch, googleInScope } from "@/lib/visibility";
+import { canTouch, googleInScope, isBinned, binnedResponse } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
@@ -30,6 +30,8 @@ export async function POST(req: Request) {
       return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
     }
   }
+  // Trashed files can't be (re)published — restore first.
+  if (await isBinned(db, p.data.file_id)) return binnedResponse();
   const token = newToken();
   const { error } = await db.from("share_links").insert({
     token_hash: tokenHash(token), file_id: file.id, created_by: me.id,

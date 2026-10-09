@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { queueUsbUpload } from "@/lib/usb";
-import { canTouch, googleInScope } from "@/lib/visibility";
+import { canTouch, googleInScope, isBinned, binnedResponse } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
@@ -33,6 +33,7 @@ export async function POST(req: Request) {
       return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
     }
   }
+  if (await isBinned(db, p.data.file_id)) return binnedResponse();
   try {
     const { jobId } = await queueUsbUpload({ id: file.id, storage_path: file.storage_path, name: file.name, size: file.size ?? 0, owner: me.id, ownerName: me.username });
     await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: file.id, req, detail: { usb_job: jobId } });

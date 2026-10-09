@@ -66,6 +66,19 @@ export default async function FilePage({ params }: { params: { id: string } }) {
       </section>
     );
   }
+  // Trashed files live on the Recovery Bin page — the file page says so
+  // instead of rendering a ghost (actions would 409 anyway). Service-side
+  // lookup: one member's trash still hides from the others.
+  const { data: binned } = await adminClient().from("recovery_bin").select("file_id").eq("file_id", params.id).maybeSingle();
+  if (binned) {
+    return (
+      <section className="px-1 pt-1">
+        <h1 className="page-title">In the Recovery Bin</h1>
+        <p className="text-sm text-muted mt-1">“{f.name}” was moved to the Bin. Restore it to preview, share or edit it again.</p>
+        <a href="/drive" className="mt-4 inline-block min-h-[44px] px-5 leading-[44px] rounded-md bg-brand text-white text-sm font-medium">Back to Drive</a>
+      </section>
+    );
+  }
   const { data: vers } = await supa.from("versions").select("v,hash").eq("file_id", params.id).order("v", { ascending: false }).limit(10);
   const { data: acts } = await supa.from("audit_logs").select("id,actor_name,action,ts").eq("file_id", params.id).order("ts", { ascending: false }).limit(20);
   let where = "Workspace";

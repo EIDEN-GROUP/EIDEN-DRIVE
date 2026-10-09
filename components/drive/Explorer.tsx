@@ -67,7 +67,8 @@ function fmtDate(d?: string | null): string {
   return `${date}, ${h}:${m} ${ap}`;
 }
 
-function kindLabel(name: string, cls: string): string {
+function kindLabel(name: string, cls: string, mime?: string | null): string {
+  if (mime === "application/vnd.google-apps.folder") return "Folder";
   const ext = (name.split(".").pop() ?? "").toLowerCase();
   const k = viewKind(name);
   const E = ext.toUpperCase();
@@ -350,6 +351,14 @@ export default function Explorer() {
     }
   }
 
+  // Every mutation reloads the workspace list AND — when a drive is open —
+  // its tree. Without the second half, trashed/renamed/moved drive items
+  // linger visibly until the next manual Sync ("deleted but still there").
+  function refreshAll() {
+    load(q);
+    if (driveView) void loadTree(driveView.accountId);
+  }
+
   const loadRef = useRef(load);
   loadRef.current = load;
   useEffect(() => {
@@ -423,6 +432,48 @@ export default function Explorer() {
       if (r.kind === "folder") return "—";
     }
     return r.file ? badge(r.file.backends, r.file.accountLabel) || "--" : "--";
+  }
+
+  // Contained-bytes totals per folder: local ancestry via the folders table,
+  // Google ancestry via recorded Drive parents (+ the open tree as fallback).
+  // Folders show their total instead of "--".
+  const folderBytes = useMemo(() => {
+    const local = new Map<string, number>();
+    const addLocal = (fid: string, n: number, guard = 0): void => {
+      if (guard > 25) return;
+      local.set(fid, (local.get(fid) ?? 0) + n);
+      const p = folderById.get(fid)?.parent;
+      if (p) addLocal(p, n, guard + 1);
+    };
+    const gmap = new Map<string, { parent: string | null; size: number }>();
+    for (const f of files) {
+      if (f.google_file_id) gmap.set(f.google_file_id, { parent: f.google_parent_id ?? null, size: f.size ?? 0 });
+    }
+    for (const t of tree ?? []) {
+      if (!gmap.has(t.googleId)) gmap.set(t.googleId, { parent: t.parent, size: t.size ?? 0 });
+    }
+    const gtotal = new Map<string, number>();
+    for (const [gid, node] of gmap) {
+      if (!node.size) continue;
+      let cur: string | null = node.parent;
+      let guard = 0;
+      while (cur && guard++ < 25) {
+        gtotal.set(cur, (gtotal.get(cur) ?? 0) + node.size);
+        cur = gmap.get(cur)?.parent ?? null;
+      }
+    }
+    for (const f of files) {
+      if (typeof f.size === "number" && f.size > 0 && f.folder) addLocal(f.folder, f.size);
+    }
+    return { local, gtotal };
+  }, [files, folders, folderById, tree]);
+  function folderSize(r: Row): string {
+    let total = 0;
+    if (r.kind !== "folder") return "--";
+    if (r.folder) total = folderBytes.local.get(r.folder.id) ?? 0;
+    else if (r.googleFolder) total = folderBytes.gtotal.get(r.googleFolder) ?? 0;
+    else if (r.id.startsWith("gdrive:")) total = folderBytes.gtotal.get(r.id.slice("gdrive:".length)) ?? 0;
+    return total > 0 ? formatBytes(total) : "--";
   }
 
   // ── rows ──
@@ -628,7 +679,7 @@ export default function Explorer() {
     }
     clearSel();
     toast({ text: ok === selRows.length ? `${ok} file${ok === 1 ? "" : "s"} moved to Recovery Bin.` : `${ok}/${selRows.length} trashed — the rest failed.`, tone: ok ? "ok" : "err" });
-    load(q);
+    refreshAll();
   }
 
   function bulkDownload() {
@@ -679,7 +730,7 @@ export default function Explorer() {
       toast({ text: `"${f.name}" moved to Recovery Bin (90 days).`, tone: "ok" });
       setFiles((p) => p.filter((x) => x.id !== f.id));
       setSelKey(null);
-      load(q);
+      refreshAll();
     } else toast({ text: "Trash failed. Try again.", tone: "err" });
     setConfirmTrash(null);
   }
@@ -693,7 +744,7 @@ export default function Explorer() {
     if (r.ok) {
       toast({ text: `"${confirmPurge.name}" deleted permanently.`, tone: "ok" });
       setBin((b) => b.filter((x) => x.file_id !== confirmPurge.id));
-      setSelKey(null); setConfirmPurge(null); load(q, 0, false, true);
+      setSelKey(null); setConfirmPurge(null); refreshAll();
     } else { toast({ text: d.error ?? "Couldn't delete the file.", tone: "err" }); setConfirmPurge(null); }
   }
 
@@ -718,7 +769,7 @@ export default function Explorer() {
 
   async function restore(id: string, name: string) {
     const r = await fetch("/api/drive/restore", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: id }) });
-    if (r.ok) { toast({ text: `"${name}" restored.`, tone: "ok" }); setSelKey(null); load(q); }
+    if (r.ok) { toast({ text: `"${name}" restored.`, tone: "ok" }); setSelKey(null); refreshAll(); }
     else toast({ text: "Restore needs a Manager account.", tone: "err" });
   }
 
@@ -850,7 +901,7 @@ export default function Explorer() {
     const r = await fetch(url, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const d = await r.json().catch(() => ({}));
     setRenameBusy(false);
-    if (r.ok) { toast({ text: `Renamed to "${name}".`, tone: "ok" }); setRenameTarget(null); load(q); }
+    if (r.ok) { toast({ text: `Renamed to "${name}".`, tone: "ok" }); setRenameTarget(null); refreshAll(); }
     else toast({ text: d.error ?? "Couldn't rename.", tone: "err" });
   }
 
@@ -890,7 +941,7 @@ export default function Explorer() {
         }
       }
       toast({ text: `Google sync done${labels.length ? ` (${labels.join(" + ")})` : ""}: ${ins} new, ${upd} updated (${pages} page${pages === 1 ? "" : "s"}).`, tone: "ok" });
-      load(q);
+      refreshAll();
     } finally {
       setSyncing(false);
     }
@@ -1380,8 +1431,8 @@ export default function Explorer() {
                         <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
                         <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{locText(r)}</div>
                         <div role="gridcell" className="text-[11px] text-ink/75 truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : "--"}</div>
-                        <div role="gridcell" className="text-[11px] text-ink/75 tabular-nums">{r.file?.size ? formatBytes(r.file.size) : "--"}</div>
-                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.file ? kindLabel(r.file.name, cls) : "Folder"}</div>
+                        <div role="gridcell" className="text-[11px] text-ink/75 tabular-nums">{r.kind === "folder" ? folderSize(r) : (r.file?.size ? formatBytes(r.file.size) : "--")}</div>
+                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.kind === "folder" ? "Folder" : (r.file ? kindLabel(r.file.name, cls, r.file.mime) : "--")}</div>
                       </div>
                     );
                   })}
@@ -1461,7 +1512,7 @@ export default function Explorer() {
               <div className="mt-3 flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-[13px] font-medium break-all">{sel.name}</p>
-                  <p className="text-[11px] text-muted">{sel.file ? kindLabel(sel.file.name, classify(sel.file.name, sel.file.mime)) : "Folder"}</p>
+                  <p className="text-[11px] text-muted">{sel.kind === "folder" ? "Folder" : (sel.file ? kindLabel(sel.file.name, classify(sel.file.name, sel.file.mime), sel.file.mime) : "Folder")}</p>
                 </div>
                 {sel.file?.size ? <span className="text-[11px] text-ink/75 shrink-0">{formatBytes(sel.file.size)}</span> : null}
               </div>
@@ -1590,7 +1641,7 @@ export default function Explorer() {
       {canvasCtx && (
         <div role="menu" style={{ left: canvasCtx.x, top: canvasCtx.y }} onClick={(e) => e.stopPropagation()}
           className="pop-in fixed z-[70] w-[200px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
-          <button role="menuitem" onClick={() => { setCanvasCtx(null); load(q); }}
+            <button role="menuitem" onClick={() => { setCanvasCtx(null); refreshAll(); }}
             className="w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint">
             <span>Refresh</span><span className="text-muted"><RefreshCw size={14} /></span>
           </button>

@@ -83,11 +83,8 @@ export default function Welcome() {
       if (!init.ok) throw new Error(dj.error ?? "upload init failed");
       const put = await fetch(dj.signedUrl, { method: "PUT", headers: { "content-type": f.type }, body: f });
       if (!put.ok) throw new Error("upload failed");
-      const reg = await fetch("/api/drive/upload", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: `avatar.${ext}`, mime: f.type, size: f.size, backends: ["local"], storage_path: dj.path, storage_bucket: "eiden-pfp", folder: null })
-      });
-      if (!reg.ok) throw new Error("register failed");
+      // Avatars are profile data, not files: no file_index row (never listed,
+      // never notified, never mirrored) — the path is saved with the profile below.
       setAvatar({ path: dj.path });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Picture upload failed.");

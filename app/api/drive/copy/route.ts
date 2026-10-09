@@ -6,7 +6,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { bucketFor } from "@/lib/storage";
 import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
-import { canTouch, folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
+import { canTouch, folderUsable, googleInScope, bustScopeCache, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({
@@ -46,6 +46,8 @@ export async function POST(req: Request) {
     const dst = await folderUsable(db, me, folder);
     if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
   }
+  // Trashed sources can't be cloned back to life — restore first.
+  if (await isBinned(db, p.data.file_id)) return binnedResponse();
   const copyName = `Copy of ${src.name}`;
   const srcFull = src as { storage_bucket?: string | null; drive_account_id?: string | null; google_parent_id?: string | null };
   // Drive-side destination: explicit override wins, else the source's own

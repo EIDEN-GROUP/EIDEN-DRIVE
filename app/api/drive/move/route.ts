@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
-import { canTouch, folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
+import { canTouch, folderUsable, googleInScope, bustScopeCache, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({
@@ -35,6 +35,8 @@ export async function POST(req: Request) {
   const row = src as { id: string; name: string; folder: string | null; owner: string; google_file_id: string | null; google_parent_id: string | null; drive_account_id: string | null };
   const gate = await canTouch(db, me, row);
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
+  // Trashed rows move only via restore — never drag them back to life.
+  if (await isBinned(db, p.data.file_id)) return binnedResponse();
   // Local destination must be writable…
   const folder = p.data.folder !== undefined ? p.data.folder : row.folder;
   if (folder) {

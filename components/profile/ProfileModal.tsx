@@ -64,11 +64,9 @@ export default function ProfileModal({ onClose }: { onClose: () => void }) {
       if (!init.ok) throw new Error(dj.error ?? "upload init failed");
       const put = await fetch(dj.signedUrl, { method: "PUT", headers: { "content-type": f.type }, body: f });
       if (!put.ok) throw new Error("upload failed");
-      const reg = await fetch("/api/drive/upload", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: `avatar.${ext}`, mime: f.type, size: f.size, backends: ["local"], storage_path: dj.path, storage_bucket: "eiden-pfp", folder: null })
-      });
-      if (!reg.ok) throw new Error("register failed");
+      // Avatars are profile data, not files: no file_index row (never listed,
+      // never notified, never mirrored) — just point the profile at the bytes.
+      // The server deletes the previous picture object (same bucket, own prefix).
       const patch = await fetch("/api/profile", {
         method: "PATCH", headers: { "content-type": "application/json" },
         body: JSON.stringify({ avatar_path: dj.path })

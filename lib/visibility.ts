@@ -210,6 +210,17 @@ export async function googleDescendants(
   return out;
 }
 
+// Recovery Bin membership: trashed rows must not be servable anywhere else.
+// Every byte-serving or mutating route checks this (the listing + tree filter
+// separately). Restore/purge/bin read the bin directly and never call this.
+export async function isBinned(db: { from(t: string): any }, fileId: string): Promise<boolean> {
+  const { data } = await db.from("recovery_bin").select("file_id").eq("file_id", fileId).maybeSingle();
+  return !!data;
+}
+export function binnedResponse(): Response {
+  return Response.json({ error: "this file is in the Recovery Bin — restore it first" }, { status: 409 });
+}
+
 // Byte-path scope enforcement. The listing hides out-of-scope rows, but every
 // endpoint that TOUCHES bytes must check again: row UUIDs outlive listings
 // (a member who saw a file before a re-scope keeps its id forever), and live

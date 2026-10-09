@@ -7,7 +7,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { signedDownloadUrl, bucketFor } from "@/lib/storage";
 import { driveCtxFor, accountAccessToken, getAccounts } from "@/lib/drive-accounts";
-import { canTouch, googleInScope, liveInScope } from "@/lib/visibility";
+import { canTouch, googleInScope, liveInScope, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ file_id: z.string().max(300), raw: z.string().optional(), json: z.string().optional(), thumb: z.string().optional() });
@@ -138,6 +138,13 @@ export async function GET(req: Request) {
       if (!(await liveInScope(g, ctx?.rootId || null, live.googleId))) {
         return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
       }
+      // …and that it isn't sitting in the Recovery Bin under another row.
+      if (live.accountId) {
+        const adb = adminClient();
+        const { data: lr } = await adb.from("file_index").select("id").eq("google_file_id", live.googleId).eq("drive_account_id", live.accountId).limit(1).maybeSingle();
+        const lid = (lr as { id?: string } | null)?.id;
+        if (lid && (await isBinned(adb, lid))) return binnedResponse();
+      }
       const meta = await g.files.get({ fileId: live.googleId, fields: "size,mimeType,name", supportsAllDrives: true });
       if (Number(meta.data.size ?? 0) > RAW_MAX) {
         return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });
@@ -174,6 +181,8 @@ export async function GET(req: Request) {
       return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
     }
   }
+  // Trashed rows serve nothing outside the Bin (restore or purge instead).
+  if (await isBinned(adminClient(), file_id)) return binnedResponse();
   await logAudit({ actor: me.id, actor_name: me.username, action: "download", file_id, req });
   if (p.data.json) {
     if (f.storage_path) {

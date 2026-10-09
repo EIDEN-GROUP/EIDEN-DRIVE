@@ -6,7 +6,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { renameDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
-import { canTouch } from "@/lib/visibility";
+import { canTouch, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({
@@ -26,6 +26,7 @@ export async function PATCH(req: Request) {
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null });
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
+  if (await isBinned(db, p.data.file_id)) return binnedResponse();
   if (f.google_file_id) {
     try {
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);

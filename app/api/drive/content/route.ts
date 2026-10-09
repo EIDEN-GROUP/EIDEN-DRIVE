@@ -7,7 +7,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { bucketFor } from "@/lib/storage";
 import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
-import { canTouch, googleInScope } from "@/lib/visibility";
+import { canTouch, googleInScope, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 // Text-file editing save path. Only plain-text formats are accepted here
@@ -45,6 +45,7 @@ export async function PATCH(req: Request) {
       return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
     }
   }
+  if (await isBinned(db, p.data.file_id)) return binnedResponse();
   if (!editable(f.mime, f.name)) {
     return Response.json({ error: "this file type is view-only (binary formats can't be edited as text)" }, { status: 400 });
   }
