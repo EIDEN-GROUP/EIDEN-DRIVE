@@ -94,14 +94,19 @@ export async function GET(req: Request) {
   }
   // One Drive file synced under two connected accounts (shared files) owns
   // one index row PER account — collapse them so no file ever shows twice.
+  // Prefer the account-pinned row: a legacy null-account duplicate must never
+  // win, or members lose the file (legacy filter) while managers see a ghost.
+  // Relative order is preserved (the client sorts anyway).
   {
-    const seenGoogle = new Set<string>();
-    scoped = scoped.filter((r) => {
-      if (!r.google_file_id) return true;
-      if (seenGoogle.has(r.google_file_id)) return false;
-      seenGoogle.add(r.google_file_id);
-      return true;
-    });
+    const seen = new Map<string, number>(); // google id -> index in out
+    const out: Row[] = [];
+    for (const r of scoped) {
+      if (!r.google_file_id) { out.push(r); continue; }
+      const at = seen.get(r.google_file_id);
+      if (at === undefined) { seen.set(r.google_file_id, out.length); out.push(r); continue; }
+      if (!out[at].drive_account_id && r.drive_account_id) out[at] = r;
+    }
+    scoped = out;
   }
   // Recovery Bin hides: trashed rows never list in Workspace (they live on
   // the Bin page until restore/purge). Bin ids resolve service-side so one

@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
   Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload,
-  Eye, Copy, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon, Image as ImageIcon
+  Eye, Copy, Scissors, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon, Image as ImageIcon
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -40,6 +40,10 @@ interface Row {
   // Google Drive folder (indexed file row with folder mime): renders as a
   // folder, expands inline over google ancestry. Holds the Drive folder id.
   googleFolder?: string | null;
+  // Drive-tree folder backed by an index row: enables rename/delete through
+  // the normal file flows (trash/rename mirror to Drive). Unindexed tree
+  // folders (no row yet — sync first) stay Drive-only.
+  indexId?: string | null;
 }
 
 const TAG_COLORS = ["#e5322d", "#2331e0", "#22c32e", "#f59e0b", "#ec4899", "#0ea5a4", "#8b5cf6"];
@@ -137,7 +141,7 @@ export default function Explorer() {
   const [tagsOpen, setTagsOpen] = useState(true);
   const [ctx, setCtx] = useState<{ x: number; y: number; row: Row } | null>(null);
   const [canvasCtx, setCanvasCtx] = useState<{ x: number; y: number } | null>(null);
-  const [clip, setClip] = useState<{ id: string; name: string } | null>(null);
+  const [clip, setClip] = useState<{ id: string; name: string; cut?: boolean } | null>(null);
   const [viewFile, setViewFile] = useState<ViewFile | null>(null);
   const [editFile, setEditFile] = useState<ViewFile | null>(null);
   const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; usage?: number | null; limit?: number | null; status: string }[]>([]);
@@ -190,6 +194,11 @@ export default function Explorer() {
     });
   }
   function destSummary(): string {
+    // Inside a drive view the drive itself is always a destination.
+    if (inDriveView && driveView && supaOff && mirrorOff) {
+      const a = accounts.find((x) => x.id === driveView.accountId);
+      return `Upload → Drive: ${a ? a.label : "Drive"}`;
+    }
     const parts = supaOff ? [] : ["Supabase"];
     if (!mirrorOff) {
       const a = driveSel ? accounts.find((x) => x.id === driveSel) : [...accounts].filter((x) => x.status === "active").sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0];
@@ -455,10 +464,10 @@ export default function Explorer() {
       const kids = tree.filter((t) => driveView.folderId ? t.parent === driveView.folderId : top(t));
       const gFolders = kids.filter((k) => k.mime === "application/vnd.google-apps.folder");
       const gFiles = kids.filter((k) => k.mime !== "application/vnd.google-apps.folder");
-      const toFile = (t: { id: string; name: string; mime: string; size: number; googleId: string }): FileRow =>
-        ({ id: t.id ?? `g:${driveView.accountId}:${t.googleId}`, name: t.name, mime: t.mime, size: t.size, backends: ["google"], accountLabel: acctLabel, google_file_id: t.googleId });
+      const toFile = (t: { id: string; name: string; mime: string; size: number; googleId: string; parent: string | null }): FileRow =>
+        ({ id: t.id ?? `g:${driveView.accountId}:${t.googleId}`, name: t.name, mime: t.mime, size: t.size, backends: ["google"], accountLabel: acctLabel, google_file_id: t.googleId, google_parent_id: t.parent, drive_account_id: driveView.accountId });
       return [
-        ...gFolders.map((g): Row => ({ key: `gdrive:${g.googleId}`, kind: "folder", id: `gdrive:${g.googleId}`, name: g.name, depth: 0, dept: null })),
+        ...gFolders.map((g): Row => ({ key: `gdrive:${g.googleId}`, kind: "folder", id: `gdrive:${g.googleId}`, name: g.name, depth: 0, dept: null, indexId: g.id ?? null })),
         ...sortFiles(gFiles.map(toFile)).map((f) => fileRowOf(f, 0))
       ];
     }
@@ -785,7 +794,10 @@ export default function Explorer() {
         const init = await fetch("/api/drive/upload-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size }) });
         const dj = await init.json();
         if (!init.ok) throw new Error(dj.error ?? "upload init failed");
-        const put = await fetch(dj.signedUrl, { method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file });
+        const put = await fetch(dj.signedUrl, { method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file,
+          // Bytes stall forever on dead networks without this — 10 min is
+          // generous (100 MB max ≈ 1.3 Mbps floor) and fails loudly instead.
+          signal: AbortSignal.timeout(600_000) });
         if (!put.ok) throw new Error("byte upload failed");
         const meta = await fetch("/api/drive/upload", {
           method: "POST", headers: { "content-type": "application/json" },
@@ -937,11 +949,11 @@ export default function Explorer() {
     setSelKey(null);
   }
 
-  function copyFile(f: FileRow) {
-    const c = { id: f.id, name: f.name };
+  function copyFile(f: FileRow, cut = false) {
+    const c = { id: f.id, name: f.name, cut };
     setClip(c);
     try { localStorage.setItem("eiden-clip", JSON.stringify(c)); } catch { /* ignore */ }
-    toast({ text: `Copied "${f.name}" — right-click → Paste to duplicate it.`, tone: "ok" });
+    toast({ text: cut ? `Cut "${f.name}" — right-click → Paste to move it.` : `Copied "${f.name}" — right-click → Paste to duplicate it.`, tone: "ok" });
   }
 
   async function copyToUsb(r: Row) {
@@ -954,13 +966,27 @@ export default function Explorer() {
 
   async function pasteClip() {
     if (!clip) return;
-    const r = await fetch("/api/drive/copy", {
+    // Cut = move (relocate, nothing duplicated); copy = duplicate. Inside a
+    // drive view both land in the open Google folder; otherwise the workspace
+    // folder you're standing in.
+    const cut = (clip as { cut?: boolean }).cut === true;
+    const url = cut ? "/api/drive/move" : "/api/drive/copy";
+    const body = cut
+      ? inDriveView && driveView
+        ? { file_id: clip.id, folder: null, ...(driveView.folderId ? { google_parent: driveView.folderId } : {}) }
+        : { file_id: clip.id, folder: curFolder }
+      : inDriveView && driveView
+        ? { file_id: clip.id, folder: null, ...(driveView.folderId ? { google_parent: driveView.folderId } : {}) }
+        : { file_id: clip.id, folder: curFolder };
+    const r = await fetch(url, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ file_id: clip.id, folder: curFolder })
+      body: JSON.stringify(body)
     });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) { toast({ text: d.error ?? "Couldn't paste.", tone: "err" }); return; }
-    toast({ text: `Pasted as "${d.name}".`, tone: "ok" });
+    if (!r.ok) { toast({ text: d.error ?? (cut ? "Couldn't move." : "Couldn't paste."), tone: "err" }); return; }
+    if (cut) { setClip(null); try { localStorage.removeItem("eiden-clip"); } catch { /* ignore */ } }
+    toast({ text: cut ? `Moved "${clip.name}".` : `Pasted as "${d.name}".`, tone: "ok" });
+    if (inDriveView && driveView) await loadTree(driveView.accountId);
     load(q);
   }
 
@@ -1151,7 +1177,7 @@ export default function Explorer() {
             <span className="h-5 border-l border-line mx-0.5" />
             {/* Upload: action + destination picker (Supabase, Drive, USB — each toggleable). */}
             <div className="flex items-stretch h-11 rounded-lg bg-brand text-white shadow-[0_1px_2px_rgba(60,30,140,.3)]">
-              <button onClick={() => fileRef.current?.click()} disabled={!!uploading || (supaOff && mirrorOff)}
+              <button onClick={() => fileRef.current?.click()} disabled={!!uploading || (supaOff && mirrorOff && !inDriveView)}
                 title={destSummary()}
                 className="px-3.5 flex items-center gap-2 text-[13.5px] font-medium hover:bg-white/12 active:bg-white/20 disabled:opacity-60 transition-colors rounded-l-lg">
                 <Upload size={16} strokeWidth={2.2} /> <span className="hidden sm:inline">{uploading ? "Uploading…" : "Upload"}</span>
@@ -1511,13 +1537,18 @@ export default function Explorer() {
                 on: r.file && indexed ? () => copyFile(r.file!) : undefined,
                 disabled: !(r.file && indexed), why: needSync,
                 show: r.kind === "file" },
+              { label: "Cut", icon: <Scissors size={14} />,
+                on: r.file && indexed ? () => copyFile(r.file!, true) : undefined,
+                disabled: !(r.file && indexed), why: needSync || "Cut, then Paste where it should live",
+                show: r.kind === "file" || !!r.googleFolder },
               { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(r.key); setInfoOpen(true); }, show: true },
               { label: "Tags…", icon: <TagIcon size={14} />, on: () => setTagPicker({ kind: r.kind, id: r.id, name: r.name }), show: taggable(r) },
               { label: "Rename", icon: <Pencil size={14} />,
                 on: r.kind === "folder" && r.folder ? () => openRename("folder", r.folder!.id, r.folder!.name)
+                  : r.kind === "folder" && r.indexId ? () => openRename("file", r.indexId!, r.name)
                   : r.file && indexed ? () => openRename("file", r.id, r.file!.name) : undefined,
-                disabled: isLive ? true : isGFolder ? true : !(r.kind === "folder" || (r.kind === "file" && r.file)),
-                why: isLive ? needSync : isGFolder ? "Google folders are renamed in Drive itself" : undefined,
+                disabled: isLive ? true : (isGFolder && !r.indexId) ? true : !(r.kind === "folder" || (r.kind === "file" && r.file)),
+                why: isLive ? needSync : (isGFolder && !r.indexId) ? "Sync the drive first — this folder isn't indexed yet" : undefined,
                 show: r.kind === "folder" || r.kind === "file" },
               { label: "Download", icon: <Download size={14} />,
                 on: indexed && r.kind === "file" ? () => { window.location.href = `/api/drive/download?file_id=${r.id}`; } : undefined,
@@ -1537,9 +1568,10 @@ export default function Explorer() {
                 show: r.kind === "file" },
               { label: "Delete folder", icon: <Trash2 size={14} />, danger: true,
                 on: r.folder ? () => setConfirmFolderDelete(r.folder!)
-                  : (r.googleFolder && r.file ? () => setConfirmTrash(r.file!) : undefined),
-                disabled: !r.folder && !(r.googleFolder && r.file),
-                why: isGFolder ? "Google folders are deleted in Drive itself"
+                  : (r.googleFolder && r.file ? () => setConfirmTrash(r.file!)
+                  : (r.indexId ? () => setConfirmTrash({ id: r.indexId!, name: r.name, backends: ["google"] }) : undefined)),
+                disabled: !r.folder && !(r.googleFolder && r.file) && !r.indexId,
+                why: (isGFolder && !r.indexId) ? "Sync the drive first — this folder isn't indexed yet"
                   : r.googleFolder ? "Trashed with everything inside it (90 days, recoverable)" : undefined,
                 show: r.kind === "folder" }
             ];
