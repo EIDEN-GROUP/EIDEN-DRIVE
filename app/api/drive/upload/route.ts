@@ -10,7 +10,7 @@ import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { queueUsbUpload } from "@/lib/usb";
 import { pickUploadAccount, clientFor } from "@/lib/drive-accounts";
-import { postSlack } from "@/lib/slack";
+import { notifyUpload } from "@/lib/upload-notify";
 import { folderUsable } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
@@ -48,6 +48,16 @@ export async function POST(req: Request) {
   if (body.storage_path && (!body.storage_path.startsWith(`${me.id}/`) || body.storage_path.includes(".."))) {
     return Response.json({ error: "storage_path must be inside your own upload folder" }, { status: 403 });
   }
+  // Supabase can be toggled off per uploader — but then the bytes must come
+  // from somewhere: a Google drive (via the direct-upload path, since the
+  // mirror reads its bytes back out of Storage). No destination = 400.
+  const want = body.drive_account === undefined ? "auto" : body.drive_account;
+  if (!body.storage_path && !want) {
+    return Response.json({ error: "no destination — turn on Supabase or a Google Drive first" }, { status: 400 });
+  }
+  if (!body.storage_path && want) {
+    return Response.json({ error: "Supabase is off — send the bytes to the direct-upload endpoint instead" }, { status: 400 });
+  }
   // Writes use the service role AFTER the checks above (never trust anon RLS for
   // mutations: a missing/rotated JWT must never turn into a data-loss-shaped error).
   const db = adminClient();
@@ -68,7 +78,6 @@ export async function POST(req: Request) {
   // Google mirror (quota-routed). Never blocks the upload: failures degrade to
   // local-only with push_error so the UI can say exactly why.
   let push_error: string | null = null;
-  const want = body.drive_account === undefined ? "auto" : body.drive_account;
   if (want && body.storage_path && (body.size ?? 0) > 0) {
     if ((body.size ?? 0) > PUSH_MAX) {
       push_error = "kept local-only: over the 50 MB instant-mirror size (still safe in Storage)";
@@ -109,6 +118,8 @@ export async function POST(req: Request) {
   }
   await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: data.id, req, detail: { backends: body.backends, push_error } });
   // Office-USB copy: queued, never blocking. Agent-offline just means "pending".
+  // The agent pulls bytes from Supabase, so USB without a Storage copy is a
+  // clear skip (not a silent drop) — the client normally disables USB already.
   let usb_queued: boolean | string = false;
   if (body.usb && body.storage_path) {
     try {
@@ -117,44 +128,9 @@ export async function POST(req: Request) {
     } catch (e) {
       usb_queued = e instanceof Error ? e.message : "usb queue failed";
     }
+  } else if (body.usb) {
+    usb_queued = "skipped: USB copies pull from Supabase — turn Supabase on first";
   }
-  // Upload fan-out (never blocks the response): in-app notifications for
-  // managers/admins + Slack channel post, both with who/where/what details.
-  try {
-    const origin = process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin;
-    let where = "Root";
-    if (body.folder) {
-      const { data: fol } = await db.from("folders").select("name").eq("id", body.folder).maybeSingle();
-      if ((fol as { name?: string } | null)?.name) where = `folder “${(fol as { name: string }).name}”`;
-    }
-    const sizeTxt = body.size ? ` · ${formatBytes(body.size)}` : "";
-    const link = `${origin}/drive/${data.id}`;
-    const ext = (body.name.split(".").pop() ?? "").toUpperCase() || "FILE";
-    const typeTxt = /^(PDF|DOCX|XLSX|PPTX)$/.test(ext) ? `${ext} Document`
-      : /^(MP4|MOV|AVI|MKV|WEBM)$/.test(ext) ? `${ext} Video`
-      : /^(PNG|JPG|JPEG|GIF|WEBP|SVG|HEIC|TIFF?)$/.test(ext) ? `${ext === "JPG" ? "JPG" : ext} Image`
-      : /^(MP3|WAV|FLAC|OGG)$/.test(ext) ? `${ext} Audio`
-      : `${ext} File`;
-    const { data: staff } = await db.from("profiles").select("id").in("role", ["admin", "manager"]).limit(20);
-    for (const s of (staff ?? []) as { id: string }[]) {
-      if (s.id === me.id) continue; // uploader doesn't notify themselves
-      await db.from("notifications").insert({
-        user_id: s.id, kind: "upload",
-        title: `${me.username} uploaded ${body.name}`,
-        body: `${where}${sizeTxt} · ${link}`
-      });
-    }
-    postSlack(`:outbox_tray: File uploaded\n\n${body.name}\nUploaded by ${me.username}\n\n:file_folder: Location: ${where} :page_facing_up: Type: ${typeTxt} :floppy_disk: Size: ${body.size ? formatBytes(body.size) : "unknown"}\n:link: <${link}|View file in Drive>`).then((r) => {
-      if (!r.ok) console.error("[slack-upload]", r.error);
-    });
-  } catch { /* fan-out never fails the upload */ }
+  await notifyUpload(db, req, { fileId: data.id, name: body.name, size: body.size, folderId: body.folder, userId: me.id, username: me.username });
   return Response.json({ ok: true, id: data.id, push_error, usb_queued });
-}
-
-function formatBytes(n: number): string {
-  if (!n) return "0 B";
-  const u = ["B", "KB", "MB", "GB"];
-  let i = 0, v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return `${v >= 10 ? Math.round(v) : Math.round(v * 10) / 10} ${u[i]}`;
 }

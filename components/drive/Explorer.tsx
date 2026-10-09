@@ -142,13 +142,22 @@ export default function Explorer() {
   const [usbTarget, setUsbTarget] = useState(false);
   // Google mirror toggle (persisted): off = Supabase-only uploads.
   const [mirrorOff, setMirrorOff] = useState(false);
+  // Supabase intake toggle (persisted): off = bytes go straight to Google
+  // Drive, Storage is never touched. USB copies need Supabase, so they switch
+  // off too while this is off.
+  const [supaOff, setSupaOff] = useState(false);
   useEffect(() => {
     try {
       if (localStorage.getItem("eiden-usb") === "1") setUsbTarget(true);
       if (localStorage.getItem("eiden-mirror") === "0") setMirrorOff(true);
+      if (localStorage.getItem("eiden-supabase") === "0") setSupaOff(true);
     } catch { /* ignore */ }
   }, []);
   function toggleUsb() {
+    if (supaOff) {
+      toast({ text: "USB copies pull from Supabase — turn Supabase on first.", tone: "err" });
+      return;
+    }
     setUsbTarget((v) => {
       try { localStorage.setItem("eiden-usb", v ? "0" : "1"); } catch { /* ignore */ }
       if (!v) toast({ text: "Uploads will also queue a copy to the office USB (agent picks it up when online).", tone: "ok" });
@@ -162,14 +171,28 @@ export default function Explorer() {
       return !v;
     });
   }
+  function toggleSupa() {
+    setSupaOff((v) => {
+      try { localStorage.setItem("eiden-supabase", v ? "1" : "0"); } catch { /* ignore */ }
+      if (v) {
+        // Turning Supabase back on changes nothing else.
+      } else {
+        // USB copies pull their bytes from Supabase — no Storage, no USB.
+        setUsbTarget(false);
+        try { localStorage.setItem("eiden-usb", "0"); } catch { /* ignore */ }
+        toast({ text: "Supabase off — uploads go straight to Google Drive. USB copies need Supabase, so they're off too.", tone: "ok" });
+      }
+      return !v;
+    });
+  }
   function destSummary(): string {
-    const parts = ["Supabase"];
+    const parts = supaOff ? [] : ["Supabase"];
     if (!mirrorOff) {
       const a = driveSel ? accounts.find((x) => x.id === driveSel) : [...accounts].filter((x) => x.status === "active").sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0];
       parts.push(`Drive: ${a ? a.label : "Auto"}`);
     }
     if (usbTarget) parts.push("USB");
-    return `Upload → ${parts.join(" + ")}`;
+    return parts.length ? `Upload → ${parts.join(" + ")}` : "Upload — no destination (turn one on)";
   }
   const [driveView, setDriveView] = useState<{ accountId: string; folderId: string | null; path: { id: string; name: string }[] } | null>(null);
   const [tree, setTree] = useState<{ id: string; name: string; mime: string; size: number; googleId: string; parent: string | null }[] | null>(null);
@@ -562,11 +585,34 @@ export default function Explorer() {
   async function uploadPicked(list: FileList | null) {
     const files = list ? Array.from(list) : [];
     if (!files.length) return;
+    if (supaOff && mirrorOff) {
+      toast({ text: "No upload destination — turn on Supabase or the Google mirror first.", tone: "err" });
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     let ok = 0;
     for (const file of files) {
       setUploading(files.length > 1 ? `${file.name} (${ok + 1}/${files.length})` : file.name);
       try {
         const hash = await sha256(file);
+        // Supabase off: bytes ride the request straight into Drive (≤50 MB —
+        // the same server cap as the mirror path). No Storage copy exists, so
+        // there is nothing to USB-queue or version from Storage later.
+        if (supaOff) {
+          if (file.size > 50 * 1024 * 1024) throw new Error("over 50 MB — turn Supabase on for big files");
+          const fd = new FormData();
+          fd.set("file", file, file.name);
+          fd.set("name", file.name);
+          fd.set("mime", file.type || "application/octet-stream");
+          fd.set("hash", hash);
+          if (curFolder) fd.set("folder", curFolder);
+          if (driveSel) fd.set("drive_account", driveSel);
+          const direct = await fetch("/api/drive/upload-direct", { method: "POST", body: fd });
+          const dd = await direct.json().catch(() => ({}));
+          if (!direct.ok) throw new Error(dd.error ?? "direct upload failed");
+          ok++;
+          continue;
+        }
         const init = await fetch("/api/drive/upload-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size }) });
         const dj = await init.json();
         if (!init.ok) throw new Error(dj.error ?? "upload init failed");
@@ -925,9 +971,9 @@ export default function Explorer() {
                 className={`size-11 grid place-items-center ${thumbs ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><ImageIcon size={19} strokeWidth={1.6} /></button>
             </div>
             <span className="h-5 border-l border-line mx-0.5" />
-            {/* Upload: action + destination picker (Supabase always, Drive + USB selectable). */}
+            {/* Upload: action + destination picker (Supabase, Drive, USB — each toggleable). */}
             <div className="flex items-stretch h-11 rounded-lg bg-brand text-white shadow-[0_1px_2px_rgba(60,30,140,.3)]">
-              <button onClick={() => fileRef.current?.click()} disabled={!!uploading}
+              <button onClick={() => fileRef.current?.click()} disabled={!!uploading || (supaOff && mirrorOff)}
                 title={destSummary()}
                 className="px-3.5 flex items-center gap-2 text-[13.5px] font-medium hover:bg-white/12 active:bg-white/20 disabled:opacity-60 transition-colors rounded-l-lg">
                 <Upload size={16} strokeWidth={2.2} /> <span className="hidden sm:inline">{uploading ? "Uploading…" : "Upload"}</span>
@@ -937,7 +983,7 @@ export default function Explorer() {
                 triggerClassName="h-full w-9 grid place-items-center rounded-r-lg hover:bg-white/12 active:bg-white/20 transition-colors"
                 trigger={<ChevronDown size={15} strokeWidth={2.4} />}
                 items={[
-                  { label: "Supabase", hint: "Always on — every upload lands here first", icon: <Check size={14} />, disabled: true, onSelect: () => {} },
+                  { label: "Supabase", hint: supaOff ? "Off — uploads skip Supabase" : "On — every upload lands here first", icon: !supaOff ? <Check size={14} /> : undefined, onSelect: toggleSupa },
                   "sep",
                   { label: "Mirror to Google Drive", hint: mirrorOff ? "Off — Supabase only" : "On", icon: !mirrorOff ? <Check size={14} /> : undefined, onSelect: toggleMirror },
                   ...(!mirrorOff ? [
@@ -949,7 +995,7 @@ export default function Explorer() {
                     }))
                   ] : []),
                   "sep",
-                  { label: "Also copy to office USB", hint: "Queued — agent copies when online", icon: usbTarget ? <Check size={14} /> : undefined, onSelect: toggleUsb }
+                  { label: "Also copy to office USB", hint: supaOff ? "Needs Supabase on — USB copies pull from Storage" : "Queued — agent copies when online", icon: usbTarget ? <Check size={14} /> : undefined, disabled: supaOff, onSelect: toggleUsb }
                 ]} />
             </div>
             <Menu label="Sort and filter" align="right" active={`${sort.key}:${sort.dir}`}
@@ -970,7 +1016,7 @@ export default function Explorer() {
                 { label: syncing ? "Syncing from Google…" : "Sync from Google", icon: <CloudDownload size={14} />, onSelect: syncGoogle },
                 { label: "Refresh", icon: <RefreshCw size={14} />, onSelect: () => load(q) },
                 "sep",
-                { label: "Also copy uploads to office USB", icon: usbTarget ? <Check size={14} /> : undefined, onSelect: toggleUsb }
+                { label: "Also copy uploads to office USB", hint: supaOff ? "Needs Supabase on" : undefined, icon: usbTarget ? <Check size={14} /> : undefined, disabled: supaOff, onSelect: toggleUsb }
               ]} />
             <input ref={fileRef} type="file" multiple className="hidden" aria-label="Choose files to upload" onChange={(e) => uploadPicked(e.target.files)} />
           </div>
