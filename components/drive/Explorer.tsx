@@ -425,19 +425,19 @@ export default function Explorer() {
         ...sortFiles(files.filter((f) => deptOf(f.folder) === tagFilter)).map((f) => fileRowOf(f, 0))];
     }
     const out: Row[] = [];
-    // Grid is a flat gallery: it descends every folder regardless of the
-    // list's collapse state, so a collapsed tree never hides files from grid.
-    const descend = (id: string) => view === "grid" || expanded.has(id);
+    // Collapse state rules BOTH views identically: grid never flattens on
+    // its own — entering grid collapses everything (switchView), so grid
+    // shows the current level only, exactly like a collapsed list.
     const walk = (parent: string | null, depth: number) => {
       for (const f of sortFolders(folders.filter((x) => (x.parent ?? null) === parent))) {
         out.push(folderRowOf(f, depth));
-        if (descend(f.id)) walk(f.id, depth + 1);
+        if (expanded.has(f.id)) walk(f.id, depth + 1);
       }
       for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === parent))) out.push(fileRowOf(f, depth));
     };
     walk(curFolder, 0);
     return out;
-  }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, view, curFolder, deptOf, driveView, tree, treeRoot, accounts]);
+  }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, curFolder, deptOf, driveView, tree, treeRoot, accounts]);
 
   // Pagination: files/folders (list + grid) and the Recovery Bin page independently; any navigation/filter/sort resets to page 1.
   const pg = usePagination(rows, { defaultSize: 50, sizes: [25, 50, 100, 200], storageKey: "files",
@@ -487,9 +487,9 @@ export default function Explorer() {
     setExpanded((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   }
   // View switches own the tree state, always — even overriding a manual
-  // expand/collapse. Entering grid flattens everything (collapse all, so a
-  // returning list never inherits a half-collapsed tree); entering list opens
-  // the whole tree again. Grid itself ignores `expanded` and shows all files.
+  // expand/collapse. Entering grid collapses everything (grid shows the
+  // current level only, like a collapsed list); entering list opens the whole
+  // tree again. Both views read the same state, so they can never disagree.
   function expandAll() {
     setExpanded(new Set(
       folders.filter((f) => folders.some((x) => x.parent === f.id) || files.some((x) => x.folder === f.id)).map((f) => f.id)
