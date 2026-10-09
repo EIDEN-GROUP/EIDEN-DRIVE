@@ -9,9 +9,9 @@ import { UPLOAD_BUCKET, PFP_BUCKET } from "@/lib/storage";
 import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { queueUsbUpload } from "@/lib/usb";
-import { pickUploadAccount, clientFor } from "@/lib/drive-accounts";
+import { pickUploadAccount, clientFor, getAccounts } from "@/lib/drive-accounts";
 import { notifyUpload } from "@/lib/upload-notify";
-import { folderUsable } from "@/lib/visibility";
+import { folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 // Metadata-only: bytes already went to Supabase Storage via a signed URL (or the agent staged them).
@@ -35,7 +35,11 @@ const Body = z.object({
   drive_account: z.string().max(40).nullable().optional(),
   // Office USB: after the Supabase upload, queue an async agent job that copies
   // the bytes to the router USB share. Never blocks the upload itself.
-  usb: z.boolean().optional()
+  usb: z.boolean().optional(),
+  // Google-side parent folder (Drive id) for uploads made inside a drive
+  // view — the file lands in THAT folder, not the account's scope root.
+  // Validated against the target account's scope below.
+  google_parent: z.string().regex(/^[A-Za-z0-9_-]{10,200}$/).nullable().optional()
 });
 
 // Server-side mirror cap: above this the Vercel round-trip gets flaky —
@@ -90,6 +94,14 @@ export async function POST(req: Request) {
         push_error = pick.reason ?? "no drive available";
       } else {
         try {
+          // A caller-supplied parent must sit inside the target's scope
+          // (or be the scope root itself) — never smuggle bytes elsewhere.
+          const scopeRoot = pick.account.root_id ?? null;
+          if (body.google_parent && scopeRoot && body.google_parent !== scopeRoot) {
+            if (!(await googleInScope(db, await getAccounts(), pick.account.id, body.google_parent))) {
+              throw new Error("destination folder is outside this drive's shared scope");
+            }
+          }
           const srcBucket = body.storage_bucket === PFP_BUCKET ? PFP_BUCKET : UPLOAD_BUCKET;
           const { data: blob, error: dlErr } = await db.storage.from(srcBucket).download(body.storage_path);
           if (dlErr || !blob) throw new Error(dlErr?.message ?? "storage read failed");
@@ -101,7 +113,9 @@ export async function POST(req: Request) {
             requestBody: {
               name: body.name,
               mimeType: body.mime ?? "application/octet-stream",
-              ...(root.kind === "folder" ? { parents: [root.id] } : {})
+              ...(body.google_parent
+                ? { parents: [body.google_parent] }
+                : root.kind === "folder" ? { parents: [root.id] } : {})
             },
             // googleapis media bodies must be streams — a Buffer has no .pipe
             // and dies with "t.body.pipe is not a function".
@@ -111,7 +125,9 @@ export async function POST(req: Request) {
           if (!created.data.id) throw new Error("google create returned no id");
           // Record the Drive parent: without it the scope filter can't place
           // this row inside a scoped drive and the file vanishes from Workspace.
-          let google_parent_id: string | null = root.kind === "folder" ? root.id : null;
+          // A caller-supplied in-drive parent is authoritative; otherwise the
+          // scope root (folder-kind), else resolve from Drive.
+          let google_parent_id: string | null = body.google_parent ?? (root.kind === "folder" ? root.id : null);
           if (!google_parent_id) {
             try {
               const meta = await d.files.get({ fileId: created.data.id, fields: "parents", supportsAllDrives: true });
@@ -124,6 +140,7 @@ export async function POST(req: Request) {
             drive_account_id: pick.account.id,
             backends: ["local", "google"]
           }).eq("id", data.id);
+          bustScopeCache(pick.account.id);
         } catch (e) {
           push_error = googleErrorMessage(e instanceof Error ? e.message : "google mirror failed");
         }

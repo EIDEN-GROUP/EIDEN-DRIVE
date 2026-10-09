@@ -18,7 +18,7 @@ describe("API contracts (anonymous)", () => {
     for (const [p, m] of [
       ["/api/drive/trash", "POST"], ["/api/drive/restore", "POST"], ["/api/drive/upload", "POST"],
       ["/api/drive/upload-url", "POST"], ["/api/drive/rename", "PATCH"], ["/api/drive/sync", "POST"],
-      ["/api/drive/copy", "POST"], ["/api/drive/content", "PATCH"], ["/api/drive/usb", "POST"],
+      ["/api/drive/copy", "POST"], ["/api/drive/content", "PATCH"], ["/api/drive/usb", "POST"], ["/api/drive/google-folder", "POST"],
       ["/api/drive/resync-clean", "POST"], ["/api/drive/clear-orphans", "POST"], ["/api/drive/accounts", "PATCH"], ["/api/drive/accounts", "DELETE"],
       ["/api/agent/complete", "POST"], ["/api/auth/link", "POST"], ["/api/auth/otp-code", "POST"],
       ["/api/share", "POST"], ["/api/share", "DELETE"], ["/api/integrations/slack", "POST"], ["/api/integrations/smtp", "POST"],

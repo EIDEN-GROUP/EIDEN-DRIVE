@@ -229,6 +229,12 @@ export default function Explorer() {
 
   const nav = hist[hi];
   const curFolder = nav.kind === "root" ? nav.path[nav.path.length - 1] ?? null : null;
+  // Inside a Google drive (tree mode, no search): creations belong to THAT
+  // drive — a real Drive folder/file under the open Google folder — never to
+  // the Workspace behind it.
+  const inDriveView = !!driveView && nav.kind === "root" && !q.trim();
+  const driveDestLabel = !driveView ? ""
+    : `Drive “${accounts.find((a) => a.id === driveView.accountId)?.label ?? "Drive"}”${driveView.path.length ? ` › ${driveView.path.map((p) => p.name).join(" › ")}` : ""}`;
 
   const load = useCallback(async (query: string, from = 0, append = false, silent = false) => {
     if (append) setLoadingMore(true);
@@ -651,16 +657,35 @@ export default function Explorer() {
     const name = newName.trim();
     if (!name || folderBusy) return;
     setFolderBusy(true);
-    const r = await fetch("/api/folders", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, parent: curFolder }) });
-    setFolderBusy(false);
-    if (r.ok) { toast({ text: `Folder "${name}" created.`, tone: "ok" }); setNewName(""); setShowNewFolder(false); load(q); }
-    else toast({ text: "Couldn't create folder.", tone: "err" });
+    try {
+      if (inDriveView && driveView) {
+        // A real Google Drive folder inside the open drive location.
+        const r = await fetch("/api/drive/google-folder", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accountId: driveView.accountId, parentId: driveView.folderId, name }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error ?? "Couldn't create folder in Drive.");
+        toast({ text: `Folder "${name}" created in ${driveDestLabel}.`, tone: "ok" });
+        setNewName(""); setShowNewFolder(false);
+        await loadTree(driveView.accountId);
+        load(q);
+        return;
+      }
+      const r = await fetch("/api/folders", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, parent: curFolder }) });
+      if (r.ok) { toast({ text: `Folder "${name}" created.`, tone: "ok" }); setNewName(""); setShowNewFolder(false); load(q); }
+      else toast({ text: "Couldn't create folder.", tone: "err" });
+    } catch (err) {
+      toast({ text: err instanceof Error ? err.message : "Couldn't create folder.", tone: "err" });
+    } finally {
+      setFolderBusy(false);
+    }
   }
 
   async function uploadPicked(list: FileList | null) {
     const files = list ? Array.from(list) : [];
     if (!files.length) return;
-    if (supaOff && mirrorOff) {
+    // Inside a drive view the drive itself is the destination, so the
+    // toggles can't leave you destination-less — otherwise require one.
+    if (supaOff && mirrorOff && !inDriveView) {
       toast({ text: "No upload destination — turn on Supabase or the Google mirror first.", tone: "err" });
       if (fileRef.current) fileRef.current.value = "";
       return;
@@ -680,12 +705,20 @@ export default function Explorer() {
           fd.set("name", file.name);
           fd.set("mime", file.type || "application/octet-stream");
           fd.set("hash", hash);
-          if (curFolder) fd.set("folder", curFolder);
-          if (driveSel) fd.set("drive_account", driveSel);
+          // Inside a drive view the file belongs to THAT drive folder — not
+          // the mirror picker, not a workspace folder.
+          if (inDriveView && driveView) {
+            fd.set("drive_account", driveView.accountId);
+            if (driveView.folderId) fd.set("google_parent", driveView.folderId);
+          } else {
+            if (curFolder) fd.set("folder", curFolder);
+            if (driveSel) fd.set("drive_account", driveSel);
+          }
           const direct = await fetch("/api/drive/upload-direct", { method: "POST", body: fd });
           const dd = await direct.json().catch(() => ({}));
           if (!direct.ok) throw new Error(dd.error ?? "direct upload failed");
           ok++;
+          if (inDriveView && driveView) await loadTree(driveView.accountId);
           continue;
         }
         const init = await fetch("/api/drive/upload-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size }) });
@@ -695,10 +728,16 @@ export default function Explorer() {
         if (!put.ok) throw new Error("byte upload failed");
         const meta = await fetch("/api/drive/upload", {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: mirrorOff ? null : (driveSel || undefined), usb: usbTarget || undefined })
+          // Inside a drive view the bytes mirror into THAT drive folder (the
+          // mirror is forced on: uploading "here" means Google). folder stays
+          // null — the file lives in the drive tree, not a workspace folder.
+          body: JSON.stringify(inDriveView && driveView
+            ? { name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: null, drive_account: driveView.accountId, google_parent: driveView.folderId, usb: usbTarget || undefined }
+            : { name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: mirrorOff ? null : (driveSel || undefined), usb: usbTarget || undefined })
         });
         const mj = await meta.json().catch(() => ({}));
         if (!meta.ok) throw new Error(mj.error ?? "indexing failed");
+        if (inDriveView && driveView) await loadTree(driveView.accountId);
         if (mj.push_error) toast({ text: `"${file.name}" saved locally — Google mirror skipped: ${mj.push_error}`, tone: "err" });
         if (mj.usb_queued === true) toast({ text: `"${file.name}" queued for office-USB copy (agent picks it up).`, tone: "ok" });
         else if (typeof mj.usb_queued === "string") toast({ text: `"${file.name}" USB queue failed: ${mj.usb_queued}`, tone: "err" });
@@ -785,35 +824,38 @@ export default function Explorer() {
   }
 
   // Drive tree data: fetched once per opened drive (folders + files, capped).
-  useEffect(() => {
-    if (!driveView) { setTree(null); setTreeRoot(null); return; }
-    let dead = false;
+  // loadTree is also called after creating/uploading inside the drive view so
+  // new Google folders/files appear immediately (no Sync wait). The sequence
+  // guard drops stale responses when drives are switched quickly.
+  const treeSeq = useRef(0);
+  async function loadTree(accountId: string) {
+    const at = ++treeSeq.current;
     setTree(null);
     setTreeRoot(null);
     setTreeLoading(true);
     setTreeError(null);
-    fetch(`/api/drive/tree?accountId=${driveView.accountId}`, { signal: AbortSignal.timeout(30_000) })
-      .then(async (r) => {
-        if (!r.ok) {
-          const d = await r.json().catch(() => ({}));
-          throw new Error(d.error ?? `tree ${r.status}`);
-        }
-        return r.json().catch(() => ({}));
-      })
-      .then((d) => {
-        if (dead) return;
-        setTreeRoot(typeof d.rootId === "string" && d.rootId ? d.rootId : null);
-        setTree((d.results ?? []).map((t: { id: string; name: string; mime: string; size: number; google_file_id: string; google_parent_id: string | null }) => ({
-          id: t.id, name: t.name, mime: t.mime, size: t.size ?? 0, googleId: t.google_file_id, parent: t.google_parent_id
-        })));
-        setTreeLoading(false);
-      })
-      .catch((e) => {
-        if (dead) return;
-        setTreeLoading(false);
-        setTreeError(e instanceof Error ? e.message : "Couldn't load this drive's tree.");
-      });
-    return () => { dead = true; };
+    try {
+      const r = await fetch(`/api/drive/tree?accountId=${accountId}`, { signal: AbortSignal.timeout(30_000) });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error ?? `tree ${r.status}`);
+      }
+      const d = await r.json().catch(() => ({}));
+      if (at !== treeSeq.current) return;
+      setTreeRoot(typeof d.rootId === "string" && d.rootId ? d.rootId : null);
+      setTree((d.results ?? []).map((t: { id: string; name: string; mime: string; size: number; google_file_id: string; google_parent_id: string | null }) => ({
+        id: t.id, name: t.name, mime: t.mime, size: t.size ?? 0, googleId: t.google_file_id, parent: t.google_parent_id
+      })));
+      setTreeLoading(false);
+    } catch (e) {
+      if (at !== treeSeq.current) return;
+      setTreeLoading(false);
+      setTreeError(e instanceof Error ? e.message : "Couldn't load this drive's tree.");
+    }
+  }
+  useEffect(() => {
+    if (!driveView) { setTree(null); setTreeRoot(null); return; }
+    void loadTree(driveView.accountId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [driveView?.accountId]);
 
@@ -1492,7 +1534,7 @@ export default function Explorer() {
             <label htmlFor="nf-name" className="block text-[13px] text-muted">Folder name</label>
             <input id="nf-name" autoFocus value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120}
               className="w-full min-h-[44px] mt-1 bg-transparent border-0 border-b border-[#8f8f9a] focus:border-b-2 focus:border-brand focus:outline-none rounded-none px-0 text-[16px]" />
-            <p className="text-[12px] text-muted mt-2">Created inside “{title}”.</p>
+            <p className="text-[12px] text-muted mt-2">Created inside {inDriveView ? driveDestLabel : `“${title}”`}.</p>
           </div>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={() => setShowNewFolder(false)} className="min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint">Cancel</button>

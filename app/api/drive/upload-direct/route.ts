@@ -6,9 +6,9 @@ import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
-import { pickUploadAccount, clientFor } from "@/lib/drive-accounts";
+import { pickUploadAccount, clientFor, getAccounts } from "@/lib/drive-accounts";
 import { notifyUpload } from "@/lib/upload-notify";
-import { folderUsable } from "@/lib/visibility";
+import { folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
 
 // Direct-to-Google upload: for uploaders who turned Supabase off. The bytes
 // ride the request body straight into Drive — Storage is never touched, so
@@ -33,6 +33,11 @@ export async function POST(req: Request) {
   const folder = form.get("folder") ? String(form.get("folder")) : null;
   const hash = form.get("hash") ? String(form.get("hash")) : null;
   const driveAccount = form.get("drive_account") ? String(form.get("drive_account")) : undefined;
+  const googleParentRaw = form.get("google_parent") ? String(form.get("google_parent")) : null;
+  const google_parent = googleParentRaw && /^[A-Za-z0-9_-]{10,200}$/.test(googleParentRaw) ? googleParentRaw : null;
+  if (form.get("google_parent") && !google_parent) {
+    return Response.json({ error: "bad google_parent" }, { status: 400 });
+  }
   if (!(blob instanceof Blob) || !name) {
     return Response.json({ error: "file + name required" }, { status: 400 });
   }
@@ -55,6 +60,14 @@ export async function POST(req: Request) {
   if (!pick.account) {
     return Response.json({ error: pick.reason ?? "no drive available" }, { status: 502 });
   }
+  {
+    const scopeRoot = pick.account.root_id ?? null;
+    if (google_parent && scopeRoot && google_parent !== scopeRoot) {
+      if (!(await googleInScope(db, await getAccounts(), pick.account.id, google_parent))) {
+        return Response.json({ error: "destination folder is outside this drive's shared scope" }, { status: 403 });
+      }
+    }
+  }
   try {
     const d = clientFor(pick.account);
     if (!d) throw new Error("google not configured");
@@ -64,7 +77,9 @@ export async function POST(req: Request) {
       requestBody: {
         name,
         mimeType: mime,
-        ...(root.kind === "folder" ? { parents: [root.id] } : {})
+        ...(google_parent
+          ? { parents: [google_parent] }
+          : root.kind === "folder" ? { parents: [root.id] } : {})
       },
       media: { mimeType: mime, body: Readable.from(Buffer.from(await blob.arrayBuffer())) },
       fields: "id"
@@ -73,7 +88,7 @@ export async function POST(req: Request) {
     // Same parent bookkeeping as the mirror path: the scope filter places
     // rows by their Drive parent, and a parentless row is invisible on a
     // scoped drive.
-    let google_parent_id: string | null = root.kind === "folder" ? root.id : null;
+    let google_parent_id: string | null = google_parent ?? (root.kind === "folder" ? root.id : null);
     if (!google_parent_id) {
       try {
         const meta = await d.files.get({ fileId: created.data.id, fields: "parents", supportsAllDrives: true });
@@ -87,6 +102,7 @@ export async function POST(req: Request) {
     }).select("id").single();
     if (error) throw new Error(error.message);
     await db.from("versions").insert({ file_id: data.id, v: 1, hash: hash ?? "", actor: me.id });
+    bustScopeCache(pick.account.id);
     await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: data.id, req, detail: { backends: ["google"], direct: true } });
     await notifyUpload(db, req, { fileId: data.id, name, size: blob.size, folderId: folder, userId: me.id, username: me.username });
     return Response.json({ ok: true, id: data.id });
