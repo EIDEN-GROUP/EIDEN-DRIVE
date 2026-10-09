@@ -68,17 +68,23 @@ export async function GET(req: Request) {
   // Google rows must sit inside their account's scope (pre-scope leftovers hide).
   // SCOPE APPLIES TO EVERY ROLE — including admins. A drive scoped to folder X
   // shows X's subtree and nothing else. (Dept permission above is separate.)
-  type Row = { id: string; name: string; mime: string; size: number; backends: string[]; drive_account_id?: string | null; google_file_id?: string | null };
+  type Row = { id: string; name: string; mime: string; size: number; backends: string[]; drive_account_id?: string | null; google_file_id?: string | null; google_parent_id?: string | null };
   let scoped = ((rows ?? []) as Row[]);
   {
     const live = accounts.filter((a) => a.status === "active" && a.root_id);
     if (live.length) {
       const allowed = new Set<string>();
+      const unplaced = new Set<string>();
       for (const a of live) {
-        const ids = await inScopeGoogleIds(adb, a.id, a.root_id);
-        if (ids) for (const id of ids) allowed.add(id);
+        const scope = await inScopeGoogleIds(adb, a.id, a.root_id);
+        if (scope) {
+          for (const id of scope.ids) allowed.add(id);
+          for (const id of scope.noparent) unplaced.add(id);
+        }
       }
-      scoped = scoped.filter((r) => !r.google_file_id || !r.drive_account_id || allowed.has(r.google_file_id));
+      // Placeless account rows (old mirrors with no recorded parent) stay
+      // visible: account-confined, so they can't leak another drive's files.
+      scoped = scoped.filter((r) => !r.google_file_id || !r.drive_account_id || allowed.has(r.google_file_id) || (r.google_parent_id == null && unplaced.has(r.google_file_id)));
     }
   }
   // Pre-scope legacy rows (no account pin): invisible to non-managers.
@@ -96,6 +102,14 @@ export async function GET(req: Request) {
       seenGoogle.add(r.google_file_id);
       return true;
     });
+  }
+  // Recovery Bin hides: trashed rows never list in Workspace (they live on
+  // the Bin page until restore/purge). Bin ids resolve service-side so one
+  // member's trash also hides from the others.
+  {
+    const { data: binRows } = await adb.from("recovery_bin").select("file_id").limit(5000);
+    const binned = new Set(((binRows ?? []) as { file_id: string }[]).map((b) => b.file_id));
+    if (binned.size) scoped = scoped.filter((r) => !binned.has(r.id));
   }
   const hasMore = scoped.length >= limit;
 

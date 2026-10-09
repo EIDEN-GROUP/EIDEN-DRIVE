@@ -7,7 +7,7 @@ import { trashDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile, needsApproval } from "@/lib/roles";
-import { canTouch, googleInScope } from "@/lib/visibility";
+import { canTouch, googleInScope, googleDescendants, bustScopeCache } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
 import { notify } from "@/lib/alerts";
 import { parseJson } from "@/lib/http";
@@ -24,7 +24,7 @@ export async function POST(req: Request) {
   const { file_id } = p.data;
 
   const supa = createClient();
-  const { data: f, error: fe } = await supa.from("file_index").select("id,name,google_file_id,folder,drive_account_id,owner").eq("id", file_id).maybeSingle();
+  const { data: f, error: fe } = await supa.from("file_index").select("id,name,mime,google_file_id,folder,drive_account_id,owner").eq("id", file_id).maybeSingle();
   if (fe) return Response.json({ error: fe.message }, { status: 500 });
   if (!f) return Response.json({ error: "file not found" }, { status: 404 });
   // Confinement: members trash only own / department-tagged items.
@@ -54,6 +54,16 @@ export async function POST(req: Request) {
     try {
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
       await trashDriveFile(String(f.google_file_id), ctx?.drive ?? undefined);
+      // Google folders trash as a subtree in Drive — the index must match:
+      // bin every indexed descendant or the children keep listing as ghosts.
+      // (Drive restore later unhides the whole subtree; restore clears these.)
+      if ((f as { mime?: string }).mime === "application/vnd.google-apps.folder" && (f as { drive_account_id?: string | null }).drive_account_id) {
+        const kids = await googleDescendants(db, (f as { drive_account_id: string }).drive_account_id, String(f.google_file_id));
+        for (let i = 0; i < kids.length; i += 200) {
+          await db.from("recovery_bin").upsert(kids.slice(i, i + 200).map((id) => ({ file_id: id, deleted_by: me.id })));
+        }
+        bustScopeCache((f as { drive_account_id: string }).drive_account_id);
+      }
     }
     catch (e) {
       await db.from("recovery_bin").delete().eq("file_id", file_id); // roll back so DB and Drive agree

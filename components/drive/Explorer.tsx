@@ -26,6 +26,7 @@ export interface FileRow {
   id: string; name: string; mime?: string; size?: number; backends: string[];
   owner?: string; updated?: string; updated_at?: string; folder?: string | null;
   hash?: string; storage_path?: string | null; accountLabel?: string; google_file_id?: string | null;
+  google_parent_id?: string | null; drive_account_id?: string | null;
 }
 interface BinRow { file_id: string; deleted_at: string; purge_at: string; file_index: { id: string; name: string; mime: string; size: number } | { id: string; name: string; mime: string; size: number }[] }
 
@@ -36,6 +37,9 @@ type Nav = { kind: "root" | "recent" | "docs" | "bin"; path: string[] };
 interface Row {
   key: string; kind: "folder" | "file"; id: string; name: string; depth: number;
   dept: string | null; file?: FileRow; folder?: Folder; expandable?: boolean;
+  // Google Drive folder (indexed file row with folder mime): renders as a
+  // folder, expands inline over google ancestry. Holds the Drive folder id.
+  googleFolder?: string | null;
 }
 
 const TAG_COLORS = ["#e5322d", "#2331e0", "#22c32e", "#f59e0b", "#ec4899", "#0ea5a4", "#8b5cf6"];
@@ -379,6 +383,39 @@ export default function Explorer() {
     return out;
   }, [folderById]);
 
+  // Google folder path inside the open drive (ancestors from the tree index).
+  // Used for the Location column while browsing a drive: "where" beats "what".
+  const gById = useMemo(() => new Map((tree ?? []).map((t) => [t.googleId, t])), [tree]);
+  function drivePath(gid: string | null | undefined, selfName?: string | null): string | null {
+    if (!gid || !tree) return null;
+    const node = gById.get(gid);
+    let cur: string | null = node ? node.parent : null;
+    const parts: string[] = selfName ? [selfName] : [];
+    let guard = 0;
+    while (cur && guard++ < 10) {
+      const n = gById.get(cur);
+      if (!n) break;
+      parts.unshift(n.name);
+      cur = n.parent;
+    }
+    return parts.length ? parts.join(" › ") : null;
+  }
+  function locText(r: Row): string {
+    // Inside a drive view the Location column names the PLACE (folder path),
+    // falling back to the backend badge when the path is unresolvable.
+    if (driveView) {
+      const g = r.kind === "folder"
+        ? (r.googleFolder ?? (r.id.startsWith("gdrive:") ? r.id.slice("gdrive:".length) : null))
+        : r.file?.google_file_id ?? null;
+      if (g) {
+        const p = drivePath(g, r.kind === "folder" ? r.name : undefined);
+        if (p) return p;
+      }
+      if (r.kind === "folder") return "—";
+    }
+    return r.file ? badge(r.file.backends, r.file.accountLabel) || "--" : "--";
+  }
+
   // ── rows ──
   const rows: Row[] = useMemo(() => {
     const dir = sort.dir;
@@ -393,10 +430,17 @@ export default function Explorer() {
     const fileRowOf = (f: FileRow, depth: number): Row => ({ key: f.id, kind: "file", id: f.id, name: f.name, depth, dept: deptOf(f.folder), file: f });
     const folderRowOf = (f: Folder, depth: number): Row => ({ key: `folder:${f.id}`, kind: "folder", id: f.id, name: f.name, depth, dept: deptOf(f.id), folder: f,
       expandable: folders.some((x) => x.parent === f.id) || files.some((x) => x.folder === f.id) });
+    // Google Drive folders index as FILE rows (folder mime + google pin) but
+    // must render as FOLDERS — otherwise a new drive folder shows up as a file.
+    const GFOLDER = "application/vnd.google-apps.folder";
+    const isGFolder = (f: FileRow) => f.mime === GFOLDER && !!f.google_file_id;
+    const gFolderRowOf = (f: FileRow, depth: number): Row => ({ key: f.id, kind: "folder", id: f.id, name: f.name, depth, dept: deptOf(f.folder), file: f,
+      googleFolder: f.google_file_id ?? null,
+      expandable: files.some((x) => x.google_parent_id === f.google_file_id) });
 
     if (nav.kind === "bin") return [];
-    if (nav.kind === "recent") return sortFiles(files).sort((a, b) => String(b.updated_at ?? b.updated ?? "").localeCompare(String(a.updated_at ?? a.updated ?? ""))).slice(0, 50).map((f) => fileRowOf(f, 0));
-    if (nav.kind === "docs") return sortFiles(files.filter((f) => DOC_KINDS.includes(classify(f.name, f.mime)))).map((f) => fileRowOf(f, 0));
+    if (nav.kind === "recent") return sortFiles(files.filter((f) => !isGFolder(f))).sort((a, b) => String(b.updated_at ?? b.updated ?? "").localeCompare(String(a.updated_at ?? a.updated ?? ""))).slice(0, 50).map((f) => fileRowOf(f, 0));
+    if (nav.kind === "docs") return sortFiles(files.filter((f) => !isGFolder(f) && DOC_KINDS.includes(classify(f.name, f.mime)))).map((f) => fileRowOf(f, 0));
     // Drive tree view: one account's Google folders/files from the index.
     // Top level = children of the account's configured root ONLY. A folder
     // scope must never leak the rest of My Drive (the old parent-null fallback
@@ -405,7 +449,9 @@ export default function Explorer() {
       if (!tree) return [];
       const acctLabel = accounts.find((a) => a.id === driveView.accountId)?.label ?? "Drive";
       const idSet = new Set(tree.map((t) => t.googleId));
-      const top = (t: { parent: string | null }) => treeRoot ? t.parent === treeRoot : (!t.parent || !idSet.has(t.parent));
+      // Server already scoped this slice to the account subtree; placeless
+      // rows (no recorded parent) ride at the top rather than vanishing.
+      const top = (t: { parent: string | null }) => treeRoot ? (t.parent === treeRoot || !t.parent) : (!t.parent || !idSet.has(t.parent));
       const kids = tree.filter((t) => driveView.folderId ? t.parent === driveView.folderId : top(t));
       const gFolders = kids.filter((k) => k.mime === "application/vnd.google-apps.folder");
       const gFiles = kids.filter((k) => k.mime !== "application/vnd.google-apps.folder");
@@ -420,11 +466,14 @@ export default function Explorer() {
       const n = q.trim().toLowerCase();
       const has = (kind: TagKind, id: string) => tagSel.every((t) => tg.idsOf(kind, id).includes(t));
       return [...sortFolders(folders.filter((f) => has("folder", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => folderRowOf(f, 0)),
-        ...sortFiles(files.filter((f) => !f.id.startsWith("g:") && has("file", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => fileRowOf(f, 0))];
+        ...sortFiles(files.filter((f) => !f.id.startsWith("g:") && !isGFolder(f) && has("file", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => fileRowOf(f, 0)),
+        ...sortFiles(files.filter((f) => !f.id.startsWith("g:") && isGFolder(f) && has("file", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => gFolderRowOf(f, 0))];
     }
     if (q.trim()) {
       const n = q.trim().toLowerCase();
-      return [...sortFolders(folders.filter((f) => f.name.toLowerCase().includes(n))).map((f) => folderRowOf(f, 0)), ...sortFiles(files).map((f) => fileRowOf(f, 0))];
+      return [...sortFolders(folders.filter((f) => f.name.toLowerCase().includes(n))).map((f) => folderRowOf(f, 0)),
+        ...sortFiles(files.filter((f) => !isGFolder(f) && f.name.toLowerCase().includes(n))).map((f) => fileRowOf(f, 0)),
+        ...sortFiles(files.filter((f) => isGFolder(f) && f.name.toLowerCase().includes(n))).map((f) => gFolderRowOf(f, 0))];
     }
     if (tagFilter) {
       return [...sortFolders(folders.filter((f) => deptOf(f.id) === tagFilter)).map((f) => folderRowOf(f, 0)),
@@ -439,9 +488,24 @@ export default function Explorer() {
         out.push(folderRowOf(f, depth));
         if (expanded.has(f.id)) walk(f.id, depth + 1);
       }
-      for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === parent))) out.push(fileRowOf(f, depth));
+      for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === parent && !isGFolder(x)))) out.push(fileRowOf(f, depth));
     };
     walk(curFolder, 0);
+    // Google Drive folders live at the top level (no workspace parent):
+    // render as folders with inline expansion over google ancestry.
+    if (curFolder === null) {
+      const gWalk = (gid: string, depth: number) => {
+        for (const f of sortFiles(files.filter((x) => x.google_parent_id === gid && !isGFolder(x)))) out.push(fileRowOf(f, depth));
+        for (const f of sortFiles(files.filter((x) => x.google_parent_id === gid && isGFolder(x)))) {
+          out.push(gFolderRowOf(f, depth));
+          if (expanded.has(f.id) && f.google_file_id) gWalk(f.google_file_id, depth + 1);
+        }
+      };
+      for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === null && isGFolder(x)))) {
+        out.push(gFolderRowOf(f, 0));
+        if (expanded.has(f.id) && f.google_file_id) gWalk(f.google_file_id, 1);
+      }
+    }
     return out;
   }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, curFolder, deptOf, driveView, tree, treeRoot, accounts]);
 
@@ -483,6 +547,9 @@ export default function Explorer() {
         if (dv) setDriveView({ ...dv, folderId: gid, path: [...dv.path, { id: gid, name: r.name }] });
         return;
       }
+      // Indexed Google folders (created from a drive view) expand inline —
+      // they have no workspace path to navigate to.
+      if (r.googleFolder) { toggleExpand(r.id); return; }
       go({ kind: "root", path: pathTo(r.id) });
       return;
     }
@@ -1285,7 +1352,7 @@ export default function Explorer() {
                           <span className="text-[15px] truncate">{r.name}</span>
                         </div>
                         <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
-                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.file ? badge(r.file.backends, r.file.accountLabel) || "--" : "--"}</div>
+                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{locText(r)}</div>
                         <div role="gridcell" className="text-[11px] text-ink/75 truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : "--"}</div>
                         <div role="gridcell" className="text-[11px] text-ink/75 tabular-nums">{r.file?.size ? formatBytes(r.file.size) : "--"}</div>
                         <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.file ? kindLabel(r.file.name, cls) : "Folder"}</div>
@@ -1375,7 +1442,7 @@ export default function Explorer() {
               <dl className="mt-3 text-[12px]">
                 {[
                   ["Modified", sel.file ? fmtDate(sel.file.updated_at ?? sel.file.updated) : "--"],
-                  ["Location", sel.file ? badge(sel.file.backends, sel.file.accountLabel) || "--" : "--"],
+                  ["Location", locText(sel)],
                   ...(sel.file?.accountLabel ? [["Drive", sel.file.accountLabel] as [string, string] ] : []),
                   ["Owner", sel.file?.owner ? `${sel.file.owner.slice(0, 8)}…` : "--"],
                   ["SHA-256", sel.file?.hash ? `${sel.file.hash.slice(0, 12)}…` : "--"]
@@ -1412,7 +1479,7 @@ export default function Explorer() {
                 {sel.kind === "file" && nav.kind === "bin" && canPurge && (
                   <button onClick={() => setConfirmPurge({ id: sel.id, name: sel.name })} aria-label="Delete permanently" title="Delete permanently" className="px-4 min-h-[44px] text-muted hover:text-danger"><Trash2 size={19} strokeWidth={1.6} /></button>
                 )}
-                {sel.kind === "file" && !sel.id.startsWith("g:") && nav.kind !== "bin" && sel.file && (
+                {(sel.kind === "file" || sel.googleFolder) && !sel.id.startsWith("g:") && nav.kind !== "bin" && sel.file && (
                   <button onClick={() => setConfirmTrash(sel.file!)} aria-label="Move to Recovery Bin" className="px-4 min-h-[44px] hover:text-danger"><Trash2 size={19} strokeWidth={1.6} /></button>
                 )}
               </div>
@@ -1469,9 +1536,11 @@ export default function Explorer() {
                 disabled: !(r.file && indexed), why: needSync,
                 show: r.kind === "file" },
               { label: "Delete folder", icon: <Trash2 size={14} />, danger: true,
-                on: r.folder ? () => setConfirmFolderDelete(r.folder!) : undefined,
-                disabled: !r.folder,
-                why: isGFolder ? "Google folders are deleted in Drive itself" : undefined,
+                on: r.folder ? () => setConfirmFolderDelete(r.folder!)
+                  : (r.googleFolder && r.file ? () => setConfirmTrash(r.file!) : undefined),
+                disabled: !r.folder && !(r.googleFolder && r.file),
+                why: isGFolder ? "Google folders are deleted in Drive itself"
+                  : r.googleFolder ? "Trashed with everything inside it (90 days, recoverable)" : undefined,
                 show: r.kind === "folder" }
             ];
             return items.filter((i) => i.show !== false).map((i) => (

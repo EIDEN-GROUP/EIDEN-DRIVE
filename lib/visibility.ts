@@ -136,10 +136,12 @@ export async function folderUsable(db: SupabaseClient, me: Me, folderId: string 
 // In-scope google ids for one account: BFS from the configured root over the
 // indexed (google_file_id → parent) map. Rows whose ancestry doesn't reach the
 // root are out of scope (pre-scope leftovers, other trees) and stay hidden.
+// `noparent` = account rows with no recorded parent (old mirrors): placeless
+// but account-confined — shown, never leaked across accounts.
 export async function inScopeGoogleIds(
   db: { from(t: string): any },
   accountId: string, rootId: string | null
-): Promise<Set<string> | null> {
+): Promise<{ ids: Set<string>; noparent: Set<string> } | null> {
   if (!rootId) return null; // whole My Drive = everything in scope
   // Paginated: a 5000-row cap would silently amputate big drives and hide
   // in-scope files, so walk the whole account slice in chunks.
@@ -152,11 +154,14 @@ export async function inScopeGoogleIds(
     if (chunk.length < 1000) break;
   }
   const children = new Map<string, string[]>();
+  const noparent = new Set<string>();
   for (const r of rows) {
     if (r.google_parent_id) {
       const l = children.get(r.google_parent_id) ?? [];
       l.push(r.google_file_id);
       children.set(r.google_parent_id, l);
+    } else {
+      noparent.add(r.google_file_id);
     }
   }
   const seen = new Set<string>();
@@ -167,7 +172,42 @@ export async function inScopeGoogleIds(
     seen.add(id);
     for (const c of children.get(id) ?? []) if (!seen.has(c)) stack.push(c);
   }
-  return seen;
+  return { ids: seen, noparent };
+}
+
+// All indexed descendants of one Google folder (same account): the rows that
+// must follow it into the Recovery Bin on trash (Drive hides the subtree;
+// the index has to match) and out of it on restore.
+export async function googleDescendants(
+  db: { from(t: string): any },
+  accountId: string, googleId: string
+): Promise<string[]> {
+  const rows: { id: string; google_file_id: string; google_parent_id: string | null }[] = [];
+  for (let off = 0; ; off += 1000) {
+    const { data } = await db.from("file_index").select("id,google_file_id,google_parent_id")
+      .eq("drive_account_id", accountId).not("google_file_id", "is", null).range(off, off + 999);
+    const chunk = ((data ?? []) as { id: string; google_file_id: string; google_parent_id: string | null }[]);
+    rows.push(...chunk);
+    if (chunk.length < 1000) break;
+  }
+  const children = new Map<string, string[]>();
+  for (const r of rows) {
+    if (r.google_parent_id) {
+      const l = children.get(r.google_parent_id) ?? [];
+      l.push(r.id);
+      children.set(r.google_parent_id, l);
+    }
+  }
+  const out: string[] = [];
+  const stack = [...(children.get(googleId) ?? [])];
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (out.includes(id)) continue;
+    out.push(id);
+    const gid = rows.find((r) => r.id === id)?.google_file_id;
+    if (gid) for (const c of children.get(gid) ?? []) stack.push(c);
+  }
+  return out;
 }
 
 // Byte-path scope enforcement. The listing hides out-of-scope rows, but every
@@ -182,7 +222,7 @@ export async function inScopeGoogleIds(
 // Indexed rows: pass when there is no google pin, no account pin, or the
 // account is unscoped/disabled (those cases are handled by their own rules).
 export interface ScopeAccount { id: string; root_id: string | null; status: string }
-const scopeCache = new Map<string, { at: number; ids: Set<string> }>();
+const scopeCache = new Map<string, { at: number; ids: Set<string>; noparent: Set<string> }>();
 const SCOPE_TTL = 60_000;
 export function bustScopeCache(accountId?: string) {
   if (accountId) scopeCache.delete(accountId);
@@ -198,12 +238,16 @@ export async function googleInScope(
   const acct = accounts.find((a) => a.id === accountId);
   if (!acct || acct.status !== "active" || !acct.root_id) return true;
   const hit = scopeCache.get(accountId);
-  let ids = hit && Date.now() - hit.at < SCOPE_TTL ? hit.ids : null;
-  if (!ids) {
-    ids = (await inScopeGoogleIds(db, accountId, acct.root_id)) ?? new Set<string>();
-    scopeCache.set(accountId, { at: Date.now(), ids });
+  let cached = hit && Date.now() - hit.at < SCOPE_TTL ? hit : null;
+  if (!cached) {
+    const scope = await inScopeGoogleIds(db, accountId, acct.root_id);
+    const ids = scope?.ids ?? new Set<string>();
+    const noparent = scope?.noparent ?? new Set<string>();
+    scopeCache.set(accountId, { at: Date.now(), ids, noparent });
+    cached = { at: Date.now(), ids, noparent };
   }
-  return ids.has(googleId);
+  // Placeless account rows show (account-confined, never cross-account).
+  return cached.ids.has(googleId) || cached.noparent.has(googleId);
 }
 
 // Live g: ids have no index row: walk the file's real Drive ancestry (≤12

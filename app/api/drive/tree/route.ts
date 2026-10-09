@@ -29,15 +29,23 @@ export async function GET(req: Request) {
     .order("name")
     .limit(2000);
   if (error) return Response.json({ error: error.message }, { status: 500 });
+  // Binned rows hide here too (they live on the Recovery Bin page).
+  const { data: binRows } = await db.from("recovery_bin").select("file_id").limit(5000);
+  const binned = new Set(((binRows ?? []) as { file_id: string }[]).map((b) => b.file_id));
+  let all = ((data ?? []) as { id: string; google_file_id: string; google_parent_id: string | null }[])
+    .filter((r) => !binned.has(r.id));
   // Scope server-side (never trust the client to trim the tree): on a scoped
   // account only the root's subtree leaves this endpoint. Navigating to an
-  // out-of-scope folder id by hand finds nothing here.
-  let rows = (data ?? []) as { google_file_id: string }[];
+  // out-of-scope folder id by hand finds nothing here. Placeless rows
+  // (no recorded parent) stay visible — account-confined, never cross-account.
+  let rows = all;
   if (acct.root_id) {
-    const allowed = await inScopeGoogleIds(db, acct.id, acct.root_id);
-    if (allowed) rows = (data ?? []).filter((r: { google_file_id: string }) => allowed.has(r.google_file_id));
+    const scope = await inScopeGoogleIds(db, acct.id, acct.root_id);
+    if (scope) {
+      rows = all.filter((r) => scope.ids.has(r.google_file_id) || (r.google_parent_id == null && scope.noparent.has(r.google_file_id)));
+    }
     // The scope root itself (when indexed) stays visible as the tree's anchor.
-    const rootRow = (data ?? []).find((r: { google_file_id: string }) => r.google_file_id === acct.root_id);
+    const rootRow = all.find((r) => r.google_file_id === acct.root_id);
     if (rootRow && !rows.includes(rootRow)) rows = [rootRow, ...rows];
   }
   // The client scopes the tree top to this root: children of rootId only.
