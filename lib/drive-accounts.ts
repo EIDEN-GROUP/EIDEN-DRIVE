@@ -138,6 +138,46 @@ export async function purgeAccountRows(db: Db, accountId: string): Promise<{ del
   }
   return { deleted: targetIds.length, unpinned };
 }
+
+// One-click orphan clear (the Explorer "Clear now" button): pre-multi-account
+// leftovers carry a google pin but no account, so no drive can stream, trash
+// or scope them — managers see them forever, members get a permanent notice.
+// Pure orphans are deleted (audit history detached first: audit_logs has no
+// cascade); hybrids keep Storage bytes and lose the google pin. Drive bytes
+// are never touched. Idempotent: zero orphans → { deleted: 0, unpinned: 0 }.
+export async function purgeOrphanGoogleRows(db: Db): Promise<{ deleted: number; unpinned: number }> {
+  const ids: string[] = [];
+  for (let off = 0; ; off += 1000) {
+    const { data: chunk, error: cErr } = await db.from("file_index").select("id")
+      .is("drive_account_id", null).not("google_file_id", "is", null).is("storage_path", null).range(off, off + 999);
+    if (cErr) throw new Error(cErr.message);
+    if (!chunk?.length) break;
+    ids.push(...(chunk as { id: string }[]).map((c) => c.id));
+    if (chunk.length < 1000) break;
+  }
+  for (let i = 0; i < ids.length; i += 200) {
+    const inList = ids.slice(i, i + 200);
+    // audit_logs.file_id is a plain FK (no cascade, no null by default in all
+    // schemas): detach first or the delete is refused. History stays, detached.
+    const { error: uErr } = await db.from("audit_logs").update({ file_id: null }).in("file_id", inList);
+    if (uErr) throw new Error(uErr.message);
+    const { error: bErr } = await db.from("recovery_bin").delete().in("file_id", inList);
+    if (bErr) throw new Error(bErr.message);
+    const { error: aErr } = await db.from("approvals").delete().in("file_id", inList);
+    if (aErr) throw new Error(aErr.message);
+    const { error: dErr } = await db.from("file_index").delete().in("id", inList);
+    if (dErr) throw new Error(dErr.message);
+  }
+  let unpinned = 0;
+  const { data: hybrid } = await db.from("file_index").select("id,backends")
+    .is("drive_account_id", null).not("google_file_id", "is", null).not("storage_path", "is", null).limit(5000);
+  for (const h of (hybrid ?? []) as { id: string; backends: string[] }[]) {
+    const backends = (h.backends ?? []).filter((b) => b !== "google");
+    await db.from("file_index").update({ google_file_id: null, google_parent_id: null, drive_account_id: null, backends: backends.length ? backends : ["local"] }).eq("id", h.id);
+    unpinned++;
+  }
+  return { deleted: ids.length, unpinned };
+}
 export async function pickUploadAccount(size: number, preferId?: string | null): Promise<{ account: (DriveAccount & { refresh_token: string }) | null; reason?: string; quotas?: Record<string, AccountQuota> }> {
   const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
   const live = accounts.filter((a) => a.status === "active");

@@ -94,10 +94,8 @@ export default function Explorer() {
   const [confirmPurge, setConfirmPurge] = useState<{ id: string; name: string } | null>(null);
   const [purging, setPurging] = useState(false);
   const [loading, setLoading] = useState(true);
-  // Rows pinned under an old/removed Google root: filtered server-side so the
-  // index can't leak files a re-scoped drive no longer contains.
-  const [hiddenLegacy, setHiddenLegacy] = useState(0);
   // Pre-scope leftovers (managers only): orphan rows visible to you alone.
+  // Members never see a notice — hidden rows stay silently filtered.
   const [orphanCount, setOrphanCount] = useState(0);
   const [q, setQ] = useState("");
   const [hist, setHist] = useState<Nav[]>([{ kind: "root", path: [] }]);
@@ -212,7 +210,13 @@ export default function Explorer() {
   const [syncing, setSyncing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const PAGE = 50;
+  // Chunk size follows the "Rows per page" picker (pg.size); the auto-loader
+  // below pulls one chunk at a time until the server says there is no more.
+  const sizeRef = useRef(50);
+  // Latest files for the append path: a silent refresh may replace the array
+  // while a page is in flight — dedupe against the truth at resolve time, not
+  // the stale closure, so overlapping pages can never double a file.
+  const filesRef = useRef<FileRow[]>([]);
   const [uploading, setUploading] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   // Load failure worth showing (with Retry) — silent background refreshes only toast.
@@ -220,6 +224,7 @@ export default function Explorer() {
   // Clipboard survives reloads; silent 60s auto-refresh (no skeleton flash).
   const qRef = useRef(q);
   qRef.current = q;
+  filesRef.current = files;
   const lastGoogleError = useRef<string | null>(null);
 
   const nav = hist[hi];
@@ -232,6 +237,7 @@ export default function Explorer() {
     // never spin the skeletons forever (the "root stopped responding" bug).
     const c = new AbortController();
     const t = setTimeout(() => c.abort(new Error("request timed out after 30s")), 30_000);
+    const limit = sizeRef.current;
     const get = (url: string) => fetch(url, { signal: c.signal }).then(async (r) => {
       if (r.status === 401) throw new Error("signed out — sign in again and retry");
       if (!r.ok) {
@@ -243,13 +249,22 @@ export default function Explorer() {
     try {
       const [fr, dr, br] = await Promise.all([
         append ? null : get("/api/folders"),
-        get(`/api/drive?q=${encodeURIComponent(query)}&limit=${PAGE}&offset=${from}`),
+        get(`/api/drive?q=${encodeURIComponent(query)}&limit=${limit}&offset=${from}${append ? "&append=1" : ""}`),
         append ? null : get("/api/drive/bin")
       ]);
       if (fr) setFolders(fr.results ?? []);
-      setFiles((prev) => append ? [...prev, ...(dr.results ?? [])] : (dr.results ?? []));
-      setHasMore((dr.results ?? []).length >= PAGE);
-      if (!append) setHiddenLegacy(typeof dr.hiddenLegacy === "number" ? dr.hiddenLegacy : 0);
+      if (append) {
+        const incoming = (dr.results ?? []) as FileRow[];
+        const seen = new Set(filesRef.current.map((f) => f.id));
+        const fresh = incoming.filter((f) => !seen.has(f.id));
+        if (fresh.length) setFiles((prev) => [...prev, ...fresh.filter((f) => !prev.some((p) => p.id === f.id))]);
+        // A page that adds nothing new means the end (order shifted under us
+        // or the server is repeating itself) — stop instead of looping forever.
+        setHasMore(fresh.length > 0 && (typeof dr.hasMore === "boolean" ? dr.hasMore : incoming.length >= limit));
+      } else {
+        setFiles((dr.results ?? []) as FileRow[]);
+        setHasMore(typeof dr.hasMore === "boolean" ? dr.hasMore : ((dr.results ?? []).length >= limit));
+      }
       if (!append) setOrphanCount(typeof dr.orphanCount === "number" ? dr.orphanCount : 0);
       if (br) { setBin(br.results ?? []); setCanPurge(!!br.canPurge); }
       if (dr.google_error && dr.google_error !== lastGoogleError.current) {
@@ -271,10 +286,27 @@ export default function Explorer() {
   }, []);
 
   function loadMore() {
+    // Guarded twice (here + the sentinel effect): never stack concurrent pages.
+    if (loadingMore || loading) return;
+    if (!hasMore) return;
     // Live Google rows (g:*) aren't in the index — offset counts indexed rows only.
     const indexed = files.filter((f) => !f.id.startsWith("g:")).length;
     load(q, indexed, true);
   }
+  const loadMoreRef = useRef(loadMore);
+  loadMoreRef.current = loadMore;
+  // Infinite scroll: when the end sentinel scrolls into view, pull the next
+  // chunk automatically (chunk = the "Rows per page" picker). No button.
+  const moreRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = moreRef.current;
+    if (!el || !hasMore || loading) return;
+    const io = new IntersectionObserver((es) => {
+      if (es.some((e) => e.isIntersecting)) loadMoreRef.current();
+    }, { rootMargin: "600px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hasMore, loading, loadingMore, nav.kind, q]);
 
   useEffect(() => {
     let dead = false;
@@ -393,21 +425,27 @@ export default function Explorer() {
         ...sortFiles(files.filter((f) => deptOf(f.folder) === tagFilter)).map((f) => fileRowOf(f, 0))];
     }
     const out: Row[] = [];
+    // Grid is a flat gallery: it descends every folder regardless of the
+    // list's collapse state, so a collapsed tree never hides files from grid.
+    const descend = (id: string) => view === "grid" || expanded.has(id);
     const walk = (parent: string | null, depth: number) => {
       for (const f of sortFolders(folders.filter((x) => (x.parent ?? null) === parent))) {
         out.push(folderRowOf(f, depth));
-        if (expanded.has(f.id)) walk(f.id, depth + 1);
+        if (descend(f.id)) walk(f.id, depth + 1);
       }
       for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === parent))) out.push(fileRowOf(f, depth));
     };
     walk(curFolder, 0);
     return out;
-  }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, curFolder, deptOf, driveView, tree, treeRoot, accounts]);
+  }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, view, curFolder, deptOf, driveView, tree, treeRoot, accounts]);
 
   // Pagination: files/folders (list + grid) and the Recovery Bin page independently; any navigation/filter/sort resets to page 1.
   const pg = usePagination(rows, { defaultSize: 50, sizes: [25, 50, 100, 200], storageKey: "files",
     resetKey: `${nav.kind}|${nav.path.join("/")}|${q}|${tagSel.join(",")}|${tagFilter}|${driveView?.accountId}|${driveView?.folderId}|${sort.key}${sort.dir}` });
   const binPg = usePagination(bin, { defaultSize: 25, sizes: [10, 25, 50, 100], storageKey: "bin" });
+  // Server chunk size tracks the picker: change "Rows per page" and the next
+  // auto-load pulls exactly that many. (Assign during render — refs by design.)
+  sizeRef.current = pg.size;
 
   const sel: Row | null = useMemo(() => {
     if (!selKey) return null;
@@ -447,6 +485,21 @@ export default function Explorer() {
   }
   function toggleExpand(id: string) {
     setExpanded((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }
+  // View switches own the tree state, always — even overriding a manual
+  // expand/collapse. Entering grid flattens everything (collapse all, so a
+  // returning list never inherits a half-collapsed tree); entering list opens
+  // the whole tree again. Grid itself ignores `expanded` and shows all files.
+  function expandAll() {
+    setExpanded(new Set(
+      folders.filter((f) => folders.some((x) => x.parent === f.id) || files.some((x) => x.folder === f.id)).map((f) => f.id)
+    ));
+  }
+  function switchView(v: View) {
+    if (v === view) return;
+    if (v === "list") expandAll();
+    else setExpanded(new Set());
+    setView(v);
   }
   function onRowKey(e: React.KeyboardEvent, r: Row) {
     if (e.key === "Enter") open(r);
@@ -566,6 +619,25 @@ export default function Explorer() {
       setBin((b) => b.filter((x) => x.file_id !== confirmPurge.id));
       setSelKey(null); setConfirmPurge(null); load(q, 0, false, true);
     } else { toast({ text: d.error ?? "Couldn't delete the file.", tone: "err" }); setConfirmPurge(null); }
+  }
+
+  // Orphan clear (manager card): one click deletes the pre-scope leftovers,
+  // then reloads so the counts — and the card itself — disappear.
+  const [clearing, setClearing] = useState(false);
+  async function clearOrphans() {
+    if (clearing) return;
+    setClearing(true);
+    try {
+      const r = await fetch("/api/drive/clear-orphans", { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error ?? "clear failed");
+      toast({ text: `Cleared ${d.deleted} leftover${d.deleted === 1 ? "" : "s"}${d.unpinned ? `, unpinned ${d.unpinned}` : ""}. Now run Sync from Google.`, tone: "ok" });
+      load(q);
+    } catch (e) {
+      toast({ text: e instanceof Error ? e.message : "Clear failed.", tone: "err" });
+    } finally {
+      setClearing(false);
+    }
   }
 
   async function restore(id: string, name: string) {
@@ -967,8 +1039,8 @@ export default function Explorer() {
                 className="w-32 sm:w-52 min-h-[44px] pl-8 pr-2 rounded-md border border-line bg-surface text-[13px] placeholder:text-muted focus:border-brand focus:outline-none" />
             </div>
             <div role="group" aria-label="View" className="flex rounded-md overflow-hidden">
-              <button onClick={() => setView("list")} aria-pressed={view === "list"} aria-label="List view" className={`size-11 grid place-items-center ${view === "list" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutList size={19} strokeWidth={1.6} /></button>
-              <button onClick={() => setView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
+              <button onClick={() => switchView("list")} aria-pressed={view === "list"} aria-label="List view" className={`size-11 grid place-items-center ${view === "list" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutList size={19} strokeWidth={1.6} /></button>
+              <button onClick={() => switchView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
               <button onClick={toggleThumbs} aria-pressed={thumbs} aria-label={thumbs ? "Hide file covers" : "Show file covers"}
                 title={thumbs ? "Hide covers" : "Show covers (images, video frames)"}
                 className={`size-11 grid place-items-center ${thumbs ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><ImageIcon size={19} strokeWidth={1.6} /></button>
@@ -1066,14 +1138,17 @@ export default function Explorer() {
                 <button onClick={() => openDrive(driveView.accountId)} className="text-brand font-medium hover:underline min-h-[36px]">Retry</button>
               </div>
             )}
-            {!driveView && hiddenLegacy > 0 && (
-              <div className="shrink-0 mx-3 mt-2 px-3 py-2 rounded-lg border border-line bg-soft text-[12.5px] text-ink/75" role="status">
-                {hiddenLegacy} older file{hiddenLegacy === 1 ? " is" : "s are"} hidden — {hiddenLegacy === 1 ? "it sits" : "they sit"} under a previous drive location. Ask an admin to re-sync or move {hiddenLegacy === 1 ? "it" : "them"}.
-              </div>
-            )}
-            {!driveView && hiddenLegacy === 0 && orphanCount > 0 && (
-              <div className="shrink-0 mx-3 mt-2 px-3 py-2 rounded-lg border border-line bg-soft text-[12.5px] text-ink/75" role="status">
-                {orphanCount} pre-scope leftover{orphanCount === 1 ? "" : "s"} — visible only to you. Clear {orphanCount === 1 ? "it" : "them"} from Storage → Resync clean, then Sync.
+            {!driveView && orphanCount > 0 && (
+              <div className="shrink-0 mx-3 mt-2 px-3 py-2.5 rounded-lg border border-line bg-soft text-[12.5px] text-ink/80" role="status">
+                <p>
+                  <strong>{orphanCount} pre-scope leftover{orphanCount === 1 ? "" : "s"}</strong> — old Google rows no drive owns, visible only to you.
+                  Clear them, then run <strong>Sync from Google</strong> (More actions menu) to rebuild the index inside the current scope.
+                </p>
+                <p className="mt-1 text-muted">Clear deletes the orphan rows and detaches their audit history. Storage bytes are kept. Drive bytes are never touched.</p>
+                <button onClick={clearOrphans} disabled={clearing}
+                  className="mt-2 min-h-[40px] px-4 rounded-md bg-brand text-white text-[13px] font-medium disabled:opacity-60 hover:brightness-110 active:brightness-95 transition">
+                  {clearing ? "Clearing…" : `Clear ${orphanCount} leftover${orphanCount === 1 ? "" : "s"} now`}
+                </button>
               </div>
             )}
             <div className="relative flex-1 min-h-0 overflow-auto"
@@ -1216,12 +1291,12 @@ export default function Explorer() {
                   })}
                 </div>
               )}
-              {hasMore && !loading && nav.kind !== "bin" && pg.page === pg.pages && (
-                <div className="p-4 grid place-items-center">
-                  <button onClick={loadMore} disabled={loadingMore}
-                    className="min-h-[44px] px-6 rounded-md border border-line text-sm hover:bg-tint disabled:opacity-50">
-                    {loadingMore ? "Loading…" : "Load more"}
-                  </button>
+              {nav.kind !== "bin" && hasMore && !loading && (
+                <div ref={moreRef} aria-hidden="true" className="h-1 shrink-0" />
+              )}
+              {loadingMore && (
+                <div className="p-4 grid place-items-center" role="status">
+                  <p className="text-[13px] text-muted">Loading more…</p>
                 </div>
               )}
             </div>
