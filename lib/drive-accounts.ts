@@ -93,17 +93,17 @@ export async function quotaFor(acct: DriveAccount & { refresh_token: string }): 
 // Drop one account's Google-mirrored index rows (FK-safe, chunked).
 // Pure mirrors are deleted; hybrid rows (Storage bytes exist) keep the bytes and
 // lose the Google pin. Returns { deleted, unpinned }.
-// Also sweeps pre-multi-account orphans (google pin, no account): with accounts
-// in play those rows are unreachable leftovers — managers see them forever and
-// members get a permanent resync notice. Same treatment: no Storage copy means
-// delete, Storage copy means unpin. Drive bytes are never touched.
-export async function purgeAccountRows(db: Db, accountId: string): Promise<{ deleted: number; unpinned: number }> {
+// Orphan sweep (pre-multi-account rows: google pin, no account) runs ONLY when
+// opts.sweepOrphans is set — i.e. the account is scoped to a folder, so those
+// rows are definitionally leftovers of a previous location. On an unscoped
+// (whole-drive) account they may be the only index of live files: hands off.
+export async function purgeAccountRows(db: Db, accountId: string, opts?: { sweepOrphans?: boolean }): Promise<{ deleted: number; unpinned: number }> {
   const targetIds: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sweeps: ((q: any) => any)[] = [
     (q) => q.eq("drive_account_id", accountId),
-    (q) => q.is("drive_account_id", null),
   ];
+  if (opts?.sweepOrphans) sweeps.push((q) => q.is("drive_account_id", null));
   for (const filter of sweeps) {
     for (let off = 0; ; off += 1000) {
       const base = db.from("file_index").select("id").not("google_file_id", "is", null).is("storage_path", null);

@@ -39,6 +39,13 @@ export async function POST(req: Request) {
   // Only managers may choose a department tag explicitly; members inherit their own.
   // Write via service role after the checks (folders_insert RLS is a backstop, not the gate).
   const dept = me.role === "member" ? me.department_tag : body.dept ?? me.department_tag;
+  const db = adminClient();
+  // A folder can only be born where you may write: no nesting under another
+  // department's folder, no orphaning under a nonexistent id.
+  if (body.parent) {
+    const dst = await folderUsable(db, me, body.parent);
+    if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
+  }
   const { data, error } = await adminClient().from("folders")
     .insert({ name: body.name, parent: body.parent ?? null, dept, classification: "Internal" })
     .select("id").single();

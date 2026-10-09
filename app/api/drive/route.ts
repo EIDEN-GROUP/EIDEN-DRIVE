@@ -15,6 +15,10 @@ export async function GET(req: Request) {
   const q = (searchParams.get("q") ?? "").slice(0, 120);
   const limit = Math.min(Math.max(Number(searchParams.get("limit") ?? 50) || 50, 1), 100);
   const offset = Math.max(Number(searchParams.get("offset") ?? 0) || 0, 0);
+  // Append pages (infinite scroll) carry no live rows: live Google hits are
+  // computed fresh per request and would re-arrive on every page, doubling
+  // every file. Fresh (non-append) loads still merge them.
+  const append = searchParams.get("append") === "1";
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
   const supa = createClient();
@@ -49,8 +53,12 @@ export async function GET(req: Request) {
   // group can't ride the same PostgREST query as the permission legs).
   // Managers get their own count: those rows are VISIBLE to them, so their
   // notice says "clear them" (Storage → Resync clean + Sync) instead of "hidden".
+  // Both counts are ZERO unless at least one drive is actually scoped: on an
+  // unscoped (whole-drive) setup there is no "previous location", so there is
+  // nothing to flag and nothing to clear.
+  const scopedAny = accounts.some((a) => a.status === "active" && a.root_id);
   let hiddenLegacy = 0, orphanCount = 0;
-  {
+  if (scopedAny) {
     const { count } = await supa.from("file_index").select("id", { count: "exact", head: true })
       .is("drive_account_id", null).not("google_file_id", "is", null);
     if (isManager(me.role)) orphanCount = count ?? 0;
@@ -78,10 +86,24 @@ export async function GET(req: Request) {
   if (!isManager(me.role)) {
     scoped = scoped.filter((r) => !r.google_file_id || r.drive_account_id);
   }
+  // One Drive file synced under two connected accounts (shared files) owns
+  // one index row PER account — collapse them so no file ever shows twice.
+  {
+    const seenGoogle = new Set<string>();
+    scoped = scoped.filter((r) => {
+      if (!r.google_file_id) return true;
+      if (seenGoogle.has(r.google_file_id)) return false;
+      seenGoogle.add(r.google_file_id);
+      return true;
+    });
+  }
+  const hasMore = scoped.length >= limit;
 
   // 2) live Google fallback, across EVERY connected account — NEVER allowed to
   // 500 the route. A dead token or unreachable root degrades that account to
   // index-only + a reason string; other accounts still merge.
+  // Skipped on append pages: live hits are recomputed per request and would
+  // re-arrive on every page, doubling each file in infinite scroll.
   type Live = { id?: string | null; name?: string | null; mimeType?: string | null; size?: string | null };
   const live: { id: string; name: string; mime?: string; size: number; backends: string[]; accountLabel?: string }[] = [];
   let googleNote = "ok";
@@ -103,15 +125,17 @@ export async function GET(req: Request) {
       errors.push(`"${label}": ${googleErrorMessage(m)}`);
     }
   }
-  if (accounts.some((a) => a.status === "active")) {
-    for (const a of accounts.filter((x) => x.status === "active")) {
-      if (live.length >= 10) break;
-      const d = clientFor(a);
-      if (!d) continue;
-      await liveFrom(a.label, a.id, () => listDriveFiles(q, undefined, { drive: d, rootId: a.root_id ?? "" }));
+  if (!append) {
+    if (accounts.some((a) => a.status === "active")) {
+      for (const a of accounts.filter((x) => x.status === "active")) {
+        if (live.length >= 10) break;
+        const d = clientFor(a);
+        if (!d) continue;
+        await liveFrom(a.label, a.id, () => listDriveFiles(q, undefined, { drive: d, rootId: a.root_id ?? "" }));
+      }
+    } else {
+      await liveFrom("Primary", null, () => listDriveFiles(q));
     }
-  } else {
-    await liveFrom("Primary", null, () => listDriveFiles(q));
   }
   if (errors.length) google_error = `${errors.join(" ")} Showing indexed files.`;
   const indexed = scoped.map((r: Row) => ({
@@ -131,5 +155,5 @@ export async function GET(req: Request) {
   const merged = [...indexed, ...fresh];
 
   await logAudit({ actor: me.id, actor_name: me.username, action: "view", req, detail: { q } });
-  return Response.json({ q, results: merged, google: googleNote, google_error, hiddenLegacy, orphanCount });
+  return Response.json({ q, results: merged, google: googleNote, google_error, hiddenLegacy, orphanCount, hasMore });
 }

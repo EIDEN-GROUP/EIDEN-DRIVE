@@ -88,6 +88,12 @@ export async function PATCH(req: Request) {
   const { error } = await db.from("drive_accounts").update(patch).eq("id", p.data.id);
   if (error) return Response.json({ error: error.message }, { status: 500 });
   bustAccountCache();
+  // A root change redraws every scope boundary — drop cached scope sets too
+  // or byte paths enforce yesterday's tree for up to 60 s.
+  if (patch.root_id !== undefined) {
+    const { bustScopeCache } = await import("@/lib/visibility");
+    bustScopeCache(p.data.id);
+  }
   await logAudit({ actor: me.id, actor_name: me.username, action: "edit", req, detail: { drive_account: p.data.id, ...patch, root_id: patch.root_id !== undefined ? "set" : undefined } });
   return Response.json({ ok: true });
 }
@@ -114,6 +120,8 @@ export async function DELETE(req: Request) {
   const { error } = await db.from("drive_accounts").delete().eq("id", p.data.id);
   if (error) return Response.json({ error: error.message }, { status: 500 });
   bustAccountCache();
+  const { bustScopeCache } = await import("@/lib/visibility");
+  bustScopeCache(p.data.id);
   await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { drive_account: p.data.id, ...purged } });
   return Response.json({ ok: true, ...purged });
 }

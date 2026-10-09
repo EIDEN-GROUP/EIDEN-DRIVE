@@ -4,6 +4,7 @@ import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { getAccounts, type DriveAccount } from "@/lib/drive-accounts";
+import { inScopeGoogleIds } from "@/lib/visibility";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ accountId: z.string().uuid() });
@@ -28,7 +29,18 @@ export async function GET(req: Request) {
     .order("name")
     .limit(2000);
   if (error) return Response.json({ error: error.message }, { status: 500 });
+  // Scope server-side (never trust the client to trim the tree): on a scoped
+  // account only the root's subtree leaves this endpoint. Navigating to an
+  // out-of-scope folder id by hand finds nothing here.
+  let rows = (data ?? []) as { google_file_id: string }[];
+  if (acct.root_id) {
+    const allowed = await inScopeGoogleIds(db, acct.id, acct.root_id);
+    if (allowed) rows = (data ?? []).filter((r: { google_file_id: string }) => allowed.has(r.google_file_id));
+    // The scope root itself (when indexed) stays visible as the tree's anchor.
+    const rootRow = (data ?? []).find((r: { google_file_id: string }) => r.google_file_id === acct.root_id);
+    if (rootRow && !rows.includes(rootRow)) rows = [rootRow, ...rows];
+  }
   // The client scopes the tree top to this root: children of rootId only.
   // (parent-less legacy rows predate scoping — resync-clean removes them.)
-  return Response.json({ results: data ?? [], rootId: acct.root_id ?? null });
+  return Response.json({ results: rows, rootId: acct.root_id ?? null });
 }

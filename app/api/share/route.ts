@@ -2,7 +2,8 @@ export const dynamic = "force-dynamic";
 
 import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
-import { canTouch } from "@/lib/visibility";
+import { canTouch, googleInScope } from "@/lib/visibility";
+import { getAccounts } from "@/lib/drive-accounts";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { newToken, tokenHash } from "@/lib/share";
@@ -17,12 +18,18 @@ export async function POST(req: Request) {
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
   const db = adminClient();
-  const { data: f } = await db.from("file_index").select("id,name,owner,folder").eq("id", p.data.file_id).maybeSingle();
-  const file = f as { id: string; name: string; owner: string; folder: string | null } | null;
+  const { data: f } = await db.from("file_index").select("id,name,owner,folder,google_file_id,drive_account_id").eq("id", p.data.file_id).maybeSingle();
+  const file = f as { id: string; name: string; owner: string; folder: string | null; google_file_id?: string | null; drive_account_id?: string | null } | null;
   if (!file) return Response.json({ error: "file not found" }, { status: 404 });
   // Sharing = read access: owner, manager, or department-tag match.
   const gate = await canTouch(db, me, file);
   if (!gate.ok) return Response.json({ error: gate.reason ?? "only files in your space can be shared" }, { status: 403 });
+  // Scope: a public link must never publish a tree the workspace hides.
+  if (file.google_file_id) {
+    if (!(await googleInScope(db, await getAccounts(), file.drive_account_id, file.google_file_id))) {
+      return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+    }
+  }
   const token = newToken();
   const { error } = await db.from("share_links").insert({
     token_hash: tokenHash(token), file_id: file.id, created_by: me.id,

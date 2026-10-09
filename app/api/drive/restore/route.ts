@@ -18,6 +18,11 @@ export async function POST(req: Request) {
   if (p.error) return p.error;
   const { file_id } = p.data;
   const supa = createClient();
+  // Restoring something that isn't in the bin is a no-op that still audits —
+  // refuse so "restore" always means something.
+  const adb = adminClient();
+  const { data: inBin } = await adb.from("recovery_bin").select("file_id").eq("file_id", file_id).maybeSingle();
+  if (!inBin) return Response.json({ error: "file is not in the Recovery Bin" }, { status: 409 });
   const { data: f } = await supa.from("file_index").select("google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
   if (f?.google_file_id) {
     try {

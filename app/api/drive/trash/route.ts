@@ -7,7 +7,8 @@ import { trashDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile, needsApproval } from "@/lib/roles";
-import { canTouch } from "@/lib/visibility";
+import { canTouch, googleInScope } from "@/lib/visibility";
+import { getAccounts } from "@/lib/drive-accounts";
 import { notify } from "@/lib/alerts";
 import { parseJson } from "@/lib/http";
 
@@ -29,6 +30,14 @@ export async function POST(req: Request) {
   // Confinement: members trash only own / department-tagged items.
   const gate = await canTouch(adminClient(), me, f as { id: string; owner: string; folder: string | null });
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
+  // Scope: trashing also deletes the Google bytes — never reach into a tree
+  // the workspace hides.
+  const tRow = f as { google_file_id?: string | null; drive_account_id?: string | null };
+  if (tRow.google_file_id) {
+    if (!(await googleInScope(adminClient(), await getAccounts(), tRow.drive_account_id, tRow.google_file_id))) {
+      return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+    }
+  }
 
   let classification = "Internal";
   if (f.folder) {

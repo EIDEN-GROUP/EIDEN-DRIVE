@@ -6,8 +6,8 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { bucketFor } from "@/lib/storage";
-import { driveCtxFor } from "@/lib/drive-accounts";
-import { canTouch } from "@/lib/visibility";
+import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
+import { canTouch, googleInScope } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 // Text-file editing save path. Only plain-text formats are accepted here
@@ -37,6 +37,14 @@ export async function PATCH(req: Request) {
   // Owner, manager, or department-tag match (folder dept or same-named tag).
   const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null });
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
+  // Scope, like the listing: editing bytes the workspace hides is still
+  // touching another tree.
+  const cfRow = f as { google_file_id?: string | null; drive_account_id?: string | null };
+  if (cfRow.google_file_id) {
+    if (!(await googleInScope(db, await getAccounts(), cfRow.drive_account_id, cfRow.google_file_id))) {
+      return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+    }
+  }
   if (!editable(f.mime, f.name)) {
     return Response.json({ error: "this file type is view-only (binary formats can't be edited as text)" }, { status: 400 });
   }

@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DriveLike } from "@/lib/google-drive";
 
 // Workspace visibility: who may SEE a file/folder.
 //   - admins/managers: everything (they run the place).
@@ -167,4 +168,58 @@ export async function inScopeGoogleIds(
     for (const c of children.get(id) ?? []) if (!seen.has(c)) stack.push(c);
   }
   return seen;
+}
+
+// Byte-path scope enforcement. The listing hides out-of-scope rows, but every
+// endpoint that TOUCHES bytes must check again: row UUIDs outlive listings
+// (a member who saw a file before a re-scope keeps its id forever), and live
+// g: ids are caller-supplied. Without this, ?raw=1&file_id=g:<acct>:<anyId>
+// streams ANY file in the account to ANY signed-in member.
+//
+// Cached per account (60 s): scope sets only change on re-scope + resync.
+// Fail-closed: an unresolvable scope denies.
+//
+// Indexed rows: pass when there is no google pin, no account pin, or the
+// account is unscoped/disabled (those cases are handled by their own rules).
+export interface ScopeAccount { id: string; root_id: string | null; status: string }
+const scopeCache = new Map<string, { at: number; ids: Set<string> }>();
+const SCOPE_TTL = 60_000;
+export function bustScopeCache(accountId?: string) {
+  if (accountId) scopeCache.delete(accountId);
+  else scopeCache.clear();
+}
+export async function googleInScope(
+  db: { from(t: string): any },
+  accounts: ScopeAccount[],
+  accountId?: string | null,
+  googleId?: string | null
+): Promise<boolean> {
+  if (!googleId || !accountId) return true;
+  const acct = accounts.find((a) => a.id === accountId);
+  if (!acct || acct.status !== "active" || !acct.root_id) return true;
+  const hit = scopeCache.get(accountId);
+  let ids = hit && Date.now() - hit.at < SCOPE_TTL ? hit.ids : null;
+  if (!ids) {
+    ids = (await inScopeGoogleIds(db, accountId, acct.root_id)) ?? new Set<string>();
+    scopeCache.set(accountId, { at: Date.now(), ids });
+  }
+  return ids.has(googleId);
+}
+
+// Live g: ids have no index row: walk the file's real Drive ancestry (≤12
+// hops) and accept only if it reaches the account's configured root.
+export async function liveInScope(drive: DriveLike, rootId: string | null, googleId: string): Promise<boolean> {
+  if (!rootId || !drive) return true; // unscoped account = whole drive in scope
+  try {
+    let cur: string | null = googleId;
+    for (let i = 0; i < 12 && cur; i++) {
+      if (cur === rootId) return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const meta: any = await drive.files.get({ fileId: cur, fields: "parents", supportsAllDrives: true });
+      cur = (meta?.data?.parents?.[0] as string | undefined) ?? null;
+    }
+    return false;
+  } catch {
+    return false; // unreadable ancestry = deny
+  }
 }

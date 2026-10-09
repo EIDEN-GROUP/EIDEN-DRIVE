@@ -9,6 +9,19 @@
 --   * versions, share_links and file_tags cascade automatically
 -- Drive bytes are NEVER touched. Run "Sync from Google" afterwards to rebuild
 -- the index inside the drives' current scope.
+--
+-- SCOPE GUARD: this script refuses to run unless at least one drive is scoped
+-- to a folder. On an unscoped (whole-drive) setup there is no "previous
+-- location" — account-less rows may be the only index of live files.
+do $$
+begin
+  if not exists (
+    select 1 from drive_accounts where status = 'active' and root_id is not null
+  ) then
+    raise exception 'Refused: no scoped drive. Scope a drive to a folder first (Storage page → drive → root), otherwise these rows may still be live.';
+  end if;
+end $$;
+
 begin;
 
 -- 0) Verify first: these two counts are what steps 3–4 will change.

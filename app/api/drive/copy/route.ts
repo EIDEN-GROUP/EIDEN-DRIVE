@@ -5,8 +5,8 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { bucketFor } from "@/lib/storage";
-import { driveCtxFor } from "@/lib/drive-accounts";
-import { canTouch, folderUsable } from "@/lib/visibility";
+import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
+import { canTouch, folderUsable, googleInScope } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({ file_id: z.string().uuid(), folder: z.string().uuid().nullable().optional() });
@@ -25,6 +25,13 @@ export async function POST(req: Request) {
   // Read the source only from your own / department space…
   const gate = await canTouch(db, me, src as { id: string; owner: string; folder: string | null });
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
+  // Scope: no cloning bytes out of a tree the workspace hides.
+  const srcRow = src as { google_file_id?: string | null; drive_account_id?: string | null };
+  if (srcRow.google_file_id) {
+    if (!(await googleInScope(db, await getAccounts(), srcRow.drive_account_id, srcRow.google_file_id))) {
+      return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+    }
+  }
   const folder = p.data.folder !== undefined ? p.data.folder : src.folder;
   // …and land the copy somewhere you're allowed to write.
   if (folder) {

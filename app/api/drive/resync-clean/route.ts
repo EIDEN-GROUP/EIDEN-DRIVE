@@ -21,16 +21,22 @@ export async function POST(req: Request) {
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
   const db = adminClient();
-  const { data: acct } = await db.from("drive_accounts").select("id,label").eq("id", p.data.accountId).maybeSingle();
+  const { data: acct } = await db.from("drive_accounts").select("id,label,root_id").eq("id", p.data.accountId).maybeSingle();
   if (!acct) return Response.json({ error: "drive not found" }, { status: 404 });
 
   let deleted = 0, unpinned = 0;
   try {
-    ({ deleted, unpinned } = await purgeAccountRows(db, p.data.accountId));
+    // Orphan sweep only on scoped drives: on an unscoped (whole-drive) account
+    // account-less rows may be the only index of live files.
+    ({ deleted, unpinned } = await purgeAccountRows(db, p.data.accountId, {
+      sweepOrphans: (acct as { root_id?: string | null }).root_id != null,
+    }));
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : "clean failed" }, { status: 500 });
   }
   bustAccountCache();
+  const { bustScopeCache } = await import("@/lib/visibility");
+  bustScopeCache(p.data.accountId);
   await logAudit({ actor: me.id, actor_name: me.username, action: "edit", req, detail: { drive_resync_clean: p.data.accountId, deleted, unpinned } });
   return Response.json({ ok: true, deleted, unpinned, next: "run Sync from Google to rebuild this drive's index" });
 }

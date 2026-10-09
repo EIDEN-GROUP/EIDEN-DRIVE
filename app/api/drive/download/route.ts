@@ -6,8 +6,8 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { signedDownloadUrl, bucketFor } from "@/lib/storage";
-import { driveCtxFor, accountAccessToken } from "@/lib/drive-accounts";
-import { canTouch } from "@/lib/visibility";
+import { driveCtxFor, accountAccessToken, getAccounts } from "@/lib/drive-accounts";
+import { canTouch, googleInScope, liveInScope } from "@/lib/visibility";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ file_id: z.string().max(300), raw: z.string().optional(), json: z.string().optional(), thumb: z.string().optional() });
@@ -106,12 +106,22 @@ export async function GET(req: Request) {
     // Cover art: Google's server-side thumbnail (RAW, PSD, HEIC, any video, PDF page 1...).
     try {
       const liveId = parseLiveId(file_id);
-      if (liveId) return await googleThumb(liveId.googleId, liveId.accountId);
+      if (liveId) {
+        const lctx = liveId.accountId ? await driveCtxFor(liveId.accountId) : null;
+        if (lctx && !(await liveInScope(lctx.drive, lctx.rootId || null, liveId.googleId))) {
+          return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+        }
+        return await googleThumb(liveId.googleId, liveId.accountId);
+      }
       const supa = createClient();
       const { data: tf } = await supa.from("file_index").select("google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
       const gid = (tf as { google_file_id?: string | null } | null)?.google_file_id;
       if (!gid) throw new Error("this file lives in Supabase, not Google — no Drive thumbnail exists");
       const aid = (tf as { drive_account_id?: string | null } | null)?.drive_account_id ?? null;
+      const accs = await getAccounts();
+      if (!(await googleInScope(adminClient(), accs, aid, gid))) {
+        return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+      }
       return await googleThumb(gid, aid);
     } catch (e) {
       return Response.json({ error: e instanceof Error ? e.message : "no thumbnail", noThumb: true }, { status: 404 });
@@ -123,6 +133,11 @@ export async function GET(req: Request) {
       const ctx = await driveCtxFor(live.accountId);
       const g = ctx?.drive;
       if (!g) throw new Error("google not configured");
+      // Caller-supplied live ids: prove the file sits inside the account's
+      // scope before streaming a single byte (ids outlive listings).
+      if (!(await liveInScope(g, ctx?.rootId || null, live.googleId))) {
+        return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+      }
       const meta = await g.files.get({ fileId: live.googleId, fields: "size,mimeType,name", supportsAllDrives: true });
       if (Number(meta.data.size ?? 0) > RAW_MAX) {
         return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });
@@ -150,6 +165,15 @@ export async function GET(req: Request) {
   // (Live g: rows above stay open — shared drives are company-wide by scope.)
   const gate = await canTouch(adminClient(), me, f as { id: string; owner: string; folder: string | null });
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
+  // ...and the same scope as the listing: a UUID kept from before a re-scope
+  // must not stream bytes the workspace no longer shows.
+  const fRow = f as { google_file_id?: string | null; drive_account_id?: string | null };
+  if (fRow.google_file_id) {
+    const accs = await getAccounts();
+    if (!(await googleInScope(adminClient(), accs, fRow.drive_account_id, fRow.google_file_id))) {
+      return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+    }
+  }
   await logAudit({ actor: me.id, actor_name: me.username, action: "download", file_id, req });
   if (p.data.json) {
     if (f.storage_path) {
