@@ -6,6 +6,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { renameDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
+import { canTouch } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({
@@ -13,15 +14,18 @@ const Body = z.object({
   name: z.string().trim().min(1).max(255).refine((n) => !n.includes("/"), { message: "no slashes in file names" })
 });
 
-// Members and up can rename (it's an edit, not a delete). Google copy renamed too when present.
+// Members and up can rename (it's an edit, not a delete) — but only inside
+// their own / department-tagged space. Google copy renamed too when present.
 export async function PATCH(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   const db = adminClient();
-  const { data: f } = await db.from("file_index").select("id,name,google_file_id,drive_account_id").eq("id", p.data.file_id).maybeSingle();
+  const { data: f } = await db.from("file_index").select("id,name,google_file_id,drive_account_id,owner,folder").eq("id", p.data.file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
+  const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null });
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   if (f.google_file_id) {
     try {
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);

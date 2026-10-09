@@ -7,6 +7,7 @@ import { trashDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile, needsApproval } from "@/lib/roles";
+import { canTouch } from "@/lib/visibility";
 import { notify } from "@/lib/alerts";
 import { parseJson } from "@/lib/http";
 
@@ -22,9 +23,12 @@ export async function POST(req: Request) {
   const { file_id } = p.data;
 
   const supa = createClient();
-  const { data: f, error: fe } = await supa.from("file_index").select("id,name,google_file_id,folder,drive_account_id").eq("id", file_id).maybeSingle();
+  const { data: f, error: fe } = await supa.from("file_index").select("id,name,google_file_id,folder,drive_account_id,owner").eq("id", file_id).maybeSingle();
   if (fe) return Response.json({ error: fe.message }, { status: 500 });
   if (!f) return Response.json({ error: "file not found" }, { status: 404 });
+  // Confinement: members trash only own / department-tagged items.
+  const gate = await canTouch(adminClient(), me, f as { id: string; owner: string; folder: string | null });
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
 
   let classification = "Internal";
   if (f.folder) {

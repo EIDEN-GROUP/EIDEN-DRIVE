@@ -7,6 +7,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { UPLOAD_BUCKET } from "@/lib/storage";
 import { driveCtxFor } from "@/lib/drive-accounts";
+import { canTouch } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 // Text-file editing save path. Only plain-text formats are accepted here
@@ -31,11 +32,11 @@ export async function PATCH(req: Request) {
   if (p.error) return p.error;
   const db = adminClient();
   const { data: f } = await db.from("file_index")
-    .select("id,name,mime,size,storage_path,google_file_id,drive_account_id,owner").eq("id", p.data.file_id).maybeSingle();
+    .select("id,name,mime,size,storage_path,google_file_id,drive_account_id,owner,folder").eq("id", p.data.file_id).maybeSingle();
   if (!f) return Response.json({ error: "file not found" }, { status: 404 });
-  if (f.owner !== me.id && me.role !== "admin" && me.role !== "manager") {
-    return Response.json({ error: "you can only edit your own files" }, { status: 403 });
-  }
+  // Owner, manager, or department-tag match (folder dept or same-named tag).
+  const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null });
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   if (!editable(f.mime, f.name)) {
     return Response.json({ error: "this file type is view-only (binary formats can't be edited as text)" }, { status: 400 });
   }

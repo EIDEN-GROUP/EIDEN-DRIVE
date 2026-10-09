@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
@@ -94,6 +94,9 @@ export default function Explorer() {
   const [confirmPurge, setConfirmPurge] = useState<{ id: string; name: string } | null>(null);
   const [purging, setPurging] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Rows pinned under an old/removed Google root: filtered server-side so the
+  // index can't leak files a re-scoped drive no longer contains.
+  const [hiddenLegacy, setHiddenLegacy] = useState(0);
   const [q, setQ] = useState("");
   const [hist, setHist] = useState<Nav[]>([{ kind: "root", path: [] }]);
   const [hi, setHi] = useState(0);
@@ -221,6 +224,7 @@ export default function Explorer() {
       if (fr) setFolders(fr.results ?? []);
       setFiles((prev) => append ? [...prev, ...(dr.results ?? [])] : (dr.results ?? []));
       setHasMore((dr.results ?? []).length >= PAGE);
+      if (!append) setHiddenLegacy(typeof dr.hidden === "number" ? dr.hidden : 0);
       if (br) { setBin(br.results ?? []); setCanPurge(!!br.canPurge); }
       if (dr.google_error && dr.google_error !== lastGoogleError.current) {
         lastGoogleError.current = dr.google_error;
@@ -1013,6 +1017,11 @@ export default function Explorer() {
                 <button onClick={() => openDrive(driveView.accountId)} className="text-brand font-medium hover:underline min-h-[36px]">Retry</button>
               </div>
             )}
+            {!driveView && hiddenLegacy > 0 && (
+              <div className="shrink-0 mx-3 mt-2 px-3 py-2 rounded-lg border border-line bg-soft text-[12.5px] text-ink/75" role="status">
+                {hiddenLegacy} older file{hiddenLegacy === 1 ? " is" : "s are"} hidden — {hiddenLegacy === 1 ? "it sits" : "they sit"} under a previous drive location. Ask an admin to re-sync or move {hiddenLegacy === 1 ? "it" : "them"}.
+              </div>
+            )}
             <div className="relative flex-1 min-h-0 overflow-auto"
               onClick={() => { clearSel(); setInfoOpen(false); }}
               onDragOver={(e) => { e.preventDefault(); if (e.dataTransfer.types.includes("Files")) setDragOver(true); }}
@@ -1120,23 +1129,35 @@ export default function Explorer() {
                   })}
                 </div>
               ) : (
-                <div role="grid" aria-label={`${rows.length} items`} className="p-4 grid gap-1 content-start" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))" }}>
+                <div role="grid" aria-label={`${rows.length} items`} className={`p-4 grid content-start ${thumbs ? "gap-3" : "gap-1"}`} style={{ gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))" }}>
                   {pg.pageItems.map((r, ri) => {
                     const on = selSet.has(r.key);
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
+                    const folder = r.kind === "folder";
+                    // Covers mode: folders and files share one grid, so mark where
+                    // the files begin — otherwise the two sections butt together.
+                    const filesBreak = thumbs && !folder && ri > 0 && pg.pageItems[ri - 1].kind === "folder";
                     return (
-                      <button key={r.key} role="gridcell" aria-selected={on}
+                      <Fragment key={r.key}>
+                      {filesBreak && (
+                        <div aria-hidden="true" className="flex items-center gap-2 px-1 pt-3 pb-1" style={{ gridColumn: "1 / -1" }}>
+                          <span className="text-[11px] font-medium uppercase tracking-wider text-muted">Files</span>
+                          <span className="h-px flex-1 bg-line" />
+                        </div>
+                      )}
+                      <button role="gridcell" aria-selected={on}
                         onClick={(e) => clickRow(e, r, ri)}
                         onDoubleClick={() => open(r)}
                         onKeyDown={(e) => onRowKey(e, r)}
                         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
-                        className={`flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors min-h-[104px] ${on ? "bg-tint text-brand" : "hover:bg-tint/40"}`}>
+                        className={`flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors ${thumbs && !folder ? "min-h-[152px]" : "min-h-[104px]"} ${on ? "bg-tint text-brand" : "hover:bg-tint/40"} ${thumbs && folder ? "border border-line/60 bg-soft/40" : ""}`}>
                         {thumbs && r.file
                           ? <FileThumb file={r.file} size={72} />
-                          : <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={64} />}
+                          : <FileIcon name={r.name} mime={r.file?.mime} folder={folder} size={64} />}
                         <span className="text-[12.5px] leading-tight break-all line-clamp-2">{r.name}</span>
                         {rowTags(r).length > 0 && <TagDots tags={rowTags(r)} />}
                       </button>
+                      </Fragment>
                     );
                   })}
                 </div>

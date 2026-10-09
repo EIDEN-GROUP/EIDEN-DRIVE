@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { visibleFolderIds, isManager } from "@/lib/visibility";
+import { visibleFolderIds, isManager, accessContext, folderUsable } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 export async function GET() {
@@ -14,11 +14,13 @@ export async function GET() {
   const supa = createClient();
   const { data, error } = await supa.from("folders").select("id,name,parent,dept,classification").order("name").limit(500);
   if (error) return Response.json({ error: error.message }, { status: 500 });
-  // Members see only their department's folders (same rule as file rows).
+  // Members see their department's folders: dept field OR same-named tag
+  // (assigning dept "Clients" auto-unlocks everything tagged Clients).
   const rows = (data ?? []) as { id: string; name: string; parent: string | null; dept: string | null; classification: string | null }[];
   if (isManager(me.role)) return Response.json({ results: rows });
-  const vis = visibleFolderIds(rows, me);
-  return Response.json({ results: rows.filter((f) => vis!.has(f.id)) });
+  const ctx = await accessContext(adminClient(), me);
+  const vis = ctx.folders ?? visibleFolderIds(rows, me) ?? new Set<string>();
+  return Response.json({ results: rows.filter((f) => vis.has(f.id)) });
 }
 
 const Body = z.object({
@@ -50,13 +52,16 @@ const Rename = z.object({
   name: z.string().trim().min(1).max(120)
 });
 
-// Any signed-in member can rename (it's an edit). Audited.
+// Rename a folder you can see (own/dept/tag space, or manager). Renaming
+// someone else's department folder is not an innocent edit.
 export async function PATCH(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
   const p = await parseJson(req, Rename);
   if (p.error) return p.error;
   const db = adminClient();
+  const gate = await folderUsable(db, me, p.data.folder_id);
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   const { data: f } = await db.from("folders").select("id,name").eq("id", p.data.folder_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   const { error } = await db.from("folders").update({ name: p.data.name }).eq("id", p.data.folder_id);

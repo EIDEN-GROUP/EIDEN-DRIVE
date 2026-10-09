@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
+import { canTouch } from "@/lib/visibility";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { newToken, tokenHash } from "@/lib/share";
@@ -16,12 +17,12 @@ export async function POST(req: Request) {
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
   const db = adminClient();
-  const { data: f } = await db.from("file_index").select("id,name,owner").eq("id", p.data.file_id).maybeSingle();
-  const file = f as { id: string; name: string; owner: string } | null;
+  const { data: f } = await db.from("file_index").select("id,name,owner,folder").eq("id", p.data.file_id).maybeSingle();
+  const file = f as { id: string; name: string; owner: string; folder: string | null } | null;
   if (!file) return Response.json({ error: "file not found" }, { status: 404 });
-  if (file.owner !== me.id && me.role !== "admin" && me.role !== "manager") {
-    return Response.json({ error: "only the owner or a manager can share this file" }, { status: 403 });
-  }
+  // Sharing = read access: owner, manager, or department-tag match.
+  const gate = await canTouch(db, me, file);
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "only files in your space can be shared" }, { status: 403 });
   const token = newToken();
   const { error } = await db.from("share_links").insert({
     token_hash: tokenHash(token), file_id: file.id, created_by: me.id,
@@ -56,12 +57,13 @@ export async function DELETE(req: Request) {
   const p = await parseJson(req, z.object({ id: z.string().uuid() }));
   if (p.error) return p.error;
   const db = adminClient();
-  const { data: l } = await db.from("share_links").select("id,file_id").eq("id", p.data.id).maybeSingle();
-  const link = l as { id: string; file_id: string } | null;
+  const { data: l } = await db.from("share_links").select("id,file_id,created_by").eq("id", p.data.id).maybeSingle();
+  const link = l as { id: string; file_id: string; created_by: string | null } | null;
   if (!link) return Response.json({ error: "link not found" }, { status: 404 });
   const { data: f } = await db.from("file_index").select("owner").eq("id", link.file_id).maybeSingle();
-  if ((f as { owner?: string } | null)?.owner !== me.id && me.role !== "admin" && me.role !== "manager") {
-    return Response.json({ error: "only the owner or a manager can revoke this link" }, { status: 403 });
+  // Owner, link creator, or manager — whoever could mint it can kill it.
+  if ((f as { owner?: string } | null)?.owner !== me.id && link.created_by !== me.id && me.role !== "admin" && me.role !== "manager") {
+    return Response.json({ error: "only the owner, the creator, or a manager can revoke this link" }, { status: 403 });
   }
   await db.from("share_links").delete().eq("id", link.id);
   await logAudit({ actor: me.id, actor_name: me.username, action: "share", file_id: link.file_id, req, detail: { share_revoked: link.id } });

@@ -11,6 +11,7 @@ import { googleErrorMessage } from "@/lib/errors";
 import { queueUsbUpload } from "@/lib/usb";
 import { pickUploadAccount, clientFor } from "@/lib/drive-accounts";
 import { postSlack } from "@/lib/slack";
+import { folderUsable } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 // Metadata-only: bytes already went to Supabase Storage via a signed URL (or the agent staged them).
@@ -50,6 +51,12 @@ export async function POST(req: Request) {
   // Writes use the service role AFTER the checks above (never trust anon RLS for
   // mutations: a missing/rotated JWT must never turn into a data-loss-shaped error).
   const db = adminClient();
+  // Uploads land only where you may write: Workspace commons or your own /
+  // department-tagged folders. Smuggling files into another dept's folder 403s.
+  if (body.folder) {
+    const dst = await folderUsable(db, me, body.folder);
+    if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
+  }
   const { data, error } = await db.from("file_index").insert({
     name: body.name, mime: body.mime ?? "application/octet-stream", size: body.size ?? 0,
     hash: body.hash ?? null, backends: body.backends ?? ["local"], owner: me.id, folder: body.folder ?? null,

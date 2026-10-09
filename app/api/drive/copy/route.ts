@@ -6,6 +6,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { UPLOAD_BUCKET } from "@/lib/storage";
 import { driveCtxFor } from "@/lib/drive-accounts";
+import { canTouch, folderUsable } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({ file_id: z.string().uuid(), folder: z.string().uuid().nullable().optional() });
@@ -21,10 +22,15 @@ export async function POST(req: Request) {
   const { data: src } = await db.from("file_index")
     .select("id,name,mime,size,hash,storage_path,google_file_id,drive_account_id,backends,folder,owner").eq("id", p.data.file_id).maybeSingle();
   if (!src) return Response.json({ error: "file not found" }, { status: 404 });
-  if (src.owner !== me.id && me.role !== "admin" && me.role !== "manager") {
-    return Response.json({ error: "you can only copy your own files" }, { status: 403 });
-  }
+  // Read the source only from your own / department space…
+  const gate = await canTouch(db, me, src as { id: string; owner: string; folder: string | null });
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   const folder = p.data.folder !== undefined ? p.data.folder : src.folder;
+  // …and land the copy somewhere you're allowed to write.
+  if (folder) {
+    const dst = await folderUsable(db, me, folder);
+    if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
+  }
   const copyName = `Copy of ${src.name}`;
   let storage_path: string | null = null;
   let google_file_id: string | null = null;

@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { listDriveFiles } from "@/lib/google-drive";
 import { getAccounts, clientFor, type DriveAccount } from "@/lib/drive-accounts";
 import { withTimeout, googleErrorMessage } from "@/lib/errors";
-import { visibleFolderIds, loadFolders, fileOrClause, inScopeGoogleIds, isManager } from "@/lib/visibility";
+import { visibleFolderIds, loadFolders, fileOrClause, inScopeGoogleIds, isManager, accessContext, forbiddenTaggedFileIds } from "@/lib/visibility";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { escapeLike } from "@/lib/http";
@@ -22,33 +22,58 @@ export async function GET(req: Request) {
   // 1) indexed files (Google + Local + Backup badges)
   // Disabled drives are invisible: their rows are excluded (deleted drives
   // leave no pure mirrors behind — DELETE purges them; hybrids keep local bytes).
-  // Members additionally see only: own files, Workspace commons (no folder),
-  // and their department's folders. Google rows are company drives: members see
-  // whatever is inside each active account's configured scope.
+  // SCOPE (which drive subtree) applies to every role including admins: a drive
+  // scoped to folder X never shows the rest of My Drive.
+  // PERMISSION (dept/tag confinement) applies to members: own files, untagged
+  // Workspace commons, their department's folders, and items carrying their
+  // department's tag. Google rows are company drives (no tags): scope only.
   const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
   const labelOf = new Map(accounts.map((a) => [a.id, a.label]));
   const inactive = accounts.filter((a) => a.status !== "active").map((a) => a.id);
   const folders = await loadFolders(supa);
-  const visible = visibleFolderIds(folders, me);
+  // Tag tables are service-role-only (RLS deny-all): resolve access with admin.
+  const adb = adminClient();
+  const ctx = isManager(me.role) ? null : await accessContext(adb, me);
+  const visible = ctx ? ctx.folders : visibleFolderIds(folders, me);
   let filesQuery = supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id").ilike("name", `%${escapeLike(q)}%`);
   if (inactive.length) filesQuery = filesQuery.not("drive_account_id", "in", `(${inactive.join(",")})`);
-  const orClause = fileOrClause(me, visible);
+  const orClause = fileOrClause(me, visible, ctx?.taggedFiles);
   if (orClause) filesQuery = filesQuery.or(orClause);
+  if (ctx) {
+    const forbidden = await forbiddenTaggedFileIds(adb, me);
+    if (forbidden.length) filesQuery = filesQuery.not("id", "in", `(${forbidden.slice(0, 2000).join(",")})`);
+  }
+  // Hide pre-scope legacy rows (google rows with no account pin) from everyone
+  // except managers, who need to see them to clean up. Counted separately so
+  // the client can show the resync notice; dropped in JS below (a second OR
+  // group can't ride the same PostgREST query as the permission legs).
+  let hiddenLegacy = 0;
+  if (!isManager(me.role)) {
+    const { count } = await supa.from("file_index").select("id", { count: "exact", head: true })
+      .is("drive_account_id", null).not("google_file_id", "is", null);
+    hiddenLegacy = count ?? 0;
+  }
   const { data: rows } = await filesQuery.range(offset, offset + limit - 1);
   // Google rows must sit inside their account's scope (pre-scope leftovers hide).
+  // SCOPE APPLIES TO EVERY ROLE — including admins. A drive scoped to folder X
+  // shows X's subtree and nothing else. (Dept permission above is separate.)
   type Row = { id: string; name: string; mime: string; size: number; backends: string[]; drive_account_id?: string | null; google_file_id?: string | null };
   let scoped = ((rows ?? []) as Row[]);
-  if (!isManager(me.role)) {
+  {
     const live = accounts.filter((a) => a.status === "active" && a.root_id);
     if (live.length) {
-      const db = adminClient();
       const allowed = new Set<string>();
       for (const a of live) {
-        const ids = await inScopeGoogleIds(db, a.id, a.root_id);
+        const ids = await inScopeGoogleIds(adb, a.id, a.root_id);
         if (ids) for (const id of ids) allowed.add(id);
       }
       scoped = scoped.filter((r) => !r.google_file_id || !r.drive_account_id || allowed.has(r.google_file_id));
     }
+  }
+  // Pre-scope legacy rows (no account pin): invisible to non-managers.
+  // hiddenLegacy (exact count from above) drives the client's resync notice.
+  if (!isManager(me.role)) {
+    scoped = scoped.filter((r) => !r.google_file_id || r.drive_account_id);
   }
 
   // 2) live Google fallback, across EVERY connected account — NEVER allowed to
@@ -103,5 +128,5 @@ export async function GET(req: Request) {
   const merged = [...indexed, ...fresh];
 
   await logAudit({ actor: me.id, actor_name: me.username, action: "view", req, detail: { q } });
-  return Response.json({ q, results: merged, google: googleNote, google_error });
+  return Response.json({ q, results: merged, google: googleNote, google_error, hiddenLegacy });
 }

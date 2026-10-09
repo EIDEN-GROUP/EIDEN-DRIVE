@@ -5,6 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { queueUsbUpload } from "@/lib/usb";
+import { canTouch } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({ file_id: z.string().uuid() });
@@ -18,13 +19,12 @@ export async function POST(req: Request) {
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   const db = adminClient();
-  const { data: f } = await db.from("file_index").select("id,name,size,storage_path,owner").eq("id", p.data.file_id).maybeSingle();
-  const file = f as { id: string; name: string; size: number; storage_path: string | null; owner: string } | null;
+  const { data: f } = await db.from("file_index").select("id,name,size,storage_path,owner,folder").eq("id", p.data.file_id).maybeSingle();
+  const file = f as { id: string; name: string; size: number; storage_path: string | null; owner: string; folder: string | null } | null;
   if (!file) return Response.json({ error: "file not found" }, { status: 404 });
   if (!file.storage_path) return Response.json({ error: "only Supabase-hosted files can be copied to USB" }, { status: 400 });
-  if (file.owner !== me.id && me.role !== "admin" && me.role !== "manager") {
-    return Response.json({ error: "you can only send your own files to USB" }, { status: 403 });
-  }
+  const gate = await canTouch(db, me, file);
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   try {
     const { jobId } = await queueUsbUpload({ id: file.id, storage_path: file.storage_path, name: file.name, size: file.size ?? 0, owner: me.id, ownerName: me.username });
     await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: file.id, req, detail: { usb_job: jobId } });

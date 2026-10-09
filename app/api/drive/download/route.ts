@@ -7,6 +7,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { signedDownloadUrl, UPLOAD_BUCKET } from "@/lib/storage";
 import { driveCtxFor, accountAccessToken } from "@/lib/drive-accounts";
+import { canTouch } from "@/lib/visibility";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ file_id: z.string().max(300), raw: z.string().optional(), json: z.string().optional(), thumb: z.string().optional() });
@@ -143,8 +144,12 @@ export async function GET(req: Request) {
     return Response.json({ error: "open this file in the viewer (preview) — direct download needs a synced copy", live: true }, { status: 400 });
   }
   const supa = createClient();
-  const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
+  const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,google_file_id,drive_account_id,owner,folder").eq("id", file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
+  // Bytes obey the same confinement as the listing: own / dept / tag match.
+  // (Live g: rows above stay open — shared drives are company-wide by scope.)
+  const gate = await canTouch(adminClient(), me, f as { id: string; owner: string; folder: string | null });
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "download", file_id, req });
   if (p.data.json) {
     if (f.storage_path) {
