@@ -8,9 +8,9 @@ import { UPLOAD_BUCKET } from "@/lib/storage";
 export const USB_JOB = "usb-upload";
 export const USB_URL_TTL = 7 * 24 * 3600; // signed bytes URL valid 7 days
 
-export async function queueUsbUpload(file: { id: string; storage_path: string; name: string; size: number; owner: string; ownerName: string }): Promise<{ jobId: string }> {
+export async function queueUsbUpload(file: { id: string; storage_path: string; storage_bucket?: string | null; name: string; size: number; owner: string; ownerName: string }): Promise<{ jobId: string }> {
   const db = adminClient();
-  const { data: signed, error: sErr } = await db.storage.from(UPLOAD_BUCKET).createSignedUrl(file.storage_path, USB_URL_TTL);
+  const { data: signed, error: sErr } = await db.storage.from(file.storage_bucket || UPLOAD_BUCKET).createSignedUrl(file.storage_path, USB_URL_TTL);
   if (sErr || !signed?.signedUrl) throw new Error(`couldn't sign bytes for the agent: ${sErr?.message ?? "unknown"}`);
   const { data, error } = await db.from("jobs").insert({
     kind: USB_JOB,

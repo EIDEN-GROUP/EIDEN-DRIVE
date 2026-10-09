@@ -19,8 +19,8 @@ export async function POST(req: Request) {
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   const db = adminClient();
-  const { data: f } = await db.from("file_index").select("id,name,size,storage_path,owner,folder").eq("id", p.data.file_id).maybeSingle();
-  const file = f as { id: string; name: string; size: number; storage_path: string | null; owner: string; folder: string | null } | null;
+  const { data: f } = await db.from("file_index").select("id,name,size,storage_path,storage_bucket,owner,folder").eq("id", p.data.file_id).maybeSingle();
+  const file = f as { id: string; name: string; size: number; storage_path: string | null; storage_bucket: string | null; owner: string; folder: string | null } | null;
   if (!file) return Response.json({ error: "file not found" }, { status: 404 });
   if (!file.storage_path) return Response.json({ error: "only Supabase-hosted files can be copied to USB" }, { status: 400 });
   const gate = await canTouch(db, me, file);

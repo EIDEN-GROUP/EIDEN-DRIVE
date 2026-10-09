@@ -70,10 +70,20 @@ export async function POST(req: Request) {
       fields: "id"
     });
     if (!created.data.id) throw new Error("google create returned no id");
+    // Same parent bookkeeping as the mirror path: the scope filter places
+    // rows by their Drive parent, and a parentless row is invisible on a
+    // scoped drive.
+    let google_parent_id: string | null = root.kind === "folder" ? root.id : null;
+    if (!google_parent_id) {
+      try {
+        const meta = await d.files.get({ fileId: created.data.id, fields: "parents", supportsAllDrives: true });
+        google_parent_id = (meta.data.parents?.[0] as string | undefined) ?? null;
+      } catch { /* parent stays null */ }
+    }
     const { data, error } = await db.from("file_index").insert({
       name, mime, size: blob.size, hash: hash ?? null,
       backends: ["google"], owner: me.id, folder,
-      storage_path: null, google_file_id: created.data.id, drive_account_id: pick.account.id
+      storage_path: null, google_file_id: created.data.id, google_parent_id, drive_account_id: pick.account.id
     }).select("id").single();
     if (error) throw new Error(error.message);
     await db.from("versions").insert({ file_id: data.id, v: 1, hash: hash ?? "", actor: me.id });

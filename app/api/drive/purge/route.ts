@@ -6,7 +6,7 @@ import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { deleteDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
-import { UPLOAD_BUCKET } from "@/lib/storage";
+import { bucketFor } from "@/lib/storage";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({ file_id: z.string().uuid() });
@@ -24,7 +24,7 @@ export async function POST(req: Request) {
   const { file_id } = p.data;
   const db = adminClient();
 
-  const { data: f } = await db.from("file_index").select("id,name,size,hash,storage_path,google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
+  const { data: f } = await db.from("file_index").select("id,name,size,hash,storage_path,storage_bucket,google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
   if (!f) return Response.json({ error: "file not found" }, { status: 404 });
   const { data: inBin } = await db.from("recovery_bin").select("file_id").eq("file_id", file_id).maybeSingle();
   if (!inBin) return Response.json({ error: "only files in the Recovery Bin can be deleted permanently" }, { status: 409 });
@@ -41,7 +41,7 @@ export async function POST(req: Request) {
   }
   // 2) then our own Storage copy. Every step tolerates "already gone", so a retry after a partial failure just finishes the job.
   if (f.storage_path) {
-    const { error } = await db.storage.from(UPLOAD_BUCKET).remove([f.storage_path]);
+    const { error } = await db.storage.from(bucketFor(f)).remove([f.storage_path]);
     if (error && !gone(error.message)) return Response.json({ error: `Storage delete failed: ${error.message} (safe to retry)` }, { status: 502 });
   }
 

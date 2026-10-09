@@ -97,6 +97,8 @@ export default function Explorer() {
   // Rows pinned under an old/removed Google root: filtered server-side so the
   // index can't leak files a re-scoped drive no longer contains.
   const [hiddenLegacy, setHiddenLegacy] = useState(0);
+  // Pre-scope leftovers (managers only): orphan rows visible to you alone.
+  const [orphanCount, setOrphanCount] = useState(0);
   const [q, setQ] = useState("");
   const [hist, setHist] = useState<Nav[]>([{ kind: "root", path: [] }]);
   const [hi, setHi] = useState(0);
@@ -247,7 +249,8 @@ export default function Explorer() {
       if (fr) setFolders(fr.results ?? []);
       setFiles((prev) => append ? [...prev, ...(dr.results ?? [])] : (dr.results ?? []));
       setHasMore((dr.results ?? []).length >= PAGE);
-      if (!append) setHiddenLegacy(typeof dr.hidden === "number" ? dr.hidden : 0);
+      if (!append) setHiddenLegacy(typeof dr.hiddenLegacy === "number" ? dr.hiddenLegacy : 0);
+      if (!append) setOrphanCount(typeof dr.orphanCount === "number" ? dr.orphanCount : 0);
       if (br) { setBin(br.results ?? []); setCanPurge(!!br.canPurge); }
       if (dr.google_error && dr.google_error !== lastGoogleError.current) {
         lastGoogleError.current = dr.google_error;
@@ -1066,6 +1069,11 @@ export default function Explorer() {
             {!driveView && hiddenLegacy > 0 && (
               <div className="shrink-0 mx-3 mt-2 px-3 py-2 rounded-lg border border-line bg-soft text-[12.5px] text-ink/75" role="status">
                 {hiddenLegacy} older file{hiddenLegacy === 1 ? " is" : "s are"} hidden — {hiddenLegacy === 1 ? "it sits" : "they sit"} under a previous drive location. Ask an admin to re-sync or move {hiddenLegacy === 1 ? "it" : "them"}.
+              </div>
+            )}
+            {!driveView && hiddenLegacy === 0 && orphanCount > 0 && (
+              <div className="shrink-0 mx-3 mt-2 px-3 py-2 rounded-lg border border-line bg-soft text-[12.5px] text-ink/75" role="status">
+                {orphanCount} pre-scope leftover{orphanCount === 1 ? "" : "s"} — visible only to you. Clear {orphanCount === 1 ? "it" : "them"} from Storage → Resync clean, then Sync.
               </div>
             )}
             <div className="relative flex-1 min-h-0 overflow-auto"

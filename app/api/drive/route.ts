@@ -47,11 +47,14 @@ export async function GET(req: Request) {
   // except managers, who need to see them to clean up. Counted separately so
   // the client can show the resync notice; dropped in JS below (a second OR
   // group can't ride the same PostgREST query as the permission legs).
-  let hiddenLegacy = 0;
-  if (!isManager(me.role)) {
+  // Managers get their own count: those rows are VISIBLE to them, so their
+  // notice says "clear them" (Storage → Resync clean + Sync) instead of "hidden".
+  let hiddenLegacy = 0, orphanCount = 0;
+  {
     const { count } = await supa.from("file_index").select("id", { count: "exact", head: true })
       .is("drive_account_id", null).not("google_file_id", "is", null);
-    hiddenLegacy = count ?? 0;
+    if (isManager(me.role)) orphanCount = count ?? 0;
+    else hiddenLegacy = count ?? 0;
   }
   const { data: rows } = await filesQuery.range(offset, offset + limit - 1);
   // Google rows must sit inside their account's scope (pre-scope leftovers hide).
@@ -128,5 +131,5 @@ export async function GET(req: Request) {
   const merged = [...indexed, ...fresh];
 
   await logAudit({ actor: me.id, actor_name: me.username, action: "view", req, detail: { q } });
-  return Response.json({ q, results: merged, google: googleNote, google_error, hiddenLegacy });
+  return Response.json({ q, results: merged, google: googleNote, google_error, hiddenLegacy, orphanCount });
 }

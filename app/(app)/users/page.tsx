@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase-server";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
-import { signedDownloadUrl } from "@/lib/storage";
+import { avatarUrlFor } from "@/lib/storage";
 import UsersClient, { type DirectoryUser } from "@/components/users/UsersClient";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +10,7 @@ async function withAvatars<T extends { avatar_path?: string | null }>(rows: T[])
   return Promise.all(rows.map(async (r) => {
     let avatarUrl: string | null = null;
     if (r.avatar_path) {
-      try { avatarUrl = await signedDownloadUrl(r.avatar_path); } catch { avatarUrl = null; }
+      avatarUrl = await avatarUrlFor(r.avatar_path);
     }
     const { avatar_path: _drop, ...rest } = r;
     return { ...rest, avatarUrl };

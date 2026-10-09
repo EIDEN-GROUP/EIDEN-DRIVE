@@ -93,15 +93,26 @@ export async function quotaFor(acct: DriveAccount & { refresh_token: string }): 
 // Drop one account's Google-mirrored index rows (FK-safe, chunked).
 // Pure mirrors are deleted; hybrid rows (Storage bytes exist) keep the bytes and
 // lose the Google pin. Returns { deleted, unpinned }.
+// Also sweeps pre-multi-account orphans (google pin, no account): with accounts
+// in play those rows are unreachable leftovers — managers see them forever and
+// members get a permanent resync notice. Same treatment: no Storage copy means
+// delete, Storage copy means unpin. Drive bytes are never touched.
 export async function purgeAccountRows(db: Db, accountId: string): Promise<{ deleted: number; unpinned: number }> {
   const targetIds: string[] = [];
-  for (let off = 0; ; off += 1000) {
-    const { data: chunk, error: cErr } = await db.from("file_index").select("id")
-      .eq("drive_account_id", accountId).not("google_file_id", "is", null).is("storage_path", null).range(off, off + 999);
-    if (cErr) throw new Error(cErr.message);
-    if (!chunk?.length) break;
-    targetIds.push(...chunk.map((c) => c.id));
-    if (chunk.length < 1000) break;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sweeps: ((q: any) => any)[] = [
+    (q) => q.eq("drive_account_id", accountId),
+    (q) => q.is("drive_account_id", null),
+  ];
+  for (const filter of sweeps) {
+    for (let off = 0; ; off += 1000) {
+      const base = db.from("file_index").select("id").not("google_file_id", "is", null).is("storage_path", null);
+      const { data: chunk, error: cErr } = await filter(base).range(off, off + 999);
+      if (cErr) throw new Error(cErr.message);
+      if (!chunk?.length) break;
+      targetIds.push(...(chunk as { id: string }[]).map((c) => c.id));
+      if (chunk.length < 1000) break;
+    }
   }
   for (let i = 0; i < targetIds.length; i += 200) {
     const inList = targetIds.slice(i, i + 200);
@@ -113,13 +124,17 @@ export async function purgeAccountRows(db: Db, accountId: string): Promise<{ del
     if (dErr) throw new Error(dErr.message);
   }
   // Hybrid rows (Storage copy + Google pin): keep bytes, drop the Google pin.
-  const { data: hybrid } = await db.from("file_index").select("id,backends")
-    .eq("drive_account_id", accountId).not("storage_path", "is", null).limit(5000);
+  // Same orphan sweep: a pre-account hybrid keeps its Storage copy as local-only.
   let unpinned = 0;
-  for (const h of (hybrid ?? []) as { id: string; backends: string[] }[]) {
-    const backends = (h.backends ?? []).filter((b) => b !== "google");
-    await db.from("file_index").update({ google_file_id: null, google_parent_id: null, drive_account_id: null, backends: backends.length ? backends : ["local"] }).eq("id", h.id);
-    unpinned++;
+  for (const filter of sweeps) {
+    const { data: hybrid } = await filter(
+      db.from("file_index").select("id,backends").not("storage_path", "is", null).not("google_file_id", "is", null)
+    ).limit(5000);
+    for (const h of (hybrid ?? []) as { id: string; backends: string[] }[]) {
+      const backends = (h.backends ?? []).filter((b) => b !== "google");
+      await db.from("file_index").update({ google_file_id: null, google_parent_id: null, drive_account_id: null, backends: backends.length ? backends : ["local"] }).eq("id", h.id);
+      unpinned++;
+    }
   }
   return { deleted: targetIds.length, unpinned };
 }

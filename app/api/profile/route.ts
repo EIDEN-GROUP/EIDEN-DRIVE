@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
-import { signedDownloadUrl } from "@/lib/storage";
+import { avatarUrlFor } from "@/lib/storage";
 import { parseJson } from "@/lib/http";
 
 // Own profile + a fresh signed avatar URL (null when no picture set).
@@ -16,7 +16,7 @@ export async function GET() {
   if (!p) return Response.json({ error: "profile not found" }, { status: 404 });
   let avatarUrl: string | null = null;
   if (p.avatar_path) {
-    try { avatarUrl = await signedDownloadUrl(p.avatar_path); } catch { avatarUrl = null; }
+    avatarUrl = await avatarUrlFor(p.avatar_path);
   }
   return Response.json({ ...p, avatarUrl });
 }

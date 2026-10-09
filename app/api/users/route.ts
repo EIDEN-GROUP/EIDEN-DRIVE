@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { signedDownloadUrl } from "@/lib/storage";
+import { avatarUrlFor } from "@/lib/storage";
 import { parseJson } from "@/lib/http";
 
 // Managers/Admins: full directory incl. emails + sign-in info (auth data is
@@ -23,7 +23,7 @@ export async function GET() {
     const u = byId.get(p.id) as { email?: string; created_at?: string; last_sign_in_at?: string } | undefined;
     let avatarUrl: string | null = null;
     if (p.avatar_path) {
-      try { avatarUrl = await signedDownloadUrl(p.avatar_path); } catch { avatarUrl = null; }
+      avatarUrl = await avatarUrlFor(p.avatar_path);
     }
     results.push({ ...p, avatar_path: undefined, avatarUrl, email: u?.email ?? null, created_at: u?.created_at ?? null, last_sign_in_at: u?.last_sign_in_at ?? null });
   }

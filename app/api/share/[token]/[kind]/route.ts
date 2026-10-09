@@ -1,5 +1,5 @@
 import { adminClient } from "@/lib/supabase-admin";
-import { UPLOAD_BUCKET } from "@/lib/storage";
+import { bucketFor } from "@/lib/storage";
 import { driveCtxFor, accountAccessToken } from "@/lib/drive-accounts";
 import { resolveShare, throttled } from "@/lib/share";
 
@@ -64,7 +64,7 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
   try {
     let buf: Buffer;
     if (file.storage_path) {
-      const { data: blob, error } = await adminClient().storage.from(UPLOAD_BUCKET).download(file.storage_path);
+      const { data: blob, error } = await adminClient().storage.from(bucketFor(file)).download(file.storage_path);
       if (error || !blob) return denied();
       buf = Buffer.from(await blob.arrayBuffer());
     } else if (file.google_file_id) {

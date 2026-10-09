@@ -140,9 +140,16 @@ export async function inScopeGoogleIds(
   accountId: string, rootId: string | null
 ): Promise<Set<string> | null> {
   if (!rootId) return null; // whole My Drive = everything in scope
-  const { data } = await db.from("file_index").select("google_file_id,google_parent_id")
-    .eq("drive_account_id", accountId).not("google_file_id", "is", null).limit(5000);
-  const rows = ((data ?? []) as { google_file_id: string; google_parent_id: string | null }[]);
+  // Paginated: a 5000-row cap would silently amputate big drives and hide
+  // in-scope files, so walk the whole account slice in chunks.
+  const rows: { google_file_id: string; google_parent_id: string | null }[] = [];
+  for (let off = 0; ; off += 1000) {
+    const { data } = await db.from("file_index").select("google_file_id,google_parent_id")
+      .eq("drive_account_id", accountId).not("google_file_id", "is", null).range(off, off + 999);
+    const chunk = ((data ?? []) as { google_file_id: string; google_parent_id: string | null }[]);
+    rows.push(...chunk);
+    if (chunk.length < 1000) break;
+  }
   const children = new Map<string, string[]>();
   for (const r of rows) {
     if (r.google_parent_id) {

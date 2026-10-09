@@ -4,7 +4,7 @@ import { createServerComponentClient } from "@supabase/auth-helpers-nextjs";
 import { cookies } from "next/headers";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
-import { UPLOAD_BUCKET } from "@/lib/storage";
+import { UPLOAD_BUCKET, PFP_BUCKET } from "@/lib/storage";
 import { driveClient, resolveRoot } from "@/lib/google-drive";
 import { getAccounts, quotaFor, rootKind, clientFor, type DriveAccount } from "@/lib/drive-accounts";
 import { withTimeout, googleErrorMessage } from "@/lib/errors";
@@ -44,10 +44,14 @@ export async function GET() {
   if (hasAdminClient()) {
     const db = adminClient();
     const probe = await db.storage.from(UPLOAD_BUCKET).list("", { limit: 1 });
+    const pfpProbe = await db.storage.from(PFP_BUCKET).list("", { limit: 1 });
     storage = {
       configured: !probe.error,
       bucket: UPLOAD_BUCKET,
-      ...(!probe.error ? {} : { hint: "Create a private bucket named eiden-uploads in Supabase → Storage." })
+      pfp_bucket: PFP_BUCKET,
+      pfp_configured: !pfpProbe.error,
+      ...(!probe.error ? {} : { hint: "Create a private bucket named eiden-uploads in Supabase → Storage." }),
+      ...(pfpProbe.error ? { pfp_hint: "Create a private bucket named eiden-pfp in Supabase → Storage (or run 0017 + migrate-pfp)." } : {})
     };
     const { data: jobs } = await db.from("jobs").select("kind,status,created_at").order("created_at", { ascending: false }).limit(20);
     const hb = (jobs ?? []).find((j: { kind: string }) => j.kind === "agent-heartbeat") as { created_at: string } | undefined;

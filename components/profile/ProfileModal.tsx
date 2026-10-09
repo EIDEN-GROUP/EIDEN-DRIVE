@@ -58,7 +58,7 @@ export default function ProfileModal({ onClose }: { onClose: () => void }) {
       const ext = (f.name.split(".").pop() ?? "png").toLowerCase();
       const init = await fetch("/api/drive/upload-url", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: `avatar.${ext}`, mime: f.type, size: f.size })
+        body: JSON.stringify({ name: `avatar.${ext}`, mime: f.type, size: f.size, bucket: "pfp" })
       });
       const dj = await init.json().catch(() => ({}));
       if (!init.ok) throw new Error(dj.error ?? "upload init failed");
@@ -66,7 +66,7 @@ export default function ProfileModal({ onClose }: { onClose: () => void }) {
       if (!put.ok) throw new Error("upload failed");
       const reg = await fetch("/api/drive/upload", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: `avatar.${ext}`, mime: f.type, size: f.size, backends: ["local"], storage_path: dj.path, folder: null })
+        body: JSON.stringify({ name: `avatar.${ext}`, mime: f.type, size: f.size, backends: ["local"], storage_path: dj.path, storage_bucket: "eiden-pfp", folder: null })
       });
       if (!reg.ok) throw new Error("register failed");
       const patch = await fetch("/api/profile", {

@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { adminClient } from "@/lib/supabase-admin";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
-import { UPLOAD_BUCKET } from "@/lib/storage";
+import { UPLOAD_BUCKET, PFP_BUCKET } from "@/lib/storage";
 import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { queueUsbUpload } from "@/lib/usb";
@@ -29,6 +29,9 @@ const Body = z.object({
   backends: z.array(z.enum(["google", "local", "backup"])).min(1).max(3).optional(),
   folder: z.string().uuid().nullable().optional(),
   storage_path: z.string().max(600).nullable().optional(),
+  // Which bucket storage_path lives in (avatars register 'eiden-pfp').
+  // Anything else is rejected: bytes must be where the index says they are.
+  storage_bucket: z.enum(["eiden-uploads", "eiden-pfp"]).nullable().optional(),
   drive_account: z.string().max(40).nullable().optional(),
   // Office USB: after the Supabase upload, queue an async agent job that copies
   // the bytes to the router USB share. Never blocks the upload itself.
@@ -70,7 +73,7 @@ export async function POST(req: Request) {
   const { data, error } = await db.from("file_index").insert({
     name: body.name, mime: body.mime ?? "application/octet-stream", size: body.size ?? 0,
     hash: body.hash ?? null, backends: body.backends ?? ["local"], owner: me.id, folder: body.folder ?? null,
-    storage_path: body.storage_path ?? null
+    storage_path: body.storage_path ?? null, storage_bucket: body.storage_bucket ?? null
   }).select("id").single();
   if (error) return Response.json({ error: error.message }, { status: 500 });
   await db.from("versions").insert({ file_id: data.id, v: 1, hash: body.hash ?? "", actor: me.id });
@@ -87,7 +90,8 @@ export async function POST(req: Request) {
         push_error = pick.reason ?? "no drive available";
       } else {
         try {
-          const { data: blob, error: dlErr } = await db.storage.from(UPLOAD_BUCKET).download(body.storage_path);
+          const srcBucket = body.storage_bucket === PFP_BUCKET ? PFP_BUCKET : UPLOAD_BUCKET;
+          const { data: blob, error: dlErr } = await db.storage.from(srcBucket).download(body.storage_path);
           if (dlErr || !blob) throw new Error(dlErr?.message ?? "storage read failed");
           const d = clientFor(pick.account);
           if (!d) throw new Error("google not configured");
@@ -105,8 +109,18 @@ export async function POST(req: Request) {
             fields: "id"
           });
           if (!created.data.id) throw new Error("google create returned no id");
+          // Record the Drive parent: without it the scope filter can't place
+          // this row inside a scoped drive and the file vanishes from Workspace.
+          let google_parent_id: string | null = root.kind === "folder" ? root.id : null;
+          if (!google_parent_id) {
+            try {
+              const meta = await d.files.get({ fileId: created.data.id, fields: "parents", supportsAllDrives: true });
+              google_parent_id = (meta.data.parents?.[0] as string | undefined) ?? null;
+            } catch { /* parent stays null — row still works, scope may hide it */ }
+          }
           await db.from("file_index").update({
             google_file_id: created.data.id,
+            google_parent_id,
             drive_account_id: pick.account.id,
             backends: ["local", "google"]
           }).eq("id", data.id);

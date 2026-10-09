@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { UPLOAD_BUCKET } from "@/lib/storage";
+import { bucketFor } from "@/lib/storage";
 import { driveCtxFor } from "@/lib/drive-accounts";
 import { canTouch, folderUsable } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
@@ -20,7 +20,7 @@ export async function POST(req: Request) {
   if (p.error) return p.error;
   const db = adminClient();
   const { data: src } = await db.from("file_index")
-    .select("id,name,mime,size,hash,storage_path,google_file_id,drive_account_id,backends,folder,owner").eq("id", p.data.file_id).maybeSingle();
+    .select("id,name,mime,size,hash,storage_path,storage_bucket,google_file_id,drive_account_id,backends,folder,owner").eq("id", p.data.file_id).maybeSingle();
   if (!src) return Response.json({ error: "file not found" }, { status: 404 });
   // Read the source only from your own / department space…
   const gate = await canTouch(db, me, src as { id: string; owner: string; folder: string | null });
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
   try {
     if (src.storage_path) {
       storage_path = `${me.id}/${Date.now()}-copy-${src.storage_path.split("/").pop()}`;
-      const { error } = await db.storage.from(UPLOAD_BUCKET).copy(src.storage_path, storage_path);
+      const { error } = await db.storage.from(bucketFor(src)).copy(src.storage_path, storage_path);
       if (error) throw new Error(error.message);
       backends.push("local");
     }
@@ -57,6 +57,7 @@ export async function POST(req: Request) {
     name: copyName, mime: src.mime, size: src.size, hash: src.hash,
     backends: backends.length ? backends : src.backends,
     owner: me.id, folder, storage_path, google_file_id,
+    storage_bucket: storage_path ? ((src as { storage_bucket?: string | null }).storage_bucket ?? null) : null,
     drive_account_id: (src as { drive_account_id?: string | null }).drive_account_id ?? null
   }).select("id").single();
   if (error) return Response.json({ error: error.message }, { status: 500 });

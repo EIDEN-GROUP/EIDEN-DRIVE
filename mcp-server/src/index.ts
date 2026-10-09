@@ -74,12 +74,12 @@ server.tool(
   async ({ file_id }) => {
     const id = await identity();
     if ("error" in id) return fail(id.error);
-    const { data: f } = await db.from("file_index").select("id,name,mime,size,backends,storage_path,updated_at").eq("id", file_id).eq("owner", USER_ID).maybeSingle();
+    const { data: f } = await db.from("file_index").select("id,name,mime,size,backends,storage_path,storage_bucket,updated_at").eq("id", file_id).eq("owner", USER_ID).maybeSingle();
     if (!f) return fail("not found (or not yours)");
-    const row = f as { name: string; mime: string; size: number; storage_path: string | null };
+    const row = f as { name: string; mime: string; size: number; storage_path: string | null; storage_bucket: string | null };
     let content: string | null = null;
     if (row.storage_path && row.size <= READ_CAP && /^(text\/|application\/(json|javascript|xml)|.*(md|txt|csv|json|xml)$)/.test(`${row.mime} ${row.name}`)) {
-      const { data: blob, error } = await db.storage.from(BUCKET).download(row.storage_path);
+      const { data: blob, error } = await db.storage.from(row.storage_bucket || BUCKET).download(row.storage_path);
       if (!error && blob) {
         const buf = Buffer.from(await blob.arrayBuffer());
         content = buf.toString("utf8");

@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { signedDownloadUrl, UPLOAD_BUCKET } from "@/lib/storage";
+import { signedDownloadUrl, bucketFor } from "@/lib/storage";
 import { driveCtxFor, accountAccessToken } from "@/lib/drive-accounts";
 import { canTouch } from "@/lib/visibility";
 import { parseQuery } from "@/lib/http";
@@ -144,7 +144,7 @@ export async function GET(req: Request) {
     return Response.json({ error: "open this file in the viewer (preview) — direct download needs a synced copy", live: true }, { status: 400 });
   }
   const supa = createClient();
-  const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,google_file_id,drive_account_id,owner,folder").eq("id", file_id).maybeSingle();
+  const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,storage_bucket,google_file_id,drive_account_id,owner,folder").eq("id", file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   // Bytes obey the same confinement as the listing: own / dept / tag match.
   // (Live g: rows above stay open — shared drives are company-wide by scope.)
@@ -153,7 +153,7 @@ export async function GET(req: Request) {
   await logAudit({ actor: me.id, actor_name: me.username, action: "download", file_id, req });
   if (p.data.json) {
     if (f.storage_path) {
-      try { return Response.json({ url: await signedDownloadUrl(f.storage_path), mime: f.mime }); }
+      try { return Response.json({ url: await signedDownloadUrl(f.storage_path, 300, bucketFor(f)), mime: f.mime }); }
       catch (e) { return Response.json({ error: e instanceof Error ? e.message : "could not sign download" }, { status: 500 }); }
     }
     // No direct-embed URL exists for Google files (Drive blocks framing) —
@@ -164,10 +164,10 @@ export async function GET(req: Request) {
     if (typeof f.size === "number" && f.size > RAW_MAX) {
       return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });
     }
-    try {
-      if (f.storage_path) {
-        const db = adminClient();
-        const { data: blob, error } = await db.storage.from(UPLOAD_BUCKET).download(f.storage_path);
+      try {
+        if (f.storage_path) {
+          const db = adminClient();
+          const { data: blob, error } = await db.storage.from(bucketFor(f)).download(f.storage_path);
         if (error || !blob) throw new Error(error?.message ?? "storage read failed");
         return ranged(req, Buffer.from(await blob.arrayBuffer()), f.mime ?? "application/octet-stream", f.name);
       }
@@ -189,7 +189,7 @@ export async function GET(req: Request) {
     }
   }
   if (f.storage_path) {
-    try { return Response.redirect(await signedDownloadUrl(f.storage_path), 302); }
+    try { return Response.redirect(await signedDownloadUrl(f.storage_path, 300, bucketFor(f)), 302); }
     catch (e) { return Response.json({ error: e instanceof Error ? e.message : "could not sign download" }, { status: 500 }); }
   }
   if (f.google_file_id) {

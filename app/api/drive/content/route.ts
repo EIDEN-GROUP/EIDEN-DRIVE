@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { UPLOAD_BUCKET } from "@/lib/storage";
+import { bucketFor } from "@/lib/storage";
 import { driveCtxFor } from "@/lib/drive-accounts";
 import { canTouch } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
@@ -32,7 +32,7 @@ export async function PATCH(req: Request) {
   if (p.error) return p.error;
   const db = adminClient();
   const { data: f } = await db.from("file_index")
-    .select("id,name,mime,size,storage_path,google_file_id,drive_account_id,owner,folder").eq("id", p.data.file_id).maybeSingle();
+    .select("id,name,mime,size,storage_path,storage_bucket,google_file_id,drive_account_id,owner,folder").eq("id", p.data.file_id).maybeSingle();
   if (!f) return Response.json({ error: "file not found" }, { status: 404 });
   // Owner, manager, or department-tag match (folder dept or same-named tag).
   const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null });
@@ -43,7 +43,7 @@ export async function PATCH(req: Request) {
   const bytes = Buffer.from(p.data.text, "utf8");
   try {
     if (f.storage_path) {
-      const { error } = await db.storage.from(UPLOAD_BUCKET).update(f.storage_path, bytes, { contentType: f.mime ?? "text/plain", upsert: true });
+      const { error } = await db.storage.from(bucketFor(f)).update(f.storage_path, bytes, { contentType: f.mime ?? "text/plain", upsert: true });
       if (error) throw new Error(error.message);
     } else if (f.google_file_id) {
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);

@@ -27,7 +27,7 @@ export function throttled(key: string, limit = 60): boolean {
 
 export interface SharedFile {
   linkId: string;
-  file: { id: string; name: string; mime: string; size: number; storage_path: string | null; google_file_id: string | null; drive_account_id: string | null; backends: string[] };
+  file: { id: string; name: string; mime: string; size: number; storage_path: string | null; storage_bucket: string | null; google_file_id: string | null; drive_account_id: string | null; backends: string[] };
 }
 
 export async function resolveShare(token: string): Promise<SharedFile | null> {
@@ -36,7 +36,7 @@ export async function resolveShare(token: string): Promise<SharedFile | null> {
   const { data: link } = await db.from("share_links").select("id,file_id,expires_at").eq("token_hash", tokenHash(token)).maybeSingle();
   const l = link as { id: string; file_id: string; expires_at: string } | null;
   if (!l || new Date(l.expires_at).getTime() < Date.now()) return null;
-  const { data: f } = await db.from("file_index").select("id,name,mime,size,storage_path,google_file_id,drive_account_id,backends").eq("id", l.file_id).maybeSingle();
+  const { data: f } = await db.from("file_index").select("id,name,mime,size,storage_path,storage_bucket,google_file_id,drive_account_id,backends").eq("id", l.file_id).maybeSingle();
   if (!f) return null;
   return { linkId: l.id, file: f as SharedFile["file"] };
 }
