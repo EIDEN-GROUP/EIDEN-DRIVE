@@ -1423,9 +1423,12 @@ export default function Explorer() {
                             ? <button onClick={(e) => { e.stopPropagation(); toggleExpand(r.id); }} aria-label={expanded.has(r.id) ? `Collapse ${r.name}` : `Expand ${r.name}`} aria-expanded={expanded.has(r.id)}
                                 className="size-[18px] grid place-items-center text-muted hover:text-brand shrink-0">{expanded.has(r.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
                             : <span className="w-[18px] shrink-0" />}
-                          {thumbs && r.file
-                            ? <FileThumb file={r.file} size={40} />
-                            : <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={26} className="shrink-0" />}
+                          {/* Fixed icon slot: covers, page icons and folders all share one column, so names line up. */}
+                          <span className="w-9 h-9 shrink-0 grid place-items-center">
+                            {thumbs && r.kind === "file" && r.file
+                              ? <FileThumb file={r.file} size={34} />
+                              : <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={26} />}
+                          </span>
                           <span className="text-[15px] truncate">{r.name}</span>
                         </div>
                         <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
@@ -1460,7 +1463,7 @@ export default function Explorer() {
                         onKeyDown={(e) => onRowKey(e, r)}
                         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
                         className={`flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors ${thumbs && !folder ? "min-h-[152px]" : "min-h-[104px]"} ${on ? "bg-tint text-brand" : "hover:bg-tint/40"} ${thumbs && folder ? "border border-line/60 bg-soft/40" : ""}`}>
-                        {thumbs && r.file
+                        {thumbs && !folder && r.file
                           ? <FileThumb file={r.file} size={72} />
                           : <FileIcon name={r.name} mime={r.file?.mime} folder={folder} size={64} />}
                         <span className="text-[12.5px] leading-tight break-all line-clamp-2">{r.name}</span>
