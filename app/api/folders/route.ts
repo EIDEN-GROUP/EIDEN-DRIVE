@@ -7,20 +7,28 @@ import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { visibleFolderIds, isManager, accessContext, folderUsable } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
+import { usernamesFor } from "@/lib/people";
 
 export async function GET() {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
   const supa = createClient();
-  const { data, error } = await supa.from("folders").select("id,name,parent,dept,classification").order("name").limit(500);
+  // created_at/created_by arrive with 0018 — fall back to the old shape until it is applied.
+  const pull = (cols: string) => supa.from("folders").select(cols).order("name").limit(500);
+  let { data, error } = await pull("id,name,parent,dept,classification,created_at,created_by");
+  if (error && /created_(at|by)/.test(error.message)) ({ data, error } = await pull("id,name,parent,dept,classification"));
   if (error) return Response.json({ error: error.message }, { status: 500 });
   // Members see their department's folders: dept field OR same-named tag
   // (assigning dept "Clients" auto-unlocks everything tagged Clients).
-  const rows = (data ?? []) as { id: string; name: string; parent: string | null; dept: string | null; classification: string | null }[];
-  if (isManager(me.role)) return Response.json({ results: rows });
-  const ctx = await accessContext(adminClient(), me);
-  const vis = ctx.folders ?? visibleFolderIds(rows, me) ?? new Set<string>();
-  return Response.json({ results: rows.filter((f) => vis.has(f.id)) });
+  type FolderRow = { id: string; name: string; parent: string | null; dept: string | null; classification: string | null; created_at?: string | null; created_by?: string | null };
+  let rows = (data ?? []) as unknown as FolderRow[];
+  if (!isManager(me.role)) {
+    const ctx = await accessContext(adminClient(), me);
+    const vis = ctx.folders ?? visibleFolderIds(rows, me) ?? new Set<string>();
+    rows = rows.filter((f) => vis.has(f.id));
+  }
+  const names = await usernamesFor(rows.map((r) => r.created_by));
+  return Response.json({ results: rows.map((r) => ({ ...r, created_by_name: r.created_by ? names.get(r.created_by) ?? null : null })) });
 }
 
 const Body = z.object({
@@ -46,12 +54,13 @@ export async function POST(req: Request) {
     const dst = await folderUsable(db, me, body.parent);
     if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
   }
-  const { data, error } = await adminClient().from("folders")
-    .insert({ name: body.name, parent: body.parent ?? null, dept, classification: "Internal" })
-    .select("id").single();
+  const base = { name: body.name, parent: body.parent ?? null, dept, classification: "Internal" };
+  let { data, error } = await db.from("folders").insert({ ...base, created_by: me.id }).select("id").single();
+  // Pre-0018 schema has no created_by column: insert without it.
+  if (error && /created_by/.test(error.message)) ({ data, error } = await db.from("folders").insert(base).select("id").single());
   if (error) return Response.json({ error: error.message }, { status: 500 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "add", req, detail: { folder: body.name } });
-  return Response.json({ ok: true, id: data.id }, { status: 201 });
+  return Response.json({ ok: true, id: data!.id }, { status: 201 });
 }
 
 const Rename = z.object({

@@ -21,12 +21,13 @@ import { TagChip, TagDot, TagDots, TagEditor, TagPicker } from "../tags/TagUI";
 import type { Tag, TagKind } from "../tags/useTags";
 import { badge, classify, formatBytes } from "@/lib/files";
 
-export interface Folder { id: string; name: string; parent: string | null; dept: string | null }
+export interface Folder { id: string; name: string; parent: string | null; dept: string | null; created_at?: string | null; created_by_name?: string | null }
 export interface FileRow {
   id: string; name: string; mime?: string; size?: number; backends: string[];
   owner?: string; updated?: string; updated_at?: string; folder?: string | null;
   hash?: string; storage_path?: string | null; accountLabel?: string; google_file_id?: string | null;
   google_parent_id?: string | null; drive_account_id?: string | null;
+  created_at?: string | null; owner_name?: string | null;
 }
 interface BinRow { file_id: string; deleted_at: string; purge_at: string; file_index: { id: string; name: string; mime: string; size: number } | { id: string; name: string; mime: string; size: number }[] }
 
@@ -426,6 +427,56 @@ export default function Explorer() {
       if (r.kind === "folder") return "—";
     }
     return r.file ? badge(r.file.backends, r.file.accountLabel) || "--" : "--";
+  }
+
+  // Details-panel facts. Folders get folder facts (where, what's inside, who
+  // made it); files get file facts. "--" only when the data truly doesn't exist.
+  function detailRows(r: Row): [string, string][] {
+    const gid = r.kind === "folder"
+      ? (r.googleFolder ?? (r.id.startsWith("gdrive:") ? r.id.slice("gdrive:".length) : null))
+      : null;
+    if (r.kind === "folder") {
+      let subFolders = 0, subFiles = 0, latest = "";
+      const bump = (d?: string | null) => { if (d && d > latest) latest = d; };
+      if (r.folder) {
+        subFolders = folders.filter((f) => f.parent === r.folder!.id).length;
+        for (const f of files) if (f.folder === r.folder.id) { subFiles++; bump(f.updated_at ?? f.updated); }
+      } else if (gid) {
+        const kids = tree ? tree.filter((t) => t.parent === gid) : [];
+        if (kids.length) {
+          for (const k of kids) if (k.mime === "application/vnd.google-apps.folder") subFolders++; else subFiles++;
+        } else {
+          for (const f of files) if (f.google_parent_id === gid) {
+            if (f.mime === "application/vnd.google-apps.folder") subFolders++; else { subFiles++; bump(f.updated_at ?? f.updated); }
+          }
+        }
+      }
+      const where = r.folder
+        ? ["Workspace", ...pathTo(r.folder.id).slice(0, -1).map((id) => folderById.get(id)?.name ?? "Folder")].join(" › ")
+        : gid ? (drivePath(gid) ?? (r.file?.accountLabel ? `Google · ${r.file.accountLabel}` : "Google Drive")) : "--";
+      const indexRow = r.file ?? (r.indexId ? files.find((f) => f.id === r.indexId) : undefined);
+      const createdBy = r.folder ? r.folder.created_by_name : indexRow?.owner_name;
+      const createdAt = r.folder ? r.folder.created_at : indexRow?.created_at;
+      const count = `${subFolders} folder${subFolders === 1 ? "" : "s"} · ${subFiles} file${subFiles === 1 ? "" : "s"}`;
+      return [
+        ["Created by", createdBy ?? "--"],
+        ["Created", fmtDate(createdAt)],
+        ["Modified", fmtDate(latest || indexRow?.updated_at || indexRow?.updated)],
+        ["Location", where],
+        ["Contains", count],
+        ["Size", folderSize(r)],
+        ...(indexRow?.accountLabel ? [["Drive", indexRow.accountLabel] as [string, string]] : [])
+      ];
+    }
+    const f = r.file;
+    return [
+      ["Created by", f?.owner_name ?? "--"],
+      ["Created", fmtDate(f?.created_at)],
+      ["Modified", f ? fmtDate(f.updated_at ?? f.updated) : "--"],
+      ["Location", locText(r)],
+      ...(f?.accountLabel ? [["Drive", f.accountLabel] as [string, string]] : []),
+      ["SHA-256", f?.hash ? `${f.hash.slice(0, 12)}…` : "--"]
+    ];
   }
 
   // Contained-bytes totals per folder: local ancestry via the folders table,
@@ -1510,15 +1561,9 @@ export default function Explorer() {
                 {sel.file?.size ? <span className="text-[11px] text-ink/75 shrink-0">{formatBytes(sel.file.size)}</span> : null}
               </div>
               <dl className="mt-3 text-[12px]">
-                {[
-                  ["Modified", sel.file ? fmtDate(sel.file.updated_at ?? sel.file.updated) : "--"],
-                  ["Location", locText(sel)],
-                  ...(sel.file?.accountLabel ? [["Drive", sel.file.accountLabel] as [string, string] ] : []),
-                  ["Owner", sel.file?.owner ? `${sel.file.owner.slice(0, 8)}…` : "--"],
-                  ["SHA-256", sel.file?.hash ? `${sel.file.hash.slice(0, 12)}…` : "--"]
-                ].map(([k, v]) => (
+                {detailRows(sel).map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between gap-3 py-2.5 border-b border-line">
-                    <dt className="text-ink/80">{k} :</dt><dd className="text-[11px] text-ink/75 text-right truncate">{v}</dd>
+                    <dt className="text-ink/80 shrink-0">{k}</dt><dd className="text-[11.5px] text-ink/75 text-right truncate" title={v}>{v}</dd>
                   </div>
                 ))}
               </dl>

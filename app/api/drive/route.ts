@@ -9,6 +9,7 @@ import { visibleFolderIds, loadFolders, fileOrClause, inScopeGoogleIds, isManage
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { escapeLike } from "@/lib/http";
+import { usernamesFor } from "@/lib/people";
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -39,14 +40,16 @@ export async function GET(req: Request) {
   const adb = adminClient();
   const ctx = isManager(me.role) ? null : await accessContext(adb, me);
   const visible = ctx ? ctx.folders : visibleFolderIds(folders, me);
-  let filesQuery = supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id").ilike("name", `%${escapeLike(q)}%`);
-  if (inactive.length) filesQuery = filesQuery.not("drive_account_id", "in", `(${inactive.join(",")})`);
+  const COLS = "id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id";
   const orClause = fileOrClause(me, visible, ctx?.taggedFiles);
-  if (orClause) filesQuery = filesQuery.or(orClause);
-  if (ctx) {
-    const forbidden = await forbiddenTaggedFileIds(adb, me);
-    if (forbidden.length) filesQuery = filesQuery.not("id", "in", `(${forbidden.slice(0, 2000).join(",")})`);
-  }
+  const forbidden = ctx ? await forbiddenTaggedFileIds(adb, me) : [];
+  const buildQuery = (cols: string) => {
+    let fq = supa.from("file_index").select(cols).ilike("name", `%${escapeLike(q)}%`);
+    if (inactive.length) fq = fq.not("drive_account_id", "in", `(${inactive.join(",")})`);
+    if (orClause) fq = fq.or(orClause);
+    if (forbidden.length) fq = fq.not("id", "in", `(${forbidden.slice(0, 2000).join(",")})`);
+    return fq;
+  };
   // Hide pre-scope legacy rows (google rows with no account pin) from everyone
   // except managers, who need to see them to clean up. Counted separately so
   // the client can show the resync notice; dropped in JS below (a second OR
@@ -64,12 +67,14 @@ export async function GET(req: Request) {
     if (isManager(me.role)) orphanCount = count ?? 0;
     else hiddenLegacy = count ?? 0;
   }
-  const { data: rows } = await filesQuery.range(offset, offset + limit - 1);
+  // created_at arrives with migration 0018 — retry without it until applied.
+  let { data: rows, error: rowsErr } = await buildQuery(`${COLS},created_at`).range(offset, offset + limit - 1);
+  if (rowsErr && /created_at/.test(rowsErr.message)) ({ data: rows } = await buildQuery(COLS).range(offset, offset + limit - 1));
   // Google rows must sit inside their account's scope (pre-scope leftovers hide).
   // SCOPE APPLIES TO EVERY ROLE — including admins. A drive scoped to folder X
   // shows X's subtree and nothing else. (Dept permission above is separate.)
   type Row = { id: string; name: string; mime: string; size: number; backends: string[]; drive_account_id?: string | null; google_file_id?: string | null; google_parent_id?: string | null };
-  let scoped = ((rows ?? []) as Row[]);
+  let scoped = ((rows ?? []) as unknown as Row[]);
   {
     const live = accounts.filter((a) => a.status === "active" && a.root_id);
     if (live.length) {
@@ -157,9 +162,11 @@ export async function GET(req: Request) {
     }
   }
   if (errors.length) google_error = `${errors.join(" ")} Showing indexed files.`;
+  const ownerNames = await usernamesFor(scoped.map((r) => (r as { owner?: string | null }).owner));
   const indexed = scoped.map((r: Row) => ({
     ...r,
     updated: (r as { updated_at?: string }).updated_at,
+    owner_name: ownerNames.get((r as { owner?: string }).owner ?? "") ?? null,
     accountLabel: r.drive_account_id ? labelOf.get(r.drive_account_id) ?? undefined : undefined
   }));
   // Dedupe: a synced file appears as BOTH its index row and a live g: row.
