@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
   Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload,
-  Eye, Copy, Scissors, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon, Image as ImageIcon
+  Eye, Copy, Scissors, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -110,14 +110,8 @@ export default function Explorer() {
   const [hist, setHist] = useState<Nav[]>([{ kind: "root", path: [] }]);
   const [hi, setHi] = useState(0);
   const [view, setView] = useState<View>("list");
-  // Covers (Windows-style thumbnails), persisted. Off = classic icons.
-  const [thumbs, setThumbs] = useState(true);
-  useEffect(() => {
-    try { if (localStorage.getItem("eiden-thumbs") === "0") setThumbs(false); } catch { /* ignore */ }
-  }, []);
-  function toggleThumbs() {
-    setThumbs((v) => { try { localStorage.setItem("eiden-thumbs", v ? "0" : "1"); } catch { /* ignore */ } return !v; });
-  }
+  // Covers (Windows-style thumbnails) are always on — no toggle.
+  const thumbs = true;
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
   const [tagFilter, setTagFilter] = useState<string | null>(null); // department filter (manager-set folder.dept)
   const tg = useTags();                                            // user-created tags
@@ -1220,11 +1214,7 @@ export default function Explorer() {
             </div>
             <div role="group" aria-label="View" className="flex rounded-md overflow-hidden">
               <button onClick={() => switchView("list")} aria-pressed={view === "list"} aria-label="List view" className={`size-11 grid place-items-center ${view === "list" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutList size={19} strokeWidth={1.6} /></button>
-              <button onClick={() => switchView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
-              <button onClick={toggleThumbs} aria-pressed={thumbs} aria-label={thumbs ? "Hide file covers" : "Show file covers"}
-                title={thumbs ? "Hide covers" : "Show covers (images, video frames)"}
-                className={`size-11 grid place-items-center ${thumbs ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><ImageIcon size={19} strokeWidth={1.6} /></button>
-            </div>
+              <button onClick={() => switchView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>            </div>
             <span className="h-5 border-l border-line mx-0.5" />
             {/* Upload: action + destination picker (Supabase, Drive, USB — each toggleable). */}
             <div className="flex items-stretch h-11 rounded-lg bg-brand text-white shadow-[0_1px_2px_rgba(60,30,140,.3)]">
