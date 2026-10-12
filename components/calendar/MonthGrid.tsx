@@ -10,11 +10,11 @@ export default function MonthGrid({ month, todayKey, plansByDay, fileCounts, onC
   const rows = cells.slice(35).every((d) => d.getMonth() !== month.getMonth()) ? 5 : 6;
   return (
     <div className="flex-1 min-h-0 rounded-2xl border border-line bg-surface overflow-auto">
-      <div className="min-w-[720px] h-full flex flex-col">
+      <div className="sm:min-w-[600px] h-full flex flex-col">
         <div className="grid grid-cols-7 border-b border-line sticky top-0 bg-surface z-10">
-          {WEEKDAYS_LONG.map((w) => <span key={w} className="px-3 py-2.5 text-[10.5px] font-medium tracking-wider text-muted">{w}</span>)}
+          {WEEKDAYS_LONG.map((w) => <span key={w} className="px-1 sm:px-3 py-2.5 text-[10.5px] font-medium tracking-wider text-muted text-center sm:text-left"><span className="sm:hidden">{w.slice(0, 1)}</span><span className="hidden sm:inline lg:hidden">{w.slice(0, 3)}</span><span className="hidden lg:inline">{w}</span></span>)}
         </div>
-        <div className="flex-1 grid grid-cols-7" style={{ gridTemplateRows: `repeat(${rows}, minmax(104px, 1fr))` }}>
+        <div className="flex-1 grid grid-cols-7 [--mg-row:58px] sm:[--mg-row:92px] lg:[--mg-row:104px]" style={{ gridTemplateRows: `repeat(${rows}, minmax(var(--mg-row), 1fr))` }}>
           {cells.slice(0, rows * 7).map((d) => {
             const k = dayKey(d);
             const ps = [...(plansByDay.get(k) ?? [])].sort((a, b) => (toMin(a.plan_time) ?? -1) - (toMin(b.plan_time) ?? -1));
@@ -24,11 +24,11 @@ export default function MonthGrid({ month, todayKey, plansByDay, fileCounts, onC
             const f = fileCounts?.get(k) ?? 0;
             return (
               <div key={k} onClick={(e) => { if (e.target === e.currentTarget) onCreate(k); }}
-                className={`border-l border-b border-line p-1.5 min-w-0 cursor-cell first:border-l-0 [&:nth-child(7n+1)]:border-l-0 ${inMonth ? "" : "opacity-45"}`}
+                className={`border-l border-b border-line p-0.5 sm:p-1.5 min-w-0 cursor-cell flex flex-col items-center sm:block first:border-l-0 [&:nth-child(7n+1)]:border-l-0 ${inMonth ? "" : "opacity-45"}`}
                 style={{ background: isToday ? "color-mix(in srgb, var(--brand) 8%, var(--surface))" : wk ? "color-mix(in srgb, var(--ink) 3.5%, var(--surface))" : undefined }}>
                 <button onClick={() => onDayClick(d)} aria-label={`Open ${d.toDateString()}`}
                   className={`size-7 rounded-full grid place-items-center text-[13px] tabular-nums hover:bg-tint ${isToday ? "bg-brand text-white font-medium hover:bg-brand" : ""}`}>{d.getDate()}</button>
-                <div className="mt-1 space-y-1">
+                <div className="mt-1 space-y-1 hidden sm:block">
                   {ps.slice(0, 3).map((p) => {
                     const c = prio(p.priority).color;
                     const t = toMin(p.plan_time);
@@ -43,6 +43,12 @@ export default function MonthGrid({ month, todayKey, plansByDay, fileCounts, onC
                   {ps.length > 3 && <button onClick={() => onDayClick(d)} className="text-[11.5px] text-brand font-medium px-1">+{ps.length - 3} more</button>}
                   {f > 0 && <span className="block text-[10.5px] text-muted px-1">{f} file{f === 1 ? "" : "s"}</span>}
                 </div>
+                {/* Phone: no room for chips — priority dots; tapping the day opens it. */}
+                {ps.length > 0 && (
+                  <button onClick={() => onDayClick(d)} aria-label={`${ps.length} plan${ps.length === 1 ? "" : "s"} on ${d.toDateString()}`} className="sm:hidden mt-1 flex flex-wrap justify-center gap-[3px] px-0.5">
+                    {ps.slice(0, 4).map((p) => <span key={p.id} className={`size-[6px] rounded-full ${p.done ? "opacity-40" : ""}`} style={{ background: prio(p.priority).color }} />)}
+                  </button>
+                )}
               </div>
             );
           })}

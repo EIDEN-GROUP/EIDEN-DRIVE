@@ -74,7 +74,7 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
   const input = "min-h-[44px] rounded-md border border-line bg-surface px-3 text-[13px] focus:border-brand focus:outline-none";
 
   return (
-    <section className="px-1 pt-1">
+    <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
       <PageHead title="All Users" subtitle="Accounts are invite-only; department tags are set by managers and admins."
         actions={canInvite ? <InviteMember isAdmin={isAdmin} depts={depts} /> : undefined} />
 
@@ -102,14 +102,14 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
 
       <div className="rounded-2xl border border-line bg-surface overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-[13.5px] min-w-[720px]">
+          <table className="w-full text-[13.5px]">
             <thead>
               <tr className="bg-soft text-left text-[13.5px] text-ink/80 font-normal">
-                <th className="px-4 h-11 font-medium">User</th>
-                <th className="px-3 h-11 font-medium">Department</th>
-                <th className="px-3 h-11 font-medium">Role</th>
-                <th className="px-3 h-11 font-medium">Status</th>
-                <th className="px-3 h-11 font-medium">Last Login</th>
+                <th className="px-3 sm:px-4 h-11 font-medium">User</th>
+                <th className="hidden md:table-cell px-3 h-11 font-medium">Department</th>
+                <th className="hidden sm:table-cell px-3 h-11 font-medium">Role</th>
+                <th className="hidden lg:table-cell px-3 h-11 font-medium">Status</th>
+                <th className="hidden xl:table-cell px-3 h-11 font-medium">Last Login</th>
                 <th className="px-3 h-11"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
@@ -119,7 +119,7 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
                 return (
                   <tr key={u.id} onClick={() => setSelected(u)}
                     className="border-t border-line/70 first:border-0 hover:bg-tint/40 cursor-pointer transition-colors">
-                    <td className="px-4 py-2.5">
+                    <td className="px-3 sm:px-4 py-2.5 max-w-0 w-full">
                       <span className="flex items-center gap-2.5 min-w-0">
                         <Avatar u={u} size="size-9 text-[13px]" />
                         <span className="min-w-0">
@@ -128,22 +128,22 @@ export default function UsersClient({ rows, me, isAdmin, canManage, canInvite, d
                         </span>
                       </span>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="hidden md:table-cell px-3 py-2.5">
                       {u.department_tag
                         ? <span className="inline-block px-2.5 py-1 rounded-md bg-tint text-brand text-[12px] font-medium">{u.department_tag}</span>
                         : <span className="text-muted">—</span>}
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="hidden sm:table-cell px-3 py-2.5">
                       <span className="inline-block px-2.5 py-1 rounded-md bg-tint text-brand text-[12px] font-medium capitalize">{u.role}</span>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="hidden lg:table-cell px-3 py-2.5">
                       <span className={`inline-flex items-center gap-1.5 text-[12px] ${on ? "text-green-700" : "text-muted"}`} title={on ? "Signed in within the last 30 days" : "No sign-in in the last 30 days"}>
                         <span className={`size-1.5 rounded-full ${on ? "bg-green-600" : "bg-current"}`} />
                         {on ? "Active" : "Inactive"}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5 text-muted whitespace-nowrap">{rel(u.last_sign_in_at)}</td>
-                    <td className="px-3 py-2.5 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                    <td className="hidden xl:table-cell px-3 py-2.5 text-muted whitespace-nowrap">{rel(u.last_sign_in_at)}</td>
+                    <td className="px-1 sm:px-3 py-2.5 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                       <UserRowActions u={u} me={me} isAdmin={isAdmin} canManage={canManage} depts={depts} onOpen={() => setSelected(u)} />
                     </td>
                   </tr>
@@ -255,9 +255,9 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
   }
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={u.username}>
+    <div className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog" aria-modal="true" aria-label={u.username}>
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="pop-in relative w-full max-w-lg max-h-[88vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
+      <div className="pop-in relative w-full max-w-lg max-h-[92dvh] sm:max-h-[88dvh] rounded-t-2xl sm:rounded-xl pb-safe sm:pb-0 bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
         <div className="p-5 pb-0">
           <div className="flex items-start gap-3">
             <Avatar u={u} size="size-12 text-[18px]" />

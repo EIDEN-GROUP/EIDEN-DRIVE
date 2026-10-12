@@ -212,7 +212,7 @@ export default function StoragePage() {
   const jobTone = (st: string): "good" | "warn" | "bad" | "neutral" => (st === "done" ? "good" : st === "pending" ? "warn" : st === "failed" || st === "error" ? "bad" : "neutral");
 
   return (
-    <section className="px-1 pt-1 max-w-[1400px] mx-auto">
+    <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
       <PageHead title="Storage & Backups" subtitle="Your connected Google drives, capacity, and backup checks."
         actions={<>
           {data?.canManage && <button onClick={checkNow} disabled={busy} className="min-h-[44px] px-4 rounded-lg border border-line bg-surface text-[14px] flex items-center gap-2 hover:bg-tint disabled:opacity-50 transition-colors"><ShieldCheck size={16} /> {busy ? "Queuing…" : "Run backup check"}</button>}

@@ -152,7 +152,7 @@ export default function CalendarClient() {
   const circle = "size-10 rounded-full grid place-items-center bg-tint text-brand hover:bg-brand hover:text-white transition-colors";
 
   return (
-    <section className="h-full min-h-[560px] flex rounded-2xl border border-line bg-surface overflow-hidden" aria-label="Calendar">
+    <section className="h-full min-h-[480px] sm:min-h-[560px] flex rounded-2xl border border-line bg-surface overflow-hidden" aria-label="Calendar">
       {/* ── Left: mini month + agenda ── */}
       <aside className="hidden lg:flex w-[336px] xl:w-[364px] shrink-0 flex-col bg-soft border-r border-line overflow-y-auto" aria-label="Mini calendar and agenda">
         <div className="px-5 pt-5 pb-3">
@@ -205,34 +205,34 @@ export default function CalendarClient() {
       </aside>
 
       {/* ── Right: header + view ── */}
-      <div className="flex-1 min-w-0 flex flex-col p-4 sm:px-6 sm:py-5 gap-3">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
-          <h1 className="text-[28px] sm:text-[32px] leading-none font-medium tracking-tight mr-1">{title}</h1>
+      <div className="flex-1 min-w-0 flex flex-col p-3 sm:px-6 sm:py-5 gap-3">
+        <div className="flex flex-wrap items-center gap-x-3 sm:gap-x-4 gap-y-2.5 sm:gap-y-3">
+          <h1 className="text-[24px] sm:text-[28px] lg:text-[32px] leading-none font-medium tracking-tight mr-1">{title}</h1>
           <div className="flex items-center gap-2">
             <button className={circle} aria-label="Previous" onClick={() => step(-1)}><ChevronLeft size={18} /></button>
-            <button onClick={() => setCursor(dayKey(new Date()))} className="min-h-[42px] min-w-[132px] px-4 rounded-lg border border-line bg-surface text-[14.5px] hover:bg-tint transition-colors">
+            <button onClick={() => setCursor(dayKey(new Date()))} className="min-h-[42px] sm:min-w-[132px] px-3 sm:px-4 rounded-lg border border-line bg-surface text-[14.5px] hover:bg-tint transition-colors">
               {VIEWS.find((v) => v.id === view)!.this}
             </button>
             <button className={circle} aria-label="Next" onClick={() => step(1)}><ChevronRight size={18} /></button>
           </div>
-          <div role="group" aria-label="Calendar view" className="flex rounded-lg border border-line overflow-hidden bg-surface">
+          <div role="group" aria-label="Calendar view" className="order-last sm:order-none w-full sm:w-auto flex rounded-lg border border-line overflow-x-auto bg-surface">
             {VIEWS.map((v) => (
               <button key={v.id} onClick={() => setView(v.id)} aria-pressed={view === v.id}
-                className={`min-h-[42px] px-3 sm:px-5 text-[14px] flex items-center gap-1.5 border-l border-line first:border-l-0 transition-colors ${view === v.id ? "bg-tint text-brand font-medium" : "hover:bg-tint/60"}`}>
-                {view === v.id && <Check size={14} strokeWidth={2.5} />}{v.label}
+                className={`flex-1 sm:flex-none justify-center min-h-[42px] px-2.5 sm:px-4 xl:px-5 text-[13.5px] sm:text-[14px] flex items-center gap-1.5 whitespace-nowrap border-l border-line first:border-l-0 transition-colors ${view === v.id ? "bg-tint text-brand font-medium" : "hover:bg-tint/60"}`}>
+                {view === v.id && <Check size={14} strokeWidth={2.5} className="hidden sm:block" />}{v.label}
               </button>
             ))}
           </div>
-          <div className="relative flex-1 min-w-[180px] max-w-[300px] ml-auto">
+          <div className="relative flex-1 min-w-[140px] sm:min-w-[180px] max-w-[300px] ml-auto">
             <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search date, event, etc…" aria-label="Search plans"
-              className="w-full min-h-[42px] pl-10 pr-9 rounded-lg border border-line bg-surface text-[13.5px] placeholder:text-muted focus:border-brand focus:outline-none" />
+              className="w-full min-h-[42px] pl-10 pr-9 rounded-lg border border-line bg-surface text-[16px] sm:text-[13.5px] placeholder:text-muted focus:border-brand focus:outline-none" />
             {q && <button onClick={() => setQ("")} aria-label="Clear search" className="absolute right-1.5 top-1/2 -translate-y-1/2 size-8 grid place-items-center rounded-md hover:bg-tint text-muted"><X size={15} /></button>}
           </div>
           <button onClick={() => newPlan()} aria-label="New plan" className="lg:hidden size-[42px] rounded-lg bg-brand text-white grid place-items-center"><Plus size={18} /></button>
         </div>
 
-        <h2 className="text-[20px] font-medium -mb-1">{sub}</h2>
+        <h2 className="text-[16px] sm:text-[20px] font-medium -mb-1">{sub}</h2>
 
         {loading ? (
           <div className="flex-1 skel rounded-2xl" aria-label="Loading calendar" />

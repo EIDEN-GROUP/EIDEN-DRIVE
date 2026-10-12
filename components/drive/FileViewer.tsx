@@ -148,10 +148,10 @@ export default function FileViewer({ file, onClose, onEdit }: { file: ViewFile; 
   else body = <BinaryView bytes={bytes} name={file.name} note={eff === "legacy" ? "Legacy Office formats (.doc, .ppt, .msg…) have no safe in-browser renderer. This is the readable text inside the file — download it for the full document." : undefined} />;
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-5" role="dialog" aria-modal="true" aria-label={`Preview ${file.name}`}>
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-0 sm:p-5" role="dialog" aria-modal="true" aria-label={`Preview ${file.name}`}>
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
-      <div className="pop-in relative w-full max-w-5xl h-[88vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
-        <div className="flex items-center gap-2 px-4 py-2 min-h-[56px] border-b border-line shrink-0 flex-wrap">
+      <div className="pop-in relative w-full max-w-5xl 2xl:max-w-6xl h-[100dvh] sm:h-[88dvh] rounded-none sm:rounded-xl bg-surface sm:border border-line shadow-pop flex flex-col overflow-hidden pt-safe pb-safe sm:pt-0 sm:pb-0">
+        <div className="flex items-center gap-2 px-3 sm:px-4 py-2 min-h-[56px] border-b border-line shrink-0 flex-wrap">
           <div className="min-w-0 flex-1 basis-40">
             <p className="text-[14px] font-medium truncate" title={file.name}>{file.name}</p>
             <p className="text-[11.5px] text-muted truncate">{displayKind(file.name, file.mime)}{sn && kind0 === "unknown" ? ` · detected: ${sn.label}` : ""}{file.size ? ` · ${fmtBytes(file.size)}` : ""}</p>

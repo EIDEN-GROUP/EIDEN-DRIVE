@@ -43,7 +43,7 @@ export default function InviteMember({ isAdmin, depts }: { isAdmin: boolean; dep
             <label htmlFor="inv-email" className="block text-[13px] text-muted">Work email</label>
             <input id="inv-email" type="email" required autoFocus autoComplete="off" value={email} onChange={(e) => setEmail(e.target.value)} className={field} />
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-4">
             <div>
               <label htmlFor="inv-role" className="block text-[13px] text-muted">Role</label>
               <select id="inv-role" value={role} onChange={(e) => setRole(e.target.value as typeof role)} disabled={!isAdmin} className={`${field} bg-surface`}>

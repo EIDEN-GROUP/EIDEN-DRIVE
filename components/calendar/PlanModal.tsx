@@ -54,7 +54,7 @@ export default function PlanModal({ draft, folders, onClose, onSaved }: {
           <label htmlFor="pl-title" className="text-[13px] text-muted">Title</label>
           <input id="pl-title" autoFocus required maxLength={160} value={d.title} onChange={(e) => set("title", e.target.value)} className={field} placeholder="e.g. Review brand-book" />
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 min-[380px]:grid-cols-2 gap-3">
           <div>
             <label htmlFor="pl-date" className="text-[13px] text-muted">Date</label>
             <input id="pl-date" type="date" required value={d.date} onChange={(e) => set("date", e.target.value)} className={field} />

@@ -48,7 +48,7 @@ export default function Menu({ trigger, items, label, align = "right", active, t
         className={triggerClassName ?? "min-h-[44px] px-1.5 rounded-md grid place-items-center hover:bg-tint transition-colors"}>{trigger}</button>
       {open && createPortal(
         <div ref={panel} role="menu" aria-label={label} style={pos!}
-          className="pop-in fixed z-[90] w-max min-w-[188px] max-w-[320px] py-1.5 rounded-lg bg-surface border border-line shadow-pop">
+          className="pop-in fixed z-[90] w-max min-w-[188px] max-w-[min(320px,calc(100vw-16px))] max-h-[calc(100dvh-16px)] overflow-y-auto py-1.5 rounded-lg bg-surface border border-line shadow-pop">
           {items.map((it, i) => it === "sep" ? <div key={i} className="my-1 border-t border-line" /> : it.hidden ? null : (
             <button key={it.label} role="menuitem" disabled={it.disabled} title={it.hint}
               onClick={() => { setPos(null); it.onSelect(); }}

@@ -5,42 +5,42 @@ import type { ReactNode } from "react";
 
 export function PageHead({ title, subtitle, actions }: { title: string; subtitle?: ReactNode; actions?: ReactNode }) {
   return (
-    <header className="flex flex-wrap items-start justify-between gap-4 mb-6">
-      <div>
-        <h1 className="text-[28px] leading-tight font-medium tracking-tight">{title}</h1>
-        {subtitle && <p className="text-[14px] text-muted mt-1">{subtitle}</p>}
+    <header className="flex flex-wrap items-start justify-between gap-3 sm:gap-4 mb-4 sm:mb-6">
+      <div className="min-w-0">
+        <h1 className="text-[22px] sm:text-[26px] lg:text-[28px] leading-tight font-medium tracking-tight">{title}</h1>
+        {subtitle && <p className="text-[13px] sm:text-[14px] text-muted mt-1">{subtitle}</p>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto [&>*]:flex-1 sm:[&>*]:flex-none [&>*]:justify-center">{actions}</div>}
     </header>
   );
 }
 
 export function Panel({ title, subtitle, actions, children, className = "" }: { title: string; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <section className={`rounded-2xl border border-line bg-surface p-5 sm:p-6 min-w-0 ${className}`}>
-      <header className="flex items-start justify-between gap-3">
+    <section className={`rounded-2xl border border-line bg-surface p-4 sm:p-5 lg:p-6 min-w-0 ${className}`}>
+      <header className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
         <div className="min-w-0">
-          <h2 className="text-[20px] sm:text-[22px] font-medium leading-tight">{title}</h2>
+          <h2 className="text-[18px] sm:text-[20px] lg:text-[22px] font-medium leading-tight">{title}</h2>
           {subtitle && <p className="text-[13.5px] text-muted mt-1">{subtitle}</p>}
         </div>
         {actions}
       </header>
-      <div className="mt-5">{children}</div>
+      <div className="mt-4 sm:mt-5">{children}</div>
     </section>
   );
 }
 
 export function KpiRow({ children }: { children: ReactNode }) {
-  return <div className="grid grid-cols-2 md:grid-cols-3 min-[1380px]:grid-cols-6 gap-3 sm:gap-4 mb-5">{children}</div>;
+  return <div className="grid grid-cols-2 md:grid-cols-3 min-[1380px]:grid-cols-6 gap-2.5 sm:gap-4 mb-4 sm:mb-5">{children}</div>;
 }
 
 const TONE: Record<string, string> = { default: "", good: "text-[#15902a]", warn: "text-[#b45309]", bad: "text-danger", brand: "text-brand" };
 export function Kpi({ label, value, hint, tone = "default" }: { label: string; value: ReactNode; hint?: ReactNode; tone?: "default" | "good" | "warn" | "bad" | "brand" }) {
   return (
-    <div className="rounded-2xl border border-line bg-surface px-5 py-5 min-w-0">
-      <p className="text-[13.5px] text-muted truncate">{label}</p>
-      <p className={`mt-5 text-[34px] leading-none font-medium tabular-nums truncate ${TONE[tone]}`}>{value}</p>
-      {hint !== undefined && <p className="mt-2 text-[12px] text-muted truncate">{hint}</p>}
+    <div className="rounded-2xl border border-line bg-surface px-3.5 py-3.5 sm:px-5 sm:py-5 min-w-0">
+      <p className="text-[12.5px] sm:text-[13.5px] text-muted truncate">{label}</p>
+      <p className={`mt-3 sm:mt-5 text-[clamp(22px,6vw,34px)] sm:text-[30px] xl:text-[34px] leading-none font-medium tabular-nums truncate ${TONE[tone]}`}>{value}</p>
+      {hint !== undefined && <p className="mt-1.5 sm:mt-2 text-[11.5px] sm:text-[12px] text-muted truncate">{hint}</p>}
     </div>
   );
 }

@@ -131,9 +131,9 @@ export default async function FilePage({ params }: { params: { id: string } }) {
   ];
 
   return (
-    <section className="px-1 pt-1 max-w-5xl mx-auto">
+    <section className="px-0 sm:px-1 pt-1 max-w-5xl 2xl:max-w-6xl mx-auto">
       <a href="/drive" className="text-[13px] text-muted hover:text-brand">← Back to Drive</a>
-      <div className="mt-2 grid md:grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
+      <div className="mt-2 grid lg:grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
         <Card label={`${classify(f.name, f.mime)} · ${formatBytes(f.size)}`}>
           <h1 className="page-title mt-1 break-all">{f.name}</h1>
           <dl className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2.5">

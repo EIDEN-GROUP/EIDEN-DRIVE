@@ -44,16 +44,46 @@ body { font-family: var(--font-poppins), system-ui, sans-serif; -webkit-font-smo
 :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 6px; }
 ::selection { background: var(--tint); }
 
-/* Explorer table grid — Name wide, metadata columns tiny (as in the reference). */
+/* Explorer table grid — columns join as the pane widens, so no screen ever
+   scrolls sideways. DOM order: name, tags, location, modified, size, kind;
+   hidden columns are display:none and take no grid track.
+   phone: name · size | sm: + modified | md: + kind | lg: + location | xl: + tags */
 .frow {
   display: grid; align-items: center; column-gap: 8px;
-  grid-template-columns: minmax(0, 1fr) 118px 64px;
+  grid-template-columns: minmax(0, 1fr) 64px;
+}
+.frow > .c-tags, .frow > .c-loc, .frow > .c-mod, .frow > .c-kind { display: none; }
+@media (min-width: 640px) {
+  .frow { grid-template-columns: minmax(0, 1fr) 118px 64px; }
+  .frow > .c-mod { display: block; }
 }
 @media (min-width: 768px) {
-  .frow { grid-template-columns: minmax(0, 1fr) 70px 130px 190px 84px 96px; }
+  .frow { grid-template-columns: minmax(0, 1fr) 124px 72px 96px; }
+  .frow > .c-kind { display: block; }
 }
-.frow-hide { display: none; }
-@media (min-width: 768px) { .frow-hide { display: block; } }
+@media (min-width: 1024px) {
+  .frow { grid-template-columns: minmax(0, 1fr) minmax(110px, 170px) 130px 76px 96px; }
+  .frow > .c-loc { display: block; }
+}
+@media (min-width: 1280px) {
+  .frow { grid-template-columns: minmax(0, 1fr) 70px minmax(130px, 190px) 140px 84px 96px; }
+  .frow > .c-tags { display: block; }
+}
+.frow > button.c-mod, .frow > button.c-kind { display: none; }
+@media (min-width: 640px) { .frow > button.c-mod { display: flex; } }
+@media (min-width: 768px) { .frow > button.c-kind { display: flex; } }
+
+/* Full-height app frame that follows the real visible viewport on phones
+   (100vh hides content behind mobile browser bars; dvh does not). */
+.app-frame { height: 100vh; height: 100dvh; }
+.pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+.pt-safe { padding-top: env(safe-area-inset-top); }
+
+/* Row "more" button: always visible on touch screens (no right-click there),
+   revealed on hover with a mouse. */
+.row-more { opacity: 0; }
+.frow:hover .row-more, .frow:focus-within .row-more, .gtile:hover .row-more, .gtile:focus-within .row-more { opacity: 1; }
+@media (hover: none), (pointer: coarse) { .row-more { opacity: 1; } }
 
 /* Thin, quiet scrollbars */
 * { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
@@ -100,8 +130,9 @@ body { font-family: var(--font-poppins), system-ui, sans-serif; -webkit-font-smo
 
 /* ── Sidebar: full (248 px) ⇄ icon rail (76 px) on ≥ 768 px; overlay drawer below.
    <html data-sb="full|rail"> is set by the boot script before first paint (no flash). ── */
-.sb { width: 248px; transition: width .22s cubic-bezier(.2, .7, .2, 1), transform .22s ease; }
+.sb { width: min(280px, 85vw); transition: width .22s cubic-bezier(.2, .7, .2, 1), transform .22s ease; }
 @media (min-width: 768px) {
+  .sb { width: 248px; }
   html[data-sb="rail"] .sb { width: 76px; }
   html[data-sb="rail"] .sb-full { display: none; }
   html[data-sb="rail"] .sb-head { justify-content: center; padding-inline: 0; }
