@@ -22,7 +22,7 @@ import Pagination, { usePagination } from "../ui/Pagination";
 import { useTags } from "../tags/useTags";
 import { TagChip, TagDot, TagDots, TagEditor, TagPicker } from "../tags/TagUI";
 import type { Tag, TagKind } from "../tags/useTags";
-import { badge, classify, displayKind, fmtDateTime, formatBytes } from "@/lib/files";
+import { badge, classify, displayKind, fmtDateTime, formatBytes, isGoogleForestRoot } from "@/lib/files";
 
 export interface Folder { id: string; name: string; parent: string | null; dept: string | null; created_at?: string | null; created_by_name?: string | null }
 export interface FileRow {
@@ -672,6 +672,14 @@ export default function Explorer() {
     walk(curFolder, 0);
     // Google Drive folders live at the top level (no workspace parent):
     // render as folders with inline expansion over google ancestry.
+    // Only true roots render here: a google folder whose parent is itself
+    // indexed renders ONLY under that parent (via gWalk when expanded) —
+    // otherwise every subfolder duplicates at the top level. Rows whose
+    // parent isn't indexed (unsynced/out-of-scope) stay top-level so nothing
+    // vanishes.
+    const indexedGoogleIds = new Set(
+      files.filter((x) => x.google_file_id).map((x) => x.google_file_id as string)
+    );
     if (curFolder === null) {
       const gWalk = (gid: string, depth: number) => {
         for (const f of sortFiles(files.filter((x) => x.google_parent_id === gid && !isGFolder(x)))) out.push(fileRowOf(f, depth));
@@ -680,7 +688,7 @@ export default function Explorer() {
           if (expanded.has(f.id) && f.google_file_id) gWalk(f.google_file_id, depth + 1);
         }
       };
-      for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === null && isGFolder(x)))) {
+      for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === null && isGFolder(x) && isGoogleForestRoot(x, indexedGoogleIds)))) {
         out.push(gFolderRowOf(f, 0));
         if (expanded.has(f.id) && f.google_file_id) gWalk(f.google_file_id, 1);
       }

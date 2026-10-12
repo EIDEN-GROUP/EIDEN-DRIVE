@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classify, badge, formatBytes } from "../../lib/files";
+import { classify, badge, formatBytes, isGoogleForestRoot } from "../../lib/files";
 
 describe("classify", () => {
   it("detects office + media + design kinds", () => {
@@ -38,5 +38,21 @@ describe("formatBytes", () => {
     expect(formatBytes(0)).toContain("B");
     expect(formatBytes(1536)).toContain("KB");
     expect(formatBytes(2 * 1024 ** 3)).toContain("GB");
+  });
+});
+
+describe("isGoogleForestRoot", () => {
+  // Mirrors the live shapes: Video Editor (gid …M6) owns bo passage (parent …M6).
+  const ids = new Set(["1hfa90M6", "other-root"]);
+  it("keeps true roots at the top level", () => {
+    expect(isGoogleForestRoot({ google_parent_id: null }, ids)).toBe(true);
+    expect(isGoogleForestRoot({}, ids)).toBe(true);
+  });
+  it("hides folders whose parent is itself indexed (they nest under it)", () => {
+    expect(isGoogleForestRoot({ google_parent_id: "1hfa90M6" }, ids)).toBe(false);
+  });
+  it("keeps rows whose parent isn't indexed so nothing vanishes", () => {
+    expect(isGoogleForestRoot({ google_parent_id: "unsynced-parent" }, ids)).toBe(true);
+    expect(isGoogleForestRoot({ google_parent_id: "unsynced-parent" }, new Set())).toBe(true);
   });
 });

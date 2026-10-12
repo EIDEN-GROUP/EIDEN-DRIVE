@@ -14,6 +14,15 @@ export function classify(name: string, mime = ""): string {
   return "FILE";
 }
 
+// Google-folder forest roots for the Workspace view: a google folder whose
+// Drive parent is itself indexed renders ONLY under that parent (via inline
+// expansion) — never as a second top-level row. Rows with no recorded parent
+// or an unindexed parent stay top-level so nothing vanishes.
+export function isGoogleForestRoot(
+  f: { google_parent_id?: string | null }, indexedGoogleIds: Set<string>
+): boolean {
+  return !(f.google_parent_id && indexedGoogleIds.has(f.google_parent_id));
+}
 export function badge(backends: string[], accountLabel?: string | null): string {
   const b: string[] = [];
   if (backends.includes("google")) b.push(`☁ Google${accountLabel ? ` (${accountLabel})` : ""}`);
