@@ -100,7 +100,7 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
   // an uncapped branch is a one-link OOM (the index `size` is checked, not trusted blindly — the buffer is what matters).
   try {
     if (typeof file.size === "number" && file.size > RAW_MAX) {
-      return Response.json({ error: "too large for link preview — open it signed in" }, { status: 400 });
+      return Response.json({ error: "too large for link preview — open it signed in", code: "preview_too_large" }, { status: 400 });
     }
     let buf: Buffer;
     if (file.storage_path) {
@@ -108,7 +108,7 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
       if (error || !blob) return denied();
       buf = Buffer.from(await blob.arrayBuffer());
       if (buf.byteLength > RAW_MAX) {
-        return Response.json({ error: "too large for link preview — open it signed in" }, { status: 400 });
+        return Response.json({ error: "too large for link preview — open it signed in", code: "preview_too_large" }, { status: 400 });
       }
     } else if (file.google_file_id) {
       const rawBlock = await driveUsable(file.drive_account_id);

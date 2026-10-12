@@ -664,12 +664,22 @@ export default function Explorer() {
     // Collapse state rules BOTH views identically: grid never flattens on
     // its own — entering grid collapses everything (switchView), so grid
     // shows the current level only, exactly like a collapsed list.
+    // Google ids indexed in this page: a Drive row whose parent is itself
+    // indexed renders ONLY under that parent (via gWalk when expanded) —
+    // never as a second top-level row. (Hoisted: both walk and gWalk need it.)
+    const indexedGoogleIds = new Set(
+      files.filter((x) => x.google_file_id).map((x) => x.google_file_id as string)
+    );
     const walk = (parent: string | null, depth: number) => {
       for (const f of sortFolders(folders.filter((x) => (x.parent ?? null) === parent))) {
         out.push(folderRowOf(f, depth));
         if (expanded.has(f.id)) walk(f.id, depth + 1);
       }
-      for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === parent && !isGFolder(x)))) out.push(fileRowOf(f, depth));
+      // Files mirror the folder rule at Workspace root only: a Drive file
+      // with an indexed Drive parent renders under that parent, not at root
+      // (its workspace `folder` is null either way). Local-folder levels
+      // keep matching on the `folder` field exactly as before.
+      for (const f of sortFiles(files.filter((x) => (x.folder ?? null) === parent && !isGFolder(x) && (parent !== null || isGoogleForestRoot(x, indexedGoogleIds))))) out.push(fileRowOf(f, depth));
     };
     walk(curFolder, 0);
     // Google Drive folders live at the top level (no workspace parent):
@@ -679,9 +689,6 @@ export default function Explorer() {
     // otherwise every subfolder duplicates at the top level. Rows whose
     // parent isn't indexed (unsynced/out-of-scope) stay top-level so nothing
     // vanishes.
-    const indexedGoogleIds = new Set(
-      files.filter((x) => x.google_file_id).map((x) => x.google_file_id as string)
-    );
     if (curFolder === null) {
       const gWalk = (gid: string, depth: number) => {
         for (const f of sortFiles(files.filter((x) => x.google_parent_id === gid && !isGFolder(x)))) out.push(fileRowOf(f, depth));

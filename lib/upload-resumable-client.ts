@@ -32,7 +32,8 @@ export class UploadUnconfirmed extends Error {
   constructor(fileName: string) {
     super(
       `Upload couldn't be confirmed — the file may already be in Drive. ` +
-        `Check the folder for "${fileName}" before retrying to avoid a duplicate. ` +
+        `Run Sync, then check the folder for "${fileName}": if it's there, ` +
+        `it landed (nothing more to do); if not, retry the upload. ` +
         `Possible causes: connection drop, expired session, or full Google storage.`
     );
     this.name = "UploadUnconfirmed";

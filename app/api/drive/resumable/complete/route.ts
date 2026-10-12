@@ -4,11 +4,11 @@ import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { clientFor, getAccounts, requireActiveAccount, driveBlockedResponse, quotaFor } from "@/lib/drive-accounts";
+import { clientFor, requireActiveAccount, driveBlockedResponse, quotaFor } from "@/lib/drive-accounts";
 import { deleteDriveFile, rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { notifyUpload } from "@/lib/upload-notify";
-import { folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
+import { folderUsable, landedFileInScope, bustScopeCache } from "@/lib/visibility";
 import { DRIVE_ID_RE, RESUMABLE_MAX } from "@/lib/resumable";
 import { parseJson } from "@/lib/http";
 
@@ -47,51 +47,68 @@ export async function POST(req: Request) {
     if (dup) return Response.json({ ok: true, id: (dup as { id: string }).id, deduped: true });
   }
   // Best-effort removal of a Drive file we refuse to index, so failures can't
-  // leave invisible orphans. Never fails the request itself.
-  const dropStray = async (id: string) => {
-    try { await deleteDriveFile(id, d); } catch { /* ignore */ }
+  // leave invisible orphans. Never fails the request itself — but a failed
+  // cleanup is WARN-logged server-side (never silently ignored): an unremoved
+  // file resurfaces on the next Sync, and the log tells whose it was.
+  const dropStray = async (id: string): Promise<boolean> => {
+    try {
+      await deleteDriveFile(id, d);
+      return true;
+    } catch (e) {
+      console.warn(`[upload-cleanup] couldn't remove refused Drive file ${id} (account ${body.accountId}): ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
   };
   // Read the landed file from Google — the authority on name/size/parents.
-  let g: { id?: string; name?: string; mimeType?: string; size?: string; parents?: string[] };
+  // driveId + trashed ride along: the scope check needs the former, and a
+  // trashed landing (user trashed it mid-upload, or a colliding session did)
+  // must not be indexed as a live file.
+  let g: { id?: string; name?: string; mimeType?: string; size?: string; parents?: string[]; driveId?: string; trashed?: boolean };
   try {
     const meta = await d.files.get({
-      fileId: body.driveFileId, fields: "id,name,mimeType,size,parents", supportsAllDrives: true,
+      fileId: body.driveFileId, fields: "id,name,mimeType,size,parents,driveId,trashed", supportsAllDrives: true,
     });
     g = (meta.data ?? {}) as typeof g;
     if (!g.id) throw new Error("google returned no file");
   } catch {
-    return Response.json({ error: "upload not found in Drive — retry the upload" }, { status: 400 });
+    return Response.json({ error: "upload not found in Drive — retry the upload", code: "not_in_drive" }, { status: 400 });
+  }
+  if (g.trashed) {
+    await dropStray(body.driveFileId);
+    return Response.json({ error: "upload was trashed in Drive before registration — retry the upload", code: "trashed_in_drive" }, { status: 400 });
   }
   const size = Number(g.size ?? 0);
   if (!size || size > RESUMABLE_MAX || !Number.isSafeInteger(size)) {
     await dropStray(body.driveFileId);
-    return Response.json({ error: "uploaded file looks wrong (size) — it was removed, retry the upload" }, { status: 400 });
+    return Response.json({ error: "uploaded file looks wrong (size) — it was removed, retry the upload", code: "bad_size" }, { status: 400 });
   }
-  // Scope: the landed file must sit inside the account's shared scope.
-  const accs = await getAccounts();
-  if (!(await googleInScope(db, accs, body.accountId, body.driveFileId))) {
-    await dropStray(body.driveFileId);
-    return Response.json({ error: "upload landed outside this drive's shared scope — it was removed" }, { status: 403 });
-  }
-  // Parent check: on a folder-scoped drive the file must sit under the scope
-  // root (the init step bound the session there); unscoped drives accept any.
+  // Scope + destination in ONE live check. The file has no index row yet, so
+  // the index-derived googleInScope() would false-positive on EVERY valid
+  // upload (its set is built from file_index rows). Instead validate live
+  // Drive ancestry: folder roots accept root-level AND nested landings,
+  // shared-drive roots require the same drive, My Drive accepts. Truly
+  // out-of-scope files are still refused AND removed.
+  let root: { kind: "drive"; id: string } | { kind: "folder"; id: string } | { kind: "mydrive" };
   try {
-    const root = await rootFor(d, gate.account.root_id ?? "");
-    const parents = g.parents ?? [];
-    if (root.kind === "folder" && !parents.includes(root.id)) {
-      await dropStray(body.driveFileId);
-      return Response.json({ error: "upload landed outside the expected folder — it was removed, retry" }, { status: 400 });
-    }
+    root = await rootFor(d, gate.account.root_id ?? "");
   } catch (e) {
     await dropStray(body.driveFileId);
-    return Response.json({ error: googleErrorMessage(e instanceof Error ? e.message : "couldn't verify the upload") }, { status: 502 });
+    return Response.json({ error: googleErrorMessage(e instanceof Error ? e.message : "couldn't verify the upload"), code: "google_failed" }, { status: 502 });
+  }
+  const scope = await landedFileInScope(d, root, { id: g.id, parents: g.parents, driveId: g.driveId });
+  if (!scope.ok) {
+    const cleaned = await dropStray(body.driveFileId);
+    return Response.json({
+      error: cleaned ? scope.reason : `${scope.reason} (cleanup failed too — the file may still sit in Drive; it will surface on the next Sync for manual removal)`,
+      code: "out_of_scope",
+    }, { status: 403 });
   }
   // Department permissions may have changed mid-upload — re-check placement.
   if (body.folder) {
     const dst = await folderUsable(db, me, body.folder);
     if (!dst.ok) {
       await dropStray(body.driveFileId);
-      return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
+      return Response.json({ error: dst.reason ?? "not allowed", code: "folder_forbidden" }, { status: 403 });
     }
   }
   const { data, error } = await db.from("file_index").insert({
@@ -101,8 +118,15 @@ export async function POST(req: Request) {
     drive_account_id: body.accountId,
   }).select("id").single();
   if (error) {
+    // Concurrent duplicate complete (reconcile-then-complete race, double
+    // submit): the unique (google_file_id, drive_account_id) index won
+    // elsewhere. Re-read — if the row exists now, return it WITHOUT deleting
+    // anything (that Drive file is legitimately indexed). Only a genuinely
+    // unindexed file is removed as stray.
+    const { data: raced } = await db.from("file_index").select("id").eq("google_file_id", body.driveFileId).eq("drive_account_id", body.accountId).maybeSingle();
+    if (raced) return Response.json({ ok: true, id: (raced as { id: string }).id, deduped: true });
     await dropStray(body.driveFileId);
-    return Response.json({ error: error.message }, { status: 500 });
+    return Response.json({ error: error.message, code: "index_failed" }, { status: 500 });
   }
   await db.from("versions").insert({ file_id: data.id, v: 1, hash: body.hash ?? "", actor: me.id });
   bustScopeCache(body.accountId);

@@ -65,7 +65,7 @@ async function googleThumb(googleId: string, accountId: string | null): Promise<
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(googleId)}?fields=thumbnailLink,mimeType&supportsAllDrives=true`,
     { headers: { authorization: `Bearer ${token}` } }
   );
-  if (!meta.ok) throw new Error("Google has no thumbnail for this file");
+  if (!meta.ok) throw new Error("Google copy missing — the Drive file was deleted or unshared");
   const mj = (await meta.json()) as { thumbnailLink?: string };
   if (!mj.thumbnailLink) throw new Error("Google has no thumbnail for this file");
   // Ask for a 400px cover instead of the default 220px stamp.
@@ -113,12 +113,12 @@ export async function GET(req: Request) {
     try {
       const liveId = parseLiveId(file_id);
       if (liveId) {
-        // Dead/legacy drives refuse the thumbnail (fail closed) — never fall
-        // through to the env token for another account's file.
+        // Dead/legacy drives refuse the thumbnail with a coded reason — never
+        // fall through to the env token for another account's file.
         const lbl = await driveGoneReason(liveId.accountId);
-        if (lbl) throw new Error(lbl.error);
+        if (lbl) return Response.json({ error: lbl.error, code: lbl.code, noThumb: true }, { status: 404 });
         const lctx = liveId.accountId ? await driveCtxFor(liveId.accountId) : null;
-        if (liveId.accountId && !lctx) throw new Error("chosen drive is disabled — re-enable it in Storage or pick another drive");
+        if (liveId.accountId && !lctx) return Response.json({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", noThumb: true }, { status: 404 });
         if (lctx && !(await liveInScope(lctx.drive, lctx.rootId || null, liveId.googleId))) {
           return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
         }
@@ -140,6 +140,8 @@ export async function GET(req: Request) {
       if (!(await googleInScope(adminClient(), accs, aid, gid))) {
         return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
       }
+      const ab = await driveGoneReason(aid);
+      if (ab) return Response.json({ error: ab.error, code: ab.code, noThumb: true }, { status: 404 });
       return await googleThumb(gid, aid);
     } catch (e) {
       return Response.json({ error: e instanceof Error ? e.message : "no thumbnail", noThumb: true }, { status: 404 });
@@ -169,7 +171,7 @@ export async function GET(req: Request) {
       }
       const meta = await g.files.get({ fileId: live.googleId, fields: "size,mimeType,name", supportsAllDrives: true });
       if (Number(meta.data.size ?? 0) > RAW_MAX) {
-        return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });
+        return Response.json({ error: "file too large to preview — use Download", too_large: true, code: "preview_too_large" }, { status: 400 });
       }
       const dl = await g.files.get({ fileId: live.googleId, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" });
       const name = String(meta.data.name ?? "file");
@@ -217,7 +219,7 @@ export async function GET(req: Request) {
   }
   if (p.data.raw) {
     if (typeof f.size === "number" && f.size > RAW_MAX) {
-      return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });
+      return Response.json({ error: "file too large to preview — use Download", too_large: true, code: "preview_too_large" }, { status: 400 });
     }
       try {
         if (f.storage_path) {
@@ -234,14 +236,14 @@ export async function GET(req: Request) {
         if (!g) return driveBlockedResponse({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", status: 410 });
         const meta = await g.files.get({ fileId: f.google_file_id, fields: "size,mimeType", supportsAllDrives: true });
         if (Number(meta.data.size ?? 0) > RAW_MAX) {
-          return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });
+          return Response.json({ error: "file too large to preview — use Download", too_large: true, code: "preview_too_large" }, { status: 400 });
         }
         const dl = await g.files.get({ fileId: f.google_file_id, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" });
         return ranged(req, Buffer.from(dl.data as ArrayBuffer), f.mime ?? (meta.data.mimeType as string) ?? "application/octet-stream", f.name);
       }
     } catch (e) {
       const m = e instanceof Error ? e.message : "preview failed";
-      if (/not.?found|404/i.test(m)) return Response.json({ error: "Google copy missing — the Drive file was deleted or unshared", gone: true }, { status: 404 });
+      if (/not.?found|404/i.test(m)) return Response.json({ error: "Google copy missing — the Drive file was deleted or unshared", gone: true, code: "google_copy_missing" }, { status: 404 });
       return Response.json({ error: m }, { status: 500 });
     }
   }

@@ -379,3 +379,46 @@ export async function liveInScope(drive: DriveLike, rootId: string | null, googl
     return false; // unreadable ancestry = deny
   }
 }
+
+// Landed-file scope for freshly uploaded files that have NO index row yet.
+// The index-derived googleInScope() above can NEVER see such a file (its set
+// is built from file_index rows), so using it here false-positives on every
+// valid upload. Validate against live Drive state instead:
+//   - My Drive root (unscoped): accept — the whole drive is the scope.
+//   - Shared Drive root: the file's driveId must equal the root id (same
+//     drive, never a lookalike folder elsewhere).
+//   - Folder root: the root id must appear in the file's live ancestor chain
+//     (immediate parent OR any ancestor ≤12 hops up) — root-level AND nested
+//     subfolder uploads both pass; anything else is refused.
+// Deny-closed with a human reason: unreadable ancestry, missing driveId, or
+// no ancestral link all refuse. Pure live reads — never touches file_index.
+export interface LandedMeta { id?: string; parents?: string[]; driveId?: string }
+export type DriveRootKind = { kind: "drive"; id: string } | { kind: "folder"; id: string } | { kind: "mydrive" };
+export async function landedFileInScope(
+  drive: DriveLike, root: DriveRootKind, meta: LandedMeta
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!drive) return { ok: false, reason: "Google Drive unreachable right now — retry the upload" };
+  if (root.kind === "mydrive") return { ok: true };
+  if (root.kind === "drive") {
+    if (meta.driveId && meta.driveId === root.id) return { ok: true };
+    return { ok: false, reason: "upload landed in a different shared drive — it was removed, retry" };
+  }
+  // Folder root: direct child of the root is the fast path (no extra calls);
+  // otherwise walk the live parent chain looking for the root.
+  const parents = meta.parents ?? [];
+  if (parents.includes(root.id)) return { ok: true };
+  try {
+    let cur: string | null = parents[0] ?? null;
+    const seen = new Set<string>();
+    for (let i = 0; i < 12 && cur && !seen.has(cur); i++) {
+      seen.add(cur);
+      if (cur === root.id) return { ok: true };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const m: any = await drive.files.get({ fileId: cur, fields: "parents", supportsAllDrives: true });
+      cur = (m?.data?.parents?.[0] as string | undefined) ?? null;
+    }
+    return { ok: false, reason: "upload landed outside the expected folder — it was removed, retry" };
+  } catch {
+    return { ok: false, reason: "couldn't verify the upload's folder — it was removed, retry" };
+  }
+}

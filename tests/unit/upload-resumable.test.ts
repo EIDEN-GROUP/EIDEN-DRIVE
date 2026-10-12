@@ -214,14 +214,20 @@ describe("resumable complete", () => {
     expect((await post(completeUpload, doneBody)).status).toBe(400);
     expect(ops).toContain("drive:delete");
   });
-  it("403s + removes out-of-scope landings", async () => {
-    state.scopeOk = false;
-    expect((await post(completeUpload, doneBody)).status).toBe(403);
+  it("403s + removes landings outside the scope ancestry (live check, not the index)", async () => {
+    // googleInScope() can no longer see fresh uploads (no index row yet), so
+    // complete validates live ancestry: parents that never reach the scope
+    // root refuse — even when the old index-mock would have allowed them.
+    state.scopeOk = true;
+    state.landed = { ...(state.landed as object), parents: ["elsewhere00000000000001"] } as typeof state.landed;
+    const r = await post(completeUpload, doneBody);
+    expect(r.status).toBe(403);
+    expect(await r.json()).toMatchObject({ code: "out_of_scope" });
     expect(ops).toContain("drive:delete");
   });
-  it("400s + removes wrong-folder landings", async () => {
+  it("403s + removes nested-but-unrelated landings (ancestry never reaches root)", async () => {
     state.landed = { ...(state.landed as object), parents: ["elsewhere00000000000001"] } as typeof state.landed;
-    expect((await post(completeUpload, doneBody)).status).toBe(400);
+    expect((await post(completeUpload, doneBody)).status).toBe(403);
     expect(ops).toContain("drive:delete");
   });
   it("403s + removes when the folder grant vanished mid-upload", async () => {
