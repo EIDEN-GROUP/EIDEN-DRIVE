@@ -8,6 +8,8 @@ import { logAudit } from "@/lib/audit";
 import { visibleFolderIds, isManager, accessContext, folderUsable } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 import { usernamesFor } from "@/lib/people";
+import { trashDriveFile } from "@/lib/google-drive";
+import { driveCtxFor } from "@/lib/drive-accounts";
 
 export async function GET() {
   const me = await getProfile();
@@ -88,23 +90,66 @@ export async function PATCH(req: Request) {
 
 const Remove = z.object({ folder_id: z.string().uuid() });
 
-// Managers+: delete a folder, but ONLY when empty (no subfolders, no files).
-// Files must be trashed individually first — never bulk-destroyed by accident.
+// Managers+: delete a folder with everything inside it, the way Drive does.
+// Files are never destroyed here — every live file in the subtree goes to the
+// Recovery Bin (90 days) and is re-homed to the deleted folder's parent so a
+// restore lands somewhere that still exists. Then the folders are removed,
+// deepest first (folders.parent / file_index.folder have no cascade).
 export async function DELETE(req: Request) {
   const me = await getProfile();
   if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
   const p = await parseJson(req, Remove);
   if (p.error) return p.error;
   const db = adminClient();
-  const { count: kids } = await db.from("folders").select("id", { count: "exact", head: true }).eq("parent", p.data.folder_id);
-  const { count: files } = await db.from("file_index").select("id", { count: "exact", head: true }).eq("folder", p.data.folder_id);
-  if ((kids ?? 0) > 0 || (files ?? 0) > 0) {
-    return Response.json({ error: "folder is not empty — move or trash its contents first" }, { status: 400 });
-  }
-  const { data: f } = await db.from("folders").select("name").eq("id", p.data.folder_id).maybeSingle();
+  const { data: f } = await db.from("folders").select("id,name,parent").eq("id", p.data.folder_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
-  const { error } = await db.from("folders").delete().eq("id", p.data.folder_id);
-  if (error) return Response.json({ error: error.message }, { status: 500 });
-  await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { folder: p.data.folder_id, name: f.name } });
-  return Response.json({ ok: true });
+
+  // Subtree, breadth-first; reversed later so children go before parents.
+  const order: string[] = [f.id];
+  for (let i = 0, frontier = [f.id]; frontier.length && i < 50; i++) {
+    const { data: kids, error } = await db.from("folders").select("id").in("parent", frontier);
+    if (error) return Response.json({ error: error.message }, { status: 500 });
+    frontier = (kids ?? []).map((k) => k.id as string).filter((id) => !order.includes(id));
+    order.push(...frontier);
+  }
+
+  const files: { id: string; google_file_id: string | null; drive_account_id: string | null }[] = [];
+  for (let i = 0; i < order.length; i += 200) {
+    const { data, error } = await db.from("file_index").select("id,google_file_id,drive_account_id").in("folder", order.slice(i, i + 200));
+    if (error) return Response.json({ error: error.message }, { status: 500 });
+    files.push(...((data ?? []) as typeof files));
+  }
+  const binned = new Set<string>();
+  for (let i = 0; i < files.length; i += 200) {
+    const { data } = await db.from("recovery_bin").select("file_id").in("file_id", files.slice(i, i + 200).map((x) => x.id));
+    for (const b of data ?? []) binned.add(b.file_id as string);
+  }
+  const live = files.filter((x) => !binned.has(x.id));
+
+  // Bin each live file (DB first, then Google — same order as /api/drive/trash).
+  for (const x of live) {
+    const { error } = await db.from("recovery_bin").upsert({ file_id: x.id, deleted_by: me.id });
+    if (error) return Response.json({ error: `could not move contents to the bin: ${error.message}` }, { status: 500 });
+    if (x.google_file_id) {
+      try {
+        const ctx = await driveCtxFor(x.drive_account_id);
+        await trashDriveFile(x.google_file_id, ctx?.drive ?? undefined);
+      } catch (e) {
+        await db.from("recovery_bin").delete().eq("file_id", x.id);
+        return Response.json({ error: `Google trash failed: ${e instanceof Error ? e.message : "unknown"} — nothing was deleted, safe to retry` }, { status: 502 });
+      }
+    }
+  }
+
+  // Re-home every file (binned or not) out of the doomed subtree.
+  for (let i = 0; i < files.length; i += 200) {
+    const { error } = await db.from("file_index").update({ folder: f.parent ?? null }).in("id", files.slice(i, i + 200).map((x) => x.id));
+    if (error) return Response.json({ error: error.message }, { status: 500 });
+  }
+  for (const id of [...order].reverse()) {
+    const { error } = await db.from("folders").delete().eq("id", id);
+    if (error) return Response.json({ error: error.message }, { status: 500 });
+  }
+  await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { folder: f.id, name: f.name, subfolders: order.length - 1, binned: live.length } });
+  return Response.json({ ok: true, folders: order.length, binned: live.length });
 }
