@@ -639,6 +639,7 @@ export default function Explorer() {
     setHist((h) => [...h.slice(0, hi + 1), n]);
     setHi((i) => i + 1);
     setSelKey(null); setInfoOpen(false); setCtx(null); setTagFilter(null); setQ("");
+    closePaneOnPhone();
   }
   function back() { if (hi > 0) { setHi(hi - 1); setSelKey(null); } }
   function forward() { if (hi < hist.length - 1) { setHi(hi + 1); setSelKey(null); } }
@@ -681,8 +682,15 @@ export default function Explorer() {
   }
 
   // Click selection: plain = single, Ctrl/Cmd = toggle, Shift = range from anchor.
+  // Touch screens have no double-click or hover: a plain tap opens, like Drive mobile.
+  const touchRef = useRef(false);
+  const notePointer = (e: React.PointerEvent) => { touchRef.current = e.pointerType === "touch"; };
+  const isPhone = () => !window.matchMedia("(min-width: 768px)").matches;
+  const closePaneOnPhone = () => { if (isPhone()) setPane(false); };
+
   function clickRow(e: React.MouseEvent, r: Row, idx: number) {
     e.stopPropagation();
+    if (touchRef.current && !e.shiftKey && !e.ctrlKey && !e.metaKey && multi.length === 0) { setSelKey(r.key); open(r); return; }
     const items = pg.pageItems;
     if (e.shiftKey && anchorRef.current >= 0 && items.length) {
       const [a, b] = [anchorRef.current, idx].sort((x, y) => x - y);
@@ -950,13 +958,24 @@ export default function Explorer() {
     else toast({ text: d.error ?? "Couldn't rename.", tone: "err" });
   }
 
+  const folderDeleting = useRef(false);
   async function deleteFolder() {
-    if (!confirmFolderDelete) return;
-    const r = await fetch("/api/folders", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ folder_id: confirmFolderDelete.id }) });
-    const d = await r.json().catch(() => ({}));
+    const target = confirmFolderDelete;
+    if (!target || folderDeleting.current) return; // one click, one request, one toast
+    folderDeleting.current = true;
     setConfirmFolderDelete(null);
-    if (r.ok) { toast({ text: `Folder "${confirmFolderDelete.name}" deleted.`, tone: "ok" }); setSelKey(null); load(q); }
-    else toast({ text: d.error ?? "Couldn't delete folder.", tone: "err" });
+    try {
+      const r = await fetch("/api/folders", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ folder_id: target.id }) });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) {
+        const n = d.binned ?? 0;
+        toast({ text: `Folder "${target.name}" deleted${n ? ` — ${n} file${n === 1 ? "" : "s"} moved to the Recovery Bin` : ""}.`, tone: "ok" });
+        setSelKey(null);
+        refreshAll();
+      } else toast({ text: d.error ?? "Couldn't delete folder.", tone: "err" });
+    } finally {
+      folderDeleting.current = false;
+    }
   }
 
   async function syncGoogle() {
@@ -1029,6 +1048,7 @@ export default function Explorer() {
   }, [driveView?.accountId]);
 
   function openDrive(accountId: string) {
+    closePaneOnPhone();
     if (nav.kind !== "root" || nav.path.length) go({ kind: "root", path: [] });
     setTagSel([]); setTagFilter(null); setQ("");
     setDriveView({ accountId, folderId: null, path: [] });
@@ -1038,6 +1058,7 @@ export default function Explorer() {
   const taggable = (r: Row) => (r.kind === "file" ? !r.id.startsWith("g:") : !r.id.startsWith("gdrive:"));
   const rowTags = (r: Row): Tag[] => taggable(r) ? tg.idsOf(r.kind, r.id).map((id) => tg.byId.get(id)).filter(Boolean) as Tag[] : [];
   function toggleTagFilter(id: string) {
+    closePaneOnPhone();
     setDriveView(null);
     setTagFilter(null);
     if (nav.kind !== "root") go({ kind: "root", path: [] });
@@ -1097,6 +1118,16 @@ export default function Explorer() {
     return { id: f.id, name: f.name, mime: f.mime, size: f.size, backends: f.backends, googleId };
   }
 
+  // Row menu from right-click or the ⋯ button, clamped inside the viewport on any screen.
+  function openRowMenu(e: React.MouseEvent, r: Row) {
+    e.preventDefault(); e.stopPropagation();
+    setSelKey(r.key);
+    const W = 218, H = 420;
+    const x = e.type === "contextmenu" ? e.clientX : (e.currentTarget as HTMLElement).getBoundingClientRect().right - W;
+    const y = e.type === "contextmenu" ? e.clientY : (e.currentTarget as HTMLElement).getBoundingClientRect().bottom + 4;
+    setCtx({ x: Math.max(8, Math.min(x, window.innerWidth - W - 8)), y: Math.max(8, Math.min(y, window.innerHeight - Math.min(H, window.innerHeight - 16) - 8)), row: r });
+  }
+
   // ── view helpers ──
   const title = nav.kind === "recent" ? "Recent" : nav.kind === "docs" ? "Documents" : nav.kind === "bin" ? "Recovery Bin"
     : curFolder ? folderById.get(curFolder)?.name ?? "Folder" : "Workspace";
@@ -1124,10 +1155,11 @@ export default function Explorer() {
   );
 
   return (
-    <section aria-label="File explorer" className="relative h-full min-h-[520px] flex border border-line rounded-lg bg-surface overflow-hidden">
-      {/* ── Favorites / Tags pane ── */}
+    <section aria-label="File explorer" className="relative h-full min-h-[420px] sm:min-h-[520px] flex border border-line rounded-lg bg-surface overflow-hidden">
+      {/* ── Favorites / Tags pane ── (static column ≥ 768 px, overlay with backdrop below) */}
+      {pane && <div className="md:hidden absolute inset-0 z-[15] bg-black/25" onClick={() => setPane(false)} aria-hidden="true" />}
       <aside aria-label="Favorites and tags"
-        className={`${pane === null ? "hidden md:flex" : pane ? "flex" : "hidden"} absolute md:static inset-y-0 left-0 z-20 w-[232px] shrink-0 flex-col bg-soft border-r border-line px-3 py-3 overflow-y-auto shadow-pop md:shadow-none`}>
+        className={`${pane === null ? "hidden md:flex" : pane ? "flex" : "hidden"} absolute md:static inset-y-0 left-0 z-20 w-[min(272px,85%)] md:w-[220px] xl:w-[232px] shrink-0 flex-col bg-soft border-r border-line px-3 py-3 overflow-y-auto shadow-pop md:shadow-none`}>
         <button onClick={() => setFavOpen((o) => !o)} aria-expanded={favOpen} className="flex items-center justify-between px-2 min-h-[44px] text-[13px] text-muted">
           Favorites {favOpen ? <ChevronDown size={16} className="text-brand" /> : <ChevronRight size={16} className="text-brand" />}
         </button>
@@ -1234,7 +1266,7 @@ export default function Explorer() {
             {deptOpen && (
               <div className="flex flex-col gap-0.5 shrink-0">
                 {depts.map((d) => (
-                  <button key={d} onClick={() => { if (tagFilter === d) setTagFilter(null); else { setTagSel([]); setDriveView(null); if (nav.kind !== "root" || nav.path.length) go({ kind: "root", path: [] }); setTagFilter(d); setSelKey(null); } }}
+                  <button key={d} onClick={() => { if (tagFilter === d) setTagFilter(null); else { setTagSel([]); setDriveView(null); if (nav.kind !== "root" || nav.path.length) go({ kind: "root", path: [] }); setTagFilter(d); setSelKey(null); } closePaneOnPhone(); }}
                     aria-pressed={tagFilter === d}
                     className={`w-full min-h-[44px] pl-3 pr-3 rounded-md flex items-center gap-3 text-[14.5px] text-left transition-colors ${tagFilter === d ? "bg-tint text-brand font-medium" : "text-ink/85 hover:bg-tint/60"}`}>
                     <span className="size-3 rounded-sm shrink-0" style={{ background: tagColor(d) ?? undefined }} />
@@ -1250,23 +1282,24 @@ export default function Explorer() {
       {/* ── Main ── */}
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Toolbar */}
-        <div className="shrink-0 min-h-[56px] px-3 flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
+        <div className="shrink-0 min-h-[56px] px-2 sm:px-3 flex flex-wrap items-center gap-x-1.5 sm:gap-x-2 gap-y-1.5 py-1.5">
           <button onClick={() => setPane((p) => !(p ?? true))} aria-label="Toggle favorites pane" className="size-11 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={21} strokeWidth={1.6} /></button>
-          <span className="h-5 border-l border-line mx-1" />
-          <button onClick={back} disabled={hi === 0} aria-label="Back" className="size-11 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronLeft size={18} /></button>
-          <button onClick={forward} disabled={hi >= hist.length - 1} aria-label="Forward" className="size-11 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronRight size={18} /></button>
-          <h2 className="ml-2 text-[16px] text-ink/90 truncate max-w-[40%]">{title}</h2>
+          <span className="hidden sm:block h-5 border-l border-line mx-1" />
+          <button onClick={back} disabled={hi === 0} aria-label="Back" className="hidden sm:grid size-11 place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronLeft size={18} /></button>
+          <button onClick={forward} disabled={hi >= hist.length - 1} aria-label="Forward" className="hidden sm:grid size-11 place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronRight size={18} /></button>
+          <h2 className="ml-1 sm:ml-2 min-w-0 flex-1 sm:flex-none text-[15px] sm:text-[16px] text-ink/90 truncate sm:max-w-[30%] lg:max-w-[40%]">{title}</h2>
 
-          <div className="ml-auto flex items-center gap-1.5">
-            <div className="relative">
-              <Search size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search" aria-label="Search files"
-                className="w-32 sm:w-52 min-h-[44px] pl-8 pr-2 rounded-md border border-line bg-surface text-[13px] placeholder:text-muted focus:border-brand focus:outline-none" />
-            </div>
+          {/* Search: its own full-width row on phones, inline from 640 px. */}
+          <div className="relative order-last basis-full sm:order-none sm:basis-auto sm:ml-auto">
+            <Search size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search" aria-label="Search files"
+              className="w-full sm:w-40 lg:w-52 xl:w-64 min-h-[44px] pl-8 pr-2 rounded-md border border-line bg-surface text-[16px] sm:text-[13px] placeholder:text-muted focus:border-brand focus:outline-none" />
+          </div>
+          <div className="flex items-center gap-1 sm:gap-1.5">
             <div role="group" aria-label="View" className="flex rounded-md overflow-hidden">
               <button onClick={() => switchView("list")} aria-pressed={view === "list"} aria-label="List view" className={`size-11 grid place-items-center ${view === "list" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutList size={19} strokeWidth={1.6} /></button>
               <button onClick={() => switchView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>            </div>
-            <span className="h-5 border-l border-line mx-0.5" />
+            <span className="hidden sm:block h-5 border-l border-line mx-0.5" />
             {/* Upload: action + destination picker (Supabase, Drive, USB — each toggleable). */}
             <div className="flex items-stretch h-11 rounded-lg bg-brand text-white shadow-[0_1px_2px_rgba(60,30,140,.3)]">
               <button onClick={() => fileRef.current?.click()} disabled={!!uploading || (supaOff && mirrorOff && !inDriveView)}
@@ -1440,25 +1473,25 @@ export default function Explorer() {
                 <EmptyState title={q ? "No matches" : "This folder is empty"} body={q ? "Clear the search or try a different name." : "Upload a file or create a folder to get started."}
                   action={!q && nav.kind === "root" ? { label: "Upload file", onClick: () => fileRef.current?.click() } : undefined} />
               ) : view === "list" ? (
-                <div role="grid" aria-label={`${rows.length} items`} className="min-w-[420px]">
-                  <div role="row" className="frow sticky top-0 z-10 h-10 px-4 bg-head text-[15px] text-ink/90 border-y border-line">
+                <div role="grid" aria-label={`${rows.length} items`}>
+                  <div role="row" className="frow sticky top-0 z-10 h-10 px-3 sm:px-4 bg-head text-[14px] sm:text-[15px] text-ink/90 border-y border-line">
                     <button role="columnheader" aria-sort={ariaSort("name")} onClick={(e) => { e.stopPropagation(); sortBy("name"); }} className="text-left flex items-center gap-1 pl-[26px]">Name {arrow("name")}</button>
-                    <span role="columnheader" className="frow-hide">Tags</span>
-                    <span role="columnheader" className="frow-hide">Location</span>
-                    <button role="columnheader" aria-sort={ariaSort("updated")} onClick={(e) => { e.stopPropagation(); sortBy("updated"); }} className="text-left flex items-center gap-1">Modified {arrow("updated")}</button>
+                    <span role="columnheader" className="c-tags">Tags</span>
+                    <span role="columnheader" className="c-loc">Location</span>
+                    <button role="columnheader" aria-sort={ariaSort("updated")} onClick={(e) => { e.stopPropagation(); sortBy("updated"); }} className="c-mod text-left items-center gap-1">Modified {arrow("updated")}</button>
                     <button role="columnheader" aria-sort={ariaSort("size")} onClick={(e) => { e.stopPropagation(); sortBy("size"); }} className="text-left flex items-center gap-1">Size {arrow("size")}</button>
-                    <button role="columnheader" aria-sort={ariaSort("kind")} onClick={(e) => { e.stopPropagation(); sortBy("kind"); }} className="frow-hide text-left items-center gap-1">Kind {arrow("kind")}</button>
+                    <button role="columnheader" aria-sort={ariaSort("kind")} onClick={(e) => { e.stopPropagation(); sortBy("kind"); }} className="c-kind text-left items-center gap-1">Kind {arrow("kind")}</button>
                   </div>
                   {pg.pageItems.map((r, ri) => {
                     const on = selSet.has(r.key);
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
                     return (
                       <div key={r.key} role="row" tabIndex={0} aria-selected={on}
-                        onClick={(e) => clickRow(e, r, ri)}
+                        onPointerDown={notePointer} onClick={(e) => clickRow(e, r, ri)}
                         onDoubleClick={() => open(r)}
                         onKeyDown={(e) => onRowKey(e, r)}
-                        onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
-                        className={`frow min-h-[36px] px-4 border-b border-line/70 cursor-default select-none transition-colors ${on ? "bg-tint text-brand" : "hover:bg-tint/40"}`}>
+                        onContextMenu={(e) => openRowMenu(e, r)}
+                        className={`frow min-h-[44px] sm:min-h-[36px] px-3 sm:px-4 border-b border-line/70 cursor-default select-none transition-colors ${on ? "bg-tint text-brand" : "hover:bg-tint/40"}`}>
                         <div role="gridcell" className="flex items-center gap-2 min-w-0" style={{ paddingLeft: r.depth * 20 }}>
                           {r.kind === "folder" && r.expandable
                             ? <button onClick={(e) => { e.stopPropagation(); toggleExpand(r.id); }} aria-label={expanded.has(r.id) ? `Collapse ${r.name}` : `Expand ${r.name}`} aria-expanded={expanded.has(r.id)}
@@ -1470,19 +1503,25 @@ export default function Explorer() {
                               ? <FileThumb file={r.file} size={34} />
                               : <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={26} />}
                           </span>
-                          <span className="text-[15px] truncate">{r.name}</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-[14.5px] sm:text-[15px] truncate">{r.name}</span>
+                            {/* Phone: the hidden Modified column moves under the name. */}
+                            <span className="sm:hidden block text-[11px] text-muted truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : r.kind === "folder" ? "Folder" : ""}</span>
+                          </span>
+                          <button onClick={(e) => openRowMenu(e, r)} aria-label={`Actions for ${r.name}`}
+                            className="row-more size-9 shrink-0 grid place-items-center rounded-md text-muted hover:bg-tint hover:text-ink"><MoreHorizontal size={17} /></button>
                         </div>
-                        <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
-                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{locText(r)}</div>
-                        <div role="gridcell" className="text-[11px] text-ink/75 truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : "--"}</div>
+                        <div role="gridcell" className="c-tags"><TagDots tags={rowTags(r)} /></div>
+                        <div role="gridcell" className="c-loc text-[11px] text-ink/75 truncate">{locText(r)}</div>
+                        <div role="gridcell" className="c-mod text-[11px] text-ink/75 truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : "--"}</div>
                         <div role="gridcell" className="text-[11px] text-ink/75 tabular-nums">{r.kind === "folder" ? folderSize(r) : (r.file?.size ? formatBytes(r.file.size) : "--")}</div>
-                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.kind === "folder" ? "Folder" : (r.file ? kindLabel(r.file.name, cls, r.file.mime) : "--")}</div>
+                        <div role="gridcell" className="c-kind text-[11px] text-ink/75 truncate">{r.kind === "folder" ? "Folder" : (r.file ? kindLabel(r.file.name, cls, r.file.mime) : "--")}</div>
                       </div>
                     );
                   })}
                 </div>
               ) : (
-                <div role="grid" aria-label={`${rows.length} items`} className={`p-4 grid content-start ${thumbs ? "gap-3" : "gap-1"}`} style={{ gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))" }}>
+                <div role="grid" aria-label={`${rows.length} items`} className={`p-2 sm:p-4 grid content-start ${thumbs ? "gap-2 sm:gap-3" : "gap-1"}`} style={{ gridTemplateColumns: "repeat(auto-fill, minmax(clamp(96px, 26vw, 128px), 1fr))" }}>
                   {pg.pageItems.map((r, ri) => {
                     const on = selSet.has(r.key);
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
@@ -1498,18 +1537,22 @@ export default function Explorer() {
                           <span className="h-px flex-1 bg-line" />
                         </div>
                       )}
+                      <div className="gtile relative min-w-0">
                       <button role="gridcell" aria-selected={on}
-                        onClick={(e) => clickRow(e, r, ri)}
+                        onPointerDown={notePointer} onClick={(e) => clickRow(e, r, ri)}
                         onDoubleClick={() => open(r)}
                         onKeyDown={(e) => onRowKey(e, r)}
-                        onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
-                        className={`flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors ${thumbs && !folder ? "min-h-[152px]" : "min-h-[104px]"} ${on ? "bg-tint text-brand" : "hover:bg-tint/40"} ${thumbs && folder ? "border border-line/60 bg-soft/40" : ""}`}>
+                        onContextMenu={(e) => openRowMenu(e, r)}
+                        className={`w-full flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors ${thumbs && !folder ? "min-h-[152px]" : "min-h-[104px]"} ${on ? "bg-tint text-brand" : "hover:bg-tint/40"} ${thumbs && folder ? "border border-line/60 bg-soft/40" : ""}`}>
                         {thumbs && !folder && r.file
                           ? <FileThumb file={r.file} size={72} />
                           : <FileIcon name={r.name} mime={r.file?.mime} folder={folder} size={64} />}
                         <span className="text-[12.5px] leading-tight break-all line-clamp-2">{r.name}</span>
                         {rowTags(r).length > 0 && <TagDots tags={rowTags(r)} />}
                       </button>
+                      <button onClick={(e) => openRowMenu(e, r)} aria-label={`Actions for ${r.name}`}
+                        className="row-more absolute top-1 right-1 size-8 grid place-items-center rounded-md bg-surface/85 text-muted hover:text-ink hover:bg-tint"><MoreHorizontal size={16} /></button>
+                      </div>
                       </Fragment>
                     );
                   })}
@@ -1524,30 +1567,32 @@ export default function Explorer() {
                 </div>
               )}
             </div>
+            {/* Bulk action bar */}
+            {selSet.size > 1 && (
+              <div className="shrink-0 px-3 py-2 border-t border-line bg-surface flex flex-wrap items-center gap-2" role="toolbar" aria-label={`${selSet.size} selected`}>
+                <span className="text-[13px] font-medium">{selSet.size} selected</span>
+                <span className="flex-1" />
+                <button onClick={bulkDownload} className="min-h-[40px] px-3 rounded-md border border-line text-[13px] hover:bg-tint">Download</button>
+                {nav.kind !== "bin" && (
+                  <button onClick={() => setConfirmBulk(true)} className="min-h-[40px] px-3 rounded-md border border-danger/40 text-danger text-[13px]">Trash</button>
+                )}
+                <button onClick={clearSel} className="min-h-[40px] px-3 rounded-md text-[13px] text-muted hover:bg-tint">Clear</button>
+              </div>
+            )}
             <div className="shrink-0 border-t border-line px-3 empty:hidden"><Pagination pager={nav.kind === "bin" ? binPg : pg} noun={nav.kind === "bin" ? "files" : "items"} /></div>
             <p className="shrink-0 h-8 px-4 flex items-center text-[11px] text-muted border-t border-line" role="status">
               {nav.kind === "bin" ? `${bin.length} in bin` : `${folderCount} folders · ${fileRows.length} files · ${formatBytes(totalSize)}`}
             </p>
           </div>
-          {/* Bulk action bar */}
-          {selSet.size > 1 && (
-            <div className="shrink-0 px-3 py-2 border-t border-line bg-surface flex items-center gap-2" role="toolbar" aria-label={`${selSet.size} selected`}>
-              <span className="text-[13px] font-medium">{selSet.size} selected</span>
-              <span className="flex-1" />
-              <button onClick={bulkDownload} className="min-h-[40px] px-3 rounded-md border border-line text-[13px] hover:bg-tint">Download</button>
-              {nav.kind !== "bin" && (
-                <button onClick={() => setConfirmBulk(true)} className="min-h-[40px] px-3 rounded-md border border-danger/40 text-danger text-[13px]">Trash</button>
-              )}
-              <button onClick={clearSel} className="min-h-[40px] px-3 rounded-md text-[13px] text-muted hover:bg-tint">Clear</button>
-            </div>
-          )}
-
           {/* Details */}
           {showInfo && sel && (
+            <div className="lg:hidden fixed inset-0 z-[29] bg-black/25" onClick={() => { setSelKey(null); setInfoOpen(false); }} aria-hidden="true" />
+          )}
+          {showInfo && sel && (
             <aside aria-label="Details"
-              className="fixed lg:static inset-x-0 bottom-0 z-30 lg:z-auto max-h-[75vh] lg:max-h-none w-full lg:w-[296px] shrink-0 overflow-y-auto bg-surface border-t lg:border-t-0 lg:border-l border-line rounded-t-2xl lg:rounded-none shadow-pop lg:shadow-none p-4 flex flex-col pop-in">
+              className="fixed lg:static inset-x-0 bottom-0 z-30 lg:z-auto max-h-[80dvh] lg:max-h-none w-full sm:max-w-[520px] sm:mx-auto lg:mx-0 lg:w-[280px] xl:w-[296px] shrink-0 overflow-y-auto bg-surface border-t sm:border-x lg:border-x-0 lg:border-t-0 lg:border-l border-line rounded-t-2xl lg:rounded-none shadow-pop lg:shadow-none p-4 pb-[max(16px,env(safe-area-inset-bottom))] flex flex-col pop-in">
               <button onClick={() => { setSelKey(null); setInfoOpen(false); }} aria-label="Close details" className="self-end -mt-1 -mr-1 mb-1 size-11 grid place-items-center rounded-md hover:bg-tint text-muted"><X size={16} /></button>
-              <div className="h-[200px] rounded-lg border border-line bg-soft grid place-items-center overflow-hidden">
+              <div className="h-[160px] sm:h-[200px] rounded-lg border border-line bg-soft grid place-items-center overflow-hidden">
                 {sel.file && classify(sel.file.name, sel.file.mime) === "IMAGE" && !sel.id.startsWith("g:")
                   // eslint-disable-next-line @next/next/no-img-element
                   ? <img src={`/api/drive/download?file_id=${sel.id}`} alt={`Preview of ${sel.name}`} loading="lazy" className="max-h-full max-w-full object-contain" />
@@ -1607,7 +1652,7 @@ export default function Explorer() {
           with the reason — nothing silently missing, nothing silently dead. */}
       {ctx && (
         <div role="menu" style={{ left: ctx.x, top: ctx.y }} onClick={(e) => e.stopPropagation()}
-          className="pop-in fixed z-[70] w-[218px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
+          className="pop-in fixed z-[70] w-[218px] max-h-[calc(100dvh-16px)] overflow-y-auto py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
           {(() => {
             const r = ctx.row;
             const isLive = r.id.startsWith("g:") && !r.id.startsWith("gdrive:");
@@ -1753,7 +1798,7 @@ export default function Explorer() {
       </Modal>
 
       <ConfirmDialog open={!!confirmFolderDelete} title="Delete folder?"
-        body={`"${confirmFolderDelete?.name}" is deleted only if it is empty. Files must be trashed individually first — managers only.`}
+        body={`"${confirmFolderDelete?.name}" and its subfolders are removed. Files inside move to the Recovery Bin for 90 days and restore to the parent folder.`}
         confirmLabel="Delete" onClose={() => setConfirmFolderDelete(null)} onConfirm={deleteFolder} />
     </section>
   );

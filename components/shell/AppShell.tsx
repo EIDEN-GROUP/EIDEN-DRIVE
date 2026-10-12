@@ -118,13 +118,13 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
   const initial = (user?.username ?? "?").slice(0, 1).toLowerCase();
 
   return (
-    <div className="h-screen flex bg-surface text-ink overflow-hidden">
+    <div className="app-frame flex bg-surface text-ink overflow-hidden">
       {/* ── Sidebar ── */}
       {drawer && <div className="md:hidden fixed inset-0 z-30 bg-black/30" onClick={() => setDrawer(false)} aria-hidden="true" />}
       <aside aria-label="Primary" role={drawer ? "dialog" : undefined} aria-modal={drawer ? true : undefined}
-        className={`sb fixed md:static z-40 inset-y-0 left-0 shrink-0 bg-surface flex flex-col overflow-hidden
+        className={`sb fixed md:static z-40 inset-y-0 left-0 shrink-0 bg-surface flex flex-col overflow-hidden pt-safe pb-safe
           ${drawer ? "translate-x-0 shadow-pop" : "-translate-x-full md:translate-x-0"}`}>
-        <div className="sb-head h-[72px] px-5 flex items-center justify-between">
+        <div className="sb-head h-16 sm:h-[72px] shrink-0 px-5 flex items-center justify-between">
           <Link href="/drive" className="flex items-center gap-3 min-w-0" aria-label="Eiden Drive — home">
             <Logo size={38} />
             <span className="sb-full font-brand leading-none whitespace-nowrap">
@@ -189,13 +189,13 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
 
       {/* ── Main column ── */}
       <div className="flex-1 min-w-0 flex flex-col">
-        <header className="h-[72px] shrink-0 px-4 sm:px-6 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-4 min-w-0">
+        <header className="pt-safe shrink-0"><div className="h-14 sm:h-16 lg:h-[72px] px-2 sm:px-4 lg:px-6 flex items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-center gap-2 sm:gap-4 min-w-0">
             <button onClick={toggleSidebar} aria-label={mode === "rail" ? "Expand sidebar" : "Collapse sidebar"} className="size-11 grid place-items-center rounded-md hover:bg-tint"><MenuIcon size={22} strokeWidth={1.6} /></button>
             <span className="hidden sm:block h-5 border-l border-line" />
-            <h1 className="text-[16px] text-ink/90 truncate">{title}</h1>
+            <h1 className="text-[15px] sm:text-[16px] text-ink/90 truncate">{title}</h1>
           </div>
-          <div className="flex items-center gap-1 sm:gap-3">
+          <div className="flex items-center gap-0.5 sm:gap-2 lg:gap-3 shrink-0">
             <button onClick={() => setNotifOpen(true)} aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`}
               className="lg:hidden relative size-11 grid place-items-center rounded-md hover:bg-tint text-[#22c32e]">
               <Bell size={21} strokeWidth={1.6} />
@@ -217,7 +217,7 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
                 <ChevronDown size={17} className="text-ink/70" />
               </button>
               {userMenu && (
-                <div role="menu" className="pop-in absolute right-0 mt-2 w-[230px] rounded-lg bg-surface border border-line shadow-pop py-2 z-50">
+                <div role="menu" className="pop-in absolute right-0 mt-2 w-[min(230px,calc(100vw-16px))] rounded-lg bg-surface border border-line shadow-pop py-2 z-50">
                   <div className="px-4 py-2 border-b border-line">
                     <p className="text-[14px] font-medium truncate">{user?.username ?? "Signed in"}</p>
                     <p className="text-[11px] text-muted capitalize">{user?.role ?? "member"}{user?.dept ? ` · ${user.dept}` : ""}</p>
@@ -234,10 +234,10 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
               {rail ? <ChevronsRight size={21} strokeWidth={1.6} /> : <ChevronsLeft size={21} strokeWidth={1.6} />}
             </button>
           </div>
-        </header>
+        </div></header>
 
         <div className="flex-1 min-h-0 flex">
-          <main className="flex-1 min-w-0 min-h-0 overflow-auto px-3 sm:px-4 pb-4">{children}</main>
+          <main className="flex-1 min-w-0 min-h-0 overflow-auto px-2 sm:px-4 lg:px-5 pb-[max(8px,env(safe-area-inset-bottom))] sm:pb-4">{children}</main>
           {rail && (
             <aside aria-label="Quick links" className="hidden lg:flex w-[56px] shrink-0 border-l border-line flex-col items-center gap-2 pt-4">
               <button onClick={() => setNotifOpen(true)} aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`}

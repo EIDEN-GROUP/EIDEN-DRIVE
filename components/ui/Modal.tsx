@@ -27,14 +27,14 @@ export default function Modal({ open, title, onClose, children, width = 440, lab
   }, [open]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/30 backdrop-blur-[3px] p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-[90] grid items-end sm:place-items-center bg-black/30 backdrop-blur-[3px] p-0 sm:p-4" onClick={onClose}>
       <div ref={boxRef} role="dialog" aria-modal="true" aria-labelledby={labelId} style={{ maxWidth: width }}
-        className="pop-in w-full rounded-xl bg-surface shadow-pop border border-line" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-start justify-between gap-3 px-5 py-3 border-b border-line">
+        className="pop-in w-full max-h-[92dvh] sm:max-h-[calc(100dvh-2rem)] flex flex-col rounded-t-2xl sm:rounded-xl bg-surface shadow-pop border border-line mx-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="shrink-0 flex items-start justify-between gap-3 px-4 sm:px-5 py-2 sm:py-3 border-b border-line">
           <h2 id={labelId} className="text-[15px] font-medium break-words leading-snug py-2">{title}</h2>
           <button ref={closeRef} onClick={onClose} aria-label="Close" className="size-11 shrink-0 grid place-items-center rounded-md hover:bg-tint"><X size={18} /></button>
         </div>
-        <div className="p-5 break-words">{children}</div>
+        <div className="p-4 sm:p-5 pb-[max(16px,env(safe-area-inset-bottom))] sm:pb-5 overflow-y-auto break-words">{children}</div>
       </div>
     </div>
   );

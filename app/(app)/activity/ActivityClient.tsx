@@ -78,7 +78,7 @@ export default function ActivityClient() {
   const feed = items.slice(0, 6);
 
   return (
-    <section className="px-1 pt-1 max-w-[1400px] mx-auto">
+    <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
       <PageHead title="Activity" subtitle="Every audited action — who did what, and when."
         actions={<>
           <button onClick={() => run()} className="min-h-[44px] px-4 rounded-lg border border-line bg-surface text-[14px] flex items-center gap-2 hover:bg-tint transition-colors"><RefreshCw size={16} /> Refresh</button>
@@ -134,21 +134,21 @@ export default function ActivityClient() {
           : items.length === 0 ? <EmptyNote>No events match these filters.</EmptyNote>
           : (
             <div className="overflow-x-auto -mx-1">
-              <table className="w-full text-[14px] min-w-[620px]">
+              <table className="w-full text-[13px] sm:text-[14px] min-w-[300px]">
                 <thead>
                   <tr className="bg-soft text-left text-[13.5px] text-ink/80">
-                    <th className="px-4 h-12 font-normal rounded-l-lg">Time</th><th className="px-3 font-normal">Person</th><th className="px-3 font-normal">Action</th>
-                    <th className="px-3 font-normal">Item</th><th className="px-4 font-normal rounded-r-lg">IP</th>
+                    <th className="px-3 sm:px-4 h-12 font-normal rounded-l-lg">Time</th><th className="px-3 font-normal">Person</th><th className="hidden sm:table-cell px-3 font-normal">Action</th>
+                    <th className="hidden md:table-cell px-3 font-normal">Item</th><th className="hidden lg:table-cell px-4 font-normal rounded-r-lg">IP</th>
                   </tr>
                 </thead>
                 <tbody>
                   {pager.pageItems.map((e) => { const m = actionMeta(e.action); return (
                     <tr key={e.id} className="border-b border-line/70 last:border-0 hover:bg-tint/30 transition-colors">
-                      <td className="px-4 py-3.5 whitespace-nowrap text-ink/80 tabular-nums" title={new Date(e.ts).toLocaleString()}>{fmtDay(e.ts)} <span className="text-muted">· {fmtTime(e.ts)}</span></td>
-                      <td className="px-3 py-3.5"><span className="flex items-center gap-2.5 min-w-0"><span className="size-7 rounded-full bg-tint text-brand grid place-items-center text-[12px] font-medium shrink-0" aria-hidden="true">{e.actor_name.slice(0, 1).toUpperCase()}</span><span className="truncate">{e.actor_name}</span></span></td>
-                      <td className="px-3 py-3.5"><StatusPill color={m.color}>{m.label}</StatusPill></td>
-                      <td className="px-3 py-3.5 max-w-[320px] truncate text-ink/80">{detailText(e) ?? <span className="text-muted">—</span>}</td>
-                      <td className="px-4 py-3.5 text-[12.5px] text-muted tabular-nums whitespace-nowrap">{e.ip ?? "—"}</td>
+                      <td className="px-3 sm:px-4 py-3.5 whitespace-nowrap text-ink/80 tabular-nums align-top sm:align-middle" title={new Date(e.ts).toLocaleString()}>{fmtDay(e.ts)} <span className="text-muted">· {fmtTime(e.ts)}</span></td>
+                      <td className="px-3 py-3.5 max-w-0 w-full sm:w-auto sm:max-w-none"><span className="flex items-center gap-2.5 min-w-0"><span className="size-7 rounded-full bg-tint text-brand grid place-items-center text-[12px] font-medium shrink-0" aria-hidden="true">{e.actor_name.slice(0, 1).toUpperCase()}</span><span className="min-w-0"><span className="block truncate">{e.actor_name}</span><span className="sm:hidden block mt-1"><StatusPill color={m.color}>{m.label}</StatusPill></span><span className="md:hidden block mt-1 text-[12px] text-muted truncate">{detailText(e) ?? ""}</span></span></span></td>
+                      <td className="hidden sm:table-cell px-3 py-3.5"><StatusPill color={m.color}>{m.label}</StatusPill></td>
+                      <td className="hidden md:table-cell px-3 py-3.5 max-w-[200px] xl:max-w-[320px] truncate text-ink/80">{detailText(e) ?? <span className="text-muted">—</span>}</td>
+                      <td className="hidden lg:table-cell px-4 py-3.5 text-[12.5px] text-muted tabular-nums whitespace-nowrap">{e.ip ?? "—"}</td>
                     </tr>); })}
                 </tbody>
               </table>

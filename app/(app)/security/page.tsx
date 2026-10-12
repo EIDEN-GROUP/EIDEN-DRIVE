@@ -15,7 +15,7 @@ export default async function SecurityPage() {
   const me = await getProfile();
   if (!me || !can(me.role, "manage-users")) {
     return (
-      <section className="px-1 pt-1">
+      <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
         <h1 className="page-title mb-4">Security Center</h1>
         <Card label="Restricted">
           <p className="text-sm text-muted">The Security Center names people and is visible to managers and admins only.</p>
@@ -25,7 +25,7 @@ export default async function SecurityPage() {
   }
   if (!hasAdminClient()) {
     return (
-      <section className="px-1 pt-1">
+      <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
         <h1 className="page-title mb-4">Security Center</h1>
         <Card label="Not configured"><p className="text-sm text-muted">Server is missing its service key — set SUPABASE_SERVICE_ROLE_KEY.</p></Card>
       </section>

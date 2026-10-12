@@ -87,7 +87,7 @@ export default function ProfileModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Your profile">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="pop-in relative w-full max-w-sm rounded-xl bg-surface border border-line shadow-pop overflow-hidden">
+      <div className="pop-in relative w-full max-w-sm max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-xl bg-surface border border-line shadow-pop">
         <div className="flex items-center min-h-[56px] px-4 border-b border-line">
           <p className="text-[15px] font-medium flex-1">Your profile</p>
           <button onClick={onClose} aria-label="Close profile" className="size-11 grid place-items-center rounded-md hover:bg-tint"><X size={18} /></button>

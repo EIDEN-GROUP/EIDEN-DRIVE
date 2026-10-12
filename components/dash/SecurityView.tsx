@@ -31,7 +31,7 @@ export default function SecurityView(d: SecurityData) {
   const link = "min-h-[44px] px-4 rounded-lg border border-line bg-surface text-[14px] inline-flex items-center gap-2 hover:bg-tint transition-colors";
 
   return (
-    <section className="px-1 pt-1 max-w-[1400px] mx-auto">
+    <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
       <PageHead title="Security Center"
         subtitle={<span className="inline-flex items-center gap-2 flex-wrap">Live posture, activity volume, and what needs a human. <StatusPill tone={attention ? "warn" : "good"}>{attention ? "Needs attention" : "All clear"}</StatusPill></span>}
         actions={<><Link href="/activity" className={link}><Activity size={16} /> Activity log</Link><Link href="/users" className={link}><Users size={16} /> Manage people</Link></>} />

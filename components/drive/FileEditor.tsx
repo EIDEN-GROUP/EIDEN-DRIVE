@@ -77,9 +77,9 @@ export default function FileEditor({ file, onClose, onSaved }: {
   const html = (text ?? "").split("\n").map((l) => highlight(l) || " ").join("\n");
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`Edit ${file.name}`}>
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-0 sm:p-6" role="dialog" aria-modal="true" aria-label={`Edit ${file.name}`}>
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="pop-in relative w-full max-w-4xl h-[84vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
+      <div className="pop-in relative w-full max-w-4xl 2xl:max-w-5xl h-[100dvh] sm:h-[84dvh] rounded-none sm:rounded-xl bg-surface sm:border pt-safe pb-safe sm:pt-0 sm:pb-0 border-line shadow-pop flex flex-col overflow-hidden">
         <div className="flex items-center gap-2 px-4 min-h-[56px] border-b border-line">
           <p className="text-[14px] font-medium truncate flex-1">{file.name}{dirty && <span className="text-muted"> •</span>}</p>
           <span className="text-[11px] px-2 py-1 rounded bg-tint text-brand font-medium">{langOf(file.name)}</span>
