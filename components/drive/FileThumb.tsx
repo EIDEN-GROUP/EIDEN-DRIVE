@@ -1,196 +1,176 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { Play } from "lucide-react";
 import { FileIcon } from "../ui/Glyphs";
 import { viewKind, nativeVideo, needsHelp, googleIdOf } from "./filetext";
 import type { FileRow } from "./Explorer";
 
-// Signed-URL cache: one ?json=1 fetch per Storage file per session.
-// Signed URLs expire, so entries carry a timestamp (5-min TTL) — a stale hit
-// else renders a broken thumb with no refetch.
+// Signed Storage URLs live 5 minutes server-side — cache them for 4 so a
+// scrolled-back cover never points at an expired link.
+const URL_TTL = 4 * 60_000;
 const urlCache = new Map<string, { url: string; at: number }>();
-const URL_TTL = 5 * 60 * 1000;
 
-async function resolveUrl(f: FileRow): Promise<string | null> {
+async function signedUrl(f: FileRow): Promise<string | null> {
   const hit = urlCache.get(f.id);
   if (hit && Date.now() - hit.at < URL_TTL) return hit.url;
-  if (hit) urlCache.delete(f.id);
-  if (f.storage_path) {
-    const r = await fetch(`/api/drive/download?file_id=${encodeURIComponent(f.id)}&json=1`);
-    const d = await r.json().catch(() => ({}));
-    if (r.ok && d.url) { urlCache.set(f.id, { url: d.url, at: Date.now() }); return d.url; }
-    return null;
-  }
-  // Google-hosted (indexed or live): stream through the same-origin endpoint.
-  return `/api/drive/download?file_id=${encodeURIComponent(f.id)}&raw=1`;
+  const r = await fetch(`/api/drive/download?file_id=${encodeURIComponent(f.id)}&json=1`);
+  const d = await r.json().catch(() => ({}));
+  if (r.ok && d.url) { urlCache.set(f.id, { url: d.url, at: Date.now() }); return d.url; }
+  return null;
 }
 
-function thumbUrl(f: FileRow): string {
-  return `/api/drive/download?file_id=${encodeURIComponent(f.id)}&thumb=1`;
-}
+const thumbUrl = (f: FileRow) => `/api/drive/download?file_id=${encodeURIComponent(f.id)}&thumb=1`;
+const rawUrl = (f: FileRow) => `/api/drive/download?file_id=${encodeURIComponent(f.id)}&raw=1`;
 
 type Stage = "google" | "direct" | "decode" | "dead";
 
-// Windows-style cover for EVERY visual format. Chain per file, first success wins:
-//  1. google — Drive's server-side thumbnail (RAW, PSD, TIFF, HEIC, any video,
-//     PDF…). Works for any file Google can see, regardless of browser support.
-//  2. direct — the browser decodes it itself (<img> / first video frame).
-//  3. decode — TIFF via utif, HEIC via heic2any, drawn to a canvas (Storage files).
-//  4. dead — honest generic tile. Never a black box, never a broken icon.
+// Cover art for visual files, a clean page icon for everything else.
+// Source chain per file, first success wins:
+//  1. google — Drive's server-side thumbnail (small, fast, any visual format).
+//     First choice for Google-hosted files: never stream full bytes for a cover.
+//  2. direct — Storage signed URL (or raw stream) decoded by the browser.
+//  3. decode — TIFF via utif, HEIC via heic2any (Storage files only).
+//  4. dead — the file's page icon, same as non-visual files.
 export default function FileThumb({ file, size = 40 }: { file: FileRow; size?: number }) {
   const kind = viewKind(file.name, file.mime);
   const visual = kind === "image" || kind === "video";
   const gid = googleIdOf(file.id, file.google_file_id);
-  const exoticVideo = kind === "video" && !nativeVideo(file.name, file.mime);
+  const local = !!file.storage_path;
   const hardImage = kind === "image" && needsHelp(file.name, file.mime);
-  const start: Stage = gid && (exoticVideo || hardImage) ? "google" : "direct";
+  const start: Stage = gid && (!local || hardImage || (kind === "video" && !nativeVideo(file.name, file.mime))) ? "google" : "direct";
 
   const [stage, setStage] = useState<Stage>(start);
-  const [url, setUrl] = useState<string | null>(start === "google" ? thumbUrl(file) : null);
-  const [canvasUrl, setCanvasUrl] = useState<string | null>(null);
-  const seen = useRef(false);
-  const ref = useRef<HTMLDivElement>(null);
-  // Failure ping-pong guard: google ⇄ direct must settle on dead after one
-  // full cycle, never toggle forever on a persistently failing file.
-  const fails = useRef(0);
+  const [url, setUrl] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [near, setNear] = useState(false);
+  const tried = useRef(new Set<Stage>());
+  const ref = useRef<HTMLSpanElement>(null);
+  // Object URLs minted by the HEIC decoder must be revoked: every unrevoked
+  // blob: URL pins its bytes for the tab's lifetime (leak per thumbnail).
+  const objUrl = useRef<string | null>(null);
   useEffect(() => () => {
-    if (canvasUrl && canvasUrl.startsWith("blob:")) URL.revokeObjectURL(canvasUrl);
-  }, [canvasUrl]);
+    if (objUrl.current) URL.revokeObjectURL(objUrl.current);
+  }, []);
+  function setObjUrl(u: string) {
+    if (objUrl.current) URL.revokeObjectURL(objUrl.current);
+    objUrl.current = u;
+    setUrl(u);
+  }
 
-  // Direct bytes load lazily, only when scrolled near.
+  // Nothing loads until the tile scrolls near the viewport.
   useEffect(() => {
-    if (!visual || stage !== "direct" || url) return;
-    let gone = false;
+    if (!visual || near) return;
     const el = ref.current;
     if (!el) return;
     const io = new IntersectionObserver((es) => {
-      if (!es.some((e) => e.isIntersecting)) return;
-      io.disconnect();
-      resolveUrl(file).then((u) => {
-        if (gone) return;
-        if (u) setUrl(u);
-        else if (gid) setStage("google");
-        else setStage("dead");
-      }).catch(() => { if (!gone) setStage(gid ? "google" : "dead"); });
+      if (es.some((e) => e.isIntersecting)) { setNear(true); io.disconnect(); }
     }, { rootMargin: "200px" });
     io.observe(el);
-    return () => { gone = true; io.disconnect(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file.id, stage]);
+    return () => io.disconnect();
+  }, [visual, near]);
 
-  // In-browser decode for TIFF / HEIC on Storage files (no Google to ask).
+  function advance() {
+    tried.current.add(stage);
+    setUrl(null);
+    setLoaded(false);
+    const next: Stage =
+      stage === "google" ? (local || nativeVideo(file.name, file.mime) || !hardImage ? "direct" : "dead")
+      : stage === "direct" ? (gid && !tried.current.has("google") ? "google" : hardImage && local ? "decode" : "dead")
+      : "dead";
+    setStage(tried.current.has(next) ? "dead" : next);
+  }
+
+  // Resolve the source URL for the current stage.
   useEffect(() => {
-    if (stage !== "decode" || seen.current) return;
-    seen.current = true;
+    if (!visual || !near || url) return;
     let gone = false;
     (async () => {
       try {
-        const u = url ?? (await resolveUrl(file));
-        if (!u) throw new Error("no bytes");
-        const buf = await fetch(u).then((r) => {
-          if (!r.ok) throw new Error("fetch failed");
-          return r.arrayBuffer();
-        });
-        // Never hold a giant file in the tab for a thumbnail: 25 MB is plenty
-        // to decide TIFF-vs-HEIC and render a tile.
-        if (buf.byteLength > 25 * 1024 * 1024) throw new Error("too large for a thumbnail decode");
-        const head = new Uint8Array(buf, 0, 12);
-        const isTiff = (head[0] === 0x49 && head[1] === 0x49 && head[2] === 0x2a) || (head[0] === 0x4d && head[1] === 0x4d && head[3] === 0x2a);
-        let dataUrl: string;
-        if (isTiff) {
-          const UTIF = (await import("utif")).default;
-          const ifds = UTIF.decode(buf);
-          if (!ifds?.length) throw new Error("not a tiff");
-          UTIF.decodeImage(buf, ifds[0]);
-          const rgba = UTIF.toRGBA8(ifds[0]);
-          const c = document.createElement("canvas");
-          c.width = ifds[0].width; c.height = ifds[0].height;
-          const px = new Uint8ClampedArray(rgba.length);
-          px.set(rgba);
-          c.getContext("2d")!.putImageData(new ImageData(px, c.width, c.height), 0, 0);
-          dataUrl = c.toDataURL("image/png");
-        } else if (/\.(heic|heif)$/i.test(file.name)) {
-          const heic2any = (await import("heic2any")).default;
-          const out = await heic2any({ blob: new Blob([buf]), toType: "image/jpeg", quality: 0.9 });
-          const blob = Array.isArray(out) ? out[0] : out;
-          dataUrl = URL.createObjectURL(blob);
-        } else {
-          throw new Error("nothing left to try");
+        if (stage === "google") { setUrl(thumbUrl(file)); return; }
+        if (stage === "direct") {
+          const u = local ? await signedUrl(file) : rawUrl(file);
+          if (gone) return;
+          if (!u) { advance(); return; }
+          // Video: jump past frame 0, which is often black.
+          setUrl(kind === "video" ? `${u}#t=0.5` : u);
+          return;
         }
-        if (!gone) setCanvasUrl(dataUrl);
+        if (stage === "decode") {
+          const u = await signedUrl(file);
+          if (!u) throw new Error("no bytes");
+          const buf = await fetch(u).then((r) => { if (!r.ok) throw new Error("fetch failed"); return r.arrayBuffer(); });
+          // Never hold a giant file in the tab for a thumbnail: 25 MB is plenty
+          // to decide TIFF-vs-HEIC and render a tile.
+          if (buf.byteLength > 25 * 1024 * 1024) throw new Error("too large for a thumbnail decode");
+          const head = new Uint8Array(buf, 0, 12);
+          const isTiff = (head[0] === 0x49 && head[1] === 0x49 && head[2] === 0x2a) || (head[0] === 0x4d && head[1] === 0x4d && head[3] === 0x2a);
+          if (isTiff) {
+            const UTIF = (await import("utif")).default;
+            const ifds = UTIF.decode(buf);
+            if (!ifds?.length) throw new Error("not a tiff");
+            UTIF.decodeImage(buf, ifds[0]);
+            const rgba = UTIF.toRGBA8(ifds[0]);
+            const c = document.createElement("canvas");
+            c.width = ifds[0].width; c.height = ifds[0].height;
+            const px = new Uint8ClampedArray(rgba.length);
+            px.set(rgba);
+            c.getContext("2d")!.putImageData(new ImageData(px, c.width, c.height), 0, 0);
+            if (!gone) setUrl(c.toDataURL("image/png"));
+          } else if (/\.(heic|heif)$/i.test(file.name)) {
+            // HEIC only: running heic2any on arbitrary formats wastes the WASM
+            // load and always fails — anything else has no decode path left.
+            const heic2any = (await import("heic2any")).default;
+            const res = await heic2any({ blob: new Blob([buf]), toType: "image/jpeg", quality: 0.8 });
+            const obj = URL.createObjectURL(Array.isArray(res) ? res[0] : res);
+            if (!gone) setObjUrl(obj);
+            else URL.revokeObjectURL(obj);
+          } else {
+            throw new Error("nothing left to try");
+          }
+        }
       } catch {
-        if (!gone) setStage("dead");
+        if (!gone) advance();
       }
     })();
     return () => { gone = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage]);
+  }, [stage, near, url, file.id]);
 
   const box: React.CSSProperties = { width: size, height: size };
-  const imgCls = "rounded-md bg-tint grid place-items-center shrink-0 overflow-hidden";
-  const fail = () => {
-    // Advance one rung: google → direct → decode → dead. After one full
-    // cycle a persistently failing file settles on dead instead of ping-ponging.
-    fails.current++;
-    if (fails.current >= 3) { setStage("dead"); return; }
-    if (stage === "google") {
-      if (kind === "video" && nativeVideo(file.name, file.mime)) { setUrl(null); setStage("direct"); }
-      else setStage("dead");
-    } else if (stage === "direct") {
-      if (gid) setStage("google");
-      else if (hardImage && !seen.current) setStage("decode");
-      else setStage("dead");
-    } else setStage("dead");
-  };
 
+  // Non-visual files (and covers that never resolved): the page icon, centred, no tile.
   if (!visual || stage === "dead") {
     return (
-      <span ref={ref} style={box} className={imgCls} aria-hidden="true">
-        <FileIcon name={file.name} mime={file.mime} folder={false} size={Math.max(18, Math.round(size * 0.55))} />
+      <span ref={ref} style={box} className="grid place-items-center shrink-0" aria-hidden="true">
+        <FileIcon name={file.name} mime={file.mime} size={Math.round(size * 0.82)} />
       </span>
     );
   }
-  if (stage === "decode") {
-    if (!canvasUrl) return <span ref={ref} style={box} className="skel shrink-0" aria-hidden="true" />;
-    return (
-      <span ref={ref} style={box} className={imgCls} aria-hidden="true">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={canvasUrl} alt="" loading="lazy" style={{ width: size, height: size, objectFit: "cover" }} />
-      </span>
-    );
-  }
-  if (stage === "google") {
-    const g = thumbUrl(file);
-    if (kind === "video" && !nativeVideo(file.name, file.mime)) {
-      // Non-native video: a <video> tag would sit black — Google's thumb instead.
-      return (
-        <span ref={ref} style={box} className={imgCls} aria-hidden="true">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={g} alt="" loading="lazy" onError={fail} style={{ width: size, height: size, objectFit: "cover" }} />
-        </span>
-      );
-    }
-    return (
-      <span ref={ref} style={box} className={imgCls} aria-hidden="true">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={g} alt="" loading="lazy" onError={fail} style={{ width: size, height: size, objectFit: "cover" }} />
-      </span>
-    );
-  }
-  if (!url) {
-    return <span ref={ref} style={box} className="skel shrink-0" aria-hidden="true" />;
-  }
-  if (kind === "video") {
-    return (
-      <span ref={ref} style={box} className="rounded-md bg-black grid place-items-center shrink-0 overflow-hidden" aria-hidden="true">
-        <video src={url} preload="metadata" muted playsInline disablePictureInPicture
-          onError={fail} style={{ width: size, height: size, objectFit: "cover" }} />
-      </span>
-    );
-  }
+
+  const media = "absolute inset-0 h-full w-full object-cover transition-opacity duration-200";
+  const radius = size >= 56 ? "rounded-lg" : "rounded-[6px]";
+  const isVideoEl = kind === "video" && stage === "direct";
   return (
-    <span ref={ref} style={box} className={imgCls} aria-hidden="true">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={url} alt="" loading="lazy" onError={fail} style={{ width: size, height: size, objectFit: "cover" }} />
+    <span ref={ref} style={box} aria-hidden="true"
+      className={`relative shrink-0 overflow-hidden ${radius} bg-soft ring-1 ring-inset ring-line ${loaded ? "" : "skel"}`}>
+      {url && (isVideoEl ? (
+        <video src={url} preload="metadata" muted playsInline disablePictureInPicture
+          onLoadedData={() => setLoaded(true)} onError={advance} className={`${media} ${loaded ? "opacity-100" : "opacity-0"}`} />
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={url} alt="" loading="lazy" decoding="async"
+          onLoad={() => setLoaded(true)} onError={advance} className={`${media} ${loaded ? "opacity-100" : "opacity-0"}`} />
+      ))}
+      {/* Inner hairline keeps white images (screenshots, docs) from melting into the page. */}
+      <span className={`pointer-events-none absolute inset-0 ${radius} ring-1 ring-inset ring-black/10`} />
+      {kind === "video" && loaded && (
+        <span className="absolute inset-0 grid place-items-center">
+          <span className="grid place-items-center rounded-full bg-black/55 text-white backdrop-blur-[2px]"
+            style={{ width: Math.max(14, Math.round(size * 0.38)), height: Math.max(14, Math.round(size * 0.38)) }}>
+            <Play size={Math.max(8, Math.round(size * 0.18))} fill="currentColor" strokeWidth={0} className="translate-x-[1px]" />
+          </span>
+        </span>
+      )}
     </span>
   );
 }

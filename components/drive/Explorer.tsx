@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
   Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload,
-  Eye, Copy, Scissors, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon, Image as ImageIcon
+  Eye, Copy, Scissors, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -24,12 +24,13 @@ import { TagChip, TagDot, TagDots, TagEditor, TagPicker } from "../tags/TagUI";
 import type { Tag, TagKind } from "../tags/useTags";
 import { badge, classify, displayKind, fmtDateTime, formatBytes } from "@/lib/files";
 
-export interface Folder { id: string; name: string; parent: string | null; dept: string | null }
+export interface Folder { id: string; name: string; parent: string | null; dept: string | null; created_at?: string | null; created_by_name?: string | null }
 export interface FileRow {
   id: string; name: string; mime?: string; size?: number; backends: string[];
   owner?: string; updated?: string; updated_at?: string; folder?: string | null;
   hash?: string; storage_path?: string | null; accountLabel?: string; google_file_id?: string | null;
   google_parent_id?: string | null; drive_account_id?: string | null;
+  created_at?: string | null; owner_name?: string | null;
 }
 interface BinRow { file_id: string; deleted_at: string; purge_at: string; file_index: { id: string; name: string; mime: string; size: number } | { id: string; name: string; mime: string; size: number }[] }
 
@@ -79,14 +80,7 @@ export default function Explorer() {
   const [hist, setHist] = useState<Nav[]>([{ kind: "root", path: [] }]);
   const [hi, setHi] = useState(0);
   const [view, setView] = useState<View>("list");
-  // Covers (Windows-style thumbnails), persisted. Off = classic icons.
-  const [thumbs, setThumbs] = useState(true);
-  useEffect(() => {
-    try { if (localStorage.getItem("eiden-thumbs") === "0") setThumbs(false); } catch { /* ignore */ }
-  }, []);
-  function toggleThumbs() {
-    setThumbs((v) => { try { localStorage.setItem("eiden-thumbs", v ? "0" : "1"); } catch { /* ignore */ } return !v; });
-  }
+  // Covers (Windows-style thumbnails) are always on — no toggle, no flag.
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
   const [tagFilter, setTagFilter] = useState<string | null>(null); // department filter (manager-set folder.dept)
   const tg = useTags();                                            // user-created tags
@@ -490,6 +484,56 @@ export default function Explorer() {
       if (names.length) return names.join(" › ");
     }
     return r.file ? badge(r.file.backends, r.file.accountLabel) || "—" : "—";
+  }
+
+  // Details-panel facts. Folders get folder facts (where, what's inside, who
+  // made it); files get file facts. "--" only when the data truly doesn't exist.
+  function detailRows(r: Row): [string, string][] {
+    const gid = r.kind === "folder"
+      ? (r.googleFolder ?? (r.id.startsWith("gdrive:") ? r.id.slice("gdrive:".length) : null))
+      : null;
+    if (r.kind === "folder") {
+      let subFolders = 0, subFiles = 0, latest = "";
+      const bump = (d?: string | null) => { if (d && d > latest) latest = d; };
+      if (r.folder) {
+        subFolders = folders.filter((f) => f.parent === r.folder!.id).length;
+        for (const f of files) if (f.folder === r.folder.id) { subFiles++; bump(f.updated_at ?? f.updated); }
+      } else if (gid) {
+        const kids = tree ? tree.filter((t) => t.parent === gid) : [];
+        if (kids.length) {
+          for (const k of kids) if (k.mime === "application/vnd.google-apps.folder") subFolders++; else subFiles++;
+        } else {
+          for (const f of files) if (f.google_parent_id === gid) {
+            if (f.mime === "application/vnd.google-apps.folder") subFolders++; else { subFiles++; bump(f.updated_at ?? f.updated); }
+          }
+        }
+      }
+      const where = r.folder
+        ? ["Workspace", ...pathTo(r.folder.id).slice(0, -1).map((id) => folderById.get(id)?.name ?? "Folder")].join(" › ")
+        : gid ? (drivePath(gid) ?? (r.file?.accountLabel ? `Google · ${r.file.accountLabel}` : "Google Drive")) : "--";
+      const indexRow = r.file ?? (r.indexId ? files.find((f) => f.id === r.indexId) : undefined);
+      const createdBy = r.folder ? r.folder.created_by_name : indexRow?.owner_name;
+      const createdAt = r.folder ? r.folder.created_at : indexRow?.created_at;
+      const count = `${subFolders} folder${subFolders === 1 ? "" : "s"} · ${subFiles} file${subFiles === 1 ? "" : "s"}`;
+      return [
+        ["Created by", createdBy ?? "--"],
+        ["Created", fmtDate(createdAt)],
+        ["Modified", fmtDate(latest || indexRow?.updated_at || indexRow?.updated)],
+        ["Location", where],
+        ["Contains", count],
+        ["Size", folderSize(r)],
+        ...(indexRow?.accountLabel ? [["Drive", indexRow.accountLabel] as [string, string]] : [])
+      ];
+    }
+    const f = r.file;
+    return [
+      ["Created by", f?.owner_name ?? "--"],
+      ["Created", fmtDate(f?.created_at)],
+      ["Modified", f ? fmtDate(f.updated_at ?? f.updated) : "--"],
+      ["Location", locText(r)],
+      ...(f?.accountLabel ? [["Drive", f.accountLabel] as [string, string]] : []),
+      ["SHA-256", f?.hash ? `${f.hash.slice(0, 12)}…` : "--"]
+    ];
   }
 
   // Contained-bytes totals per folder: local ancestry via the folders table,
@@ -1435,11 +1479,7 @@ export default function Explorer() {
             </div>
             <div role="group" aria-label="View" className="flex rounded-md overflow-hidden">
               <button onClick={() => switchView("list")} aria-pressed={view === "list"} aria-label="List view" className={`size-11 grid place-items-center ${view === "list" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutList size={19} strokeWidth={1.6} /></button>
-              <button onClick={() => switchView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>
-              <button onClick={toggleThumbs} aria-pressed={thumbs} aria-label={thumbs ? "Hide file covers" : "Show file covers"}
-                title={thumbs ? "Hide covers" : "Show covers (images, video frames)"}
-                className={`size-11 grid place-items-center ${thumbs ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><ImageIcon size={19} strokeWidth={1.6} /></button>
-            </div>
+              <button onClick={() => switchView("grid")} aria-pressed={view === "grid"} aria-label="Grid view" className={`size-11 grid place-items-center ${view === "grid" ? "bg-tint text-brand" : "text-muted hover:bg-tint/60"}`}><LayoutGrid size={19} strokeWidth={1.6} /></button>            </div>
             <span className="h-5 border-l border-line mx-0.5" />
             {/* Upload: action + destination picker (Supabase, Drive, USB — each toggleable). */}
             <div className="flex items-stretch h-11 rounded-lg bg-brand text-white shadow-[0_1px_2px_rgba(60,30,140,.3)]">
@@ -1640,9 +1680,12 @@ export default function Explorer() {
                             ? <button onClick={(e) => { e.stopPropagation(); toggleExpand(r.id); }} aria-label={expanded.has(r.id) ? `Collapse ${r.name}` : `Expand ${r.name}`} aria-expanded={expanded.has(r.id)}
                                 className="size-[18px] grid place-items-center text-muted hover:text-brand shrink-0">{expanded.has(r.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
                             : <span className="w-[18px] shrink-0" />}
-                          {thumbs && r.file
-                            ? <FileThumb file={r.file} size={40} />
-                            : <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={26} className="shrink-0" />}
+                          {/* Fixed icon slot: covers, page icons and folders all share one column, so names line up. */}
+                          <span className="w-9 h-9 shrink-0 grid place-items-center">
+                            {r.kind === "file" && r.file
+                              ? <FileThumb file={r.file} size={34} />
+                              : <FileIcon name={r.name} mime={r.file?.mime} folder={r.kind === "folder"} size={26} />}
+                          </span>
                           <span className="text-[15px] truncate">{r.name}</span>
                         </div>
                         <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
@@ -1655,14 +1698,14 @@ export default function Explorer() {
                   })}
                 </div>
               ) : (
-                <div role="grid" aria-label={`${rows.length} items`} className={`p-4 grid content-start ${thumbs ? "gap-3" : "gap-1"}`} style={{ gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))" }}>
+                <div role="grid" aria-label={`${rows.length} items`} className="p-4 grid content-start gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))" }}>
                   {pg.pageItems.map((r, ri) => {
                     const on = selSet.has(r.key);
                     const cls = r.file ? classify(r.file.name, r.file.mime) : "";
                     const folder = r.kind === "folder";
                     // Covers mode: folders and files share one grid, so mark where
                     // the files begin — otherwise the two sections butt together.
-                    const filesBreak = thumbs && !folder && ri > 0 && pg.pageItems[ri - 1].kind === "folder";
+                    const filesBreak = !folder && ri > 0 && pg.pageItems[ri - 1].kind === "folder";
                     return (
                       // role=row with display:contents keeps gridcell ownership
                       // valid for AT without changing the CSS grid layout.
@@ -1678,8 +1721,8 @@ export default function Explorer() {
                         onDoubleClick={() => open(r)}
                         onKeyDown={(e) => onRowKey(e, r)}
                         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setSelKey(r.key); setCtx({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 260), row: r }); }}
-                        className={`flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors ${thumbs && !folder ? "min-h-[152px]" : "min-h-[104px]"} ${on ? "bg-tint text-brand" : "hover:bg-tint/40"} ${thumbs && folder ? "border border-line/60 bg-soft/40" : ""}`}>
-                        {thumbs && r.file
+                        className={`flex flex-col items-center gap-2 p-3 rounded-lg text-center transition-colors ${!folder ? "min-h-[152px]" : "min-h-[104px]"} ${on ? "bg-tint text-brand" : "hover:bg-tint/40"} ${folder ? "border border-line/60 bg-soft/40" : ""}`}>
+                        {!folder && r.file
                           ? <FileThumb file={r.file} size={72} />
                           : <FileIcon name={r.name} mime={r.file?.mime} folder={folder} size={64} />}
                         <span title={r.name} className="text-[12.5px] leading-tight break-all line-clamp-2">{r.name}</span>
@@ -1738,26 +1781,26 @@ export default function Explorer() {
                 {sel.file?.size ? <span className="text-[11px] text-ink/75 shrink-0">{formatBytes(sel.file.size)}</span> : null}
               </div>
               <dl className="mt-3 text-[12px]">
-                {[
-                  ["Modified", sel.file ? fmtDate(sel.file.updated_at ?? sel.file.updated) : "—"],
-                  ["Location", locText(sel)],
-                  ...(sel.file?.accountLabel ? [["Drive", sel.file.accountLabel] as [string, string] ] : []),
-                  ["Owner", sel.file?.owner ? `${sel.file.owner.slice(0, 8)}…` : "—"],
-                  ["SHA-256", sel.file?.hash ? `${sel.file.hash.slice(0, 12)}…` : "—"]
-                ].map(([k, v]) => (
-                  <div key={k} className="flex items-center justify-between gap-3 py-2.5 border-b border-line">
-                    {/* Full value on hover/long-press + click-to-copy: truncated
-                        ids are useless without a way to recover them. */}
-                    <dt className="text-ink/80">{k} :</dt><dd className="text-[11px] text-ink/75 text-right truncate"
-                      title={(k === "Owner" ? sel.file?.owner : sel.file?.hash) ?? v}
-                      onClick={() => {
-                        const full = k === "Owner" ? sel.file?.owner : sel.file?.hash;
-                        if (full) navigator.clipboard?.writeText(full).then(
-                          () => toast({ text: `${k} copied.`, tone: "ok" }),
-                          () => toast({ text: "Couldn't copy.", tone: "err" }));
-                      }}>{v}</dd>
-                  </div>
-                ))}
+                {detailRows(sel).map(([k, v]) => {
+                  // Owner/SHA-256 keep click-to-copy: truncated ids are useless
+                  // without a way to recover the full value.
+                  const copyable = k === "Owner" || k === "SHA-256";
+                  const full = k === "Owner" ? sel.file?.owner : sel.file?.hash;
+                  const canCopy = copyable && !!full;
+                  return (
+                    <div key={k} className="flex items-center justify-between gap-3 py-2.5 border-b border-line">
+                      <dt className="text-ink/80 shrink-0">{k}</dt><dd
+                        className={`text-[11.5px] text-ink/75 text-right truncate${canCopy ? " cursor-pointer hover:text-brand" : ""}`}
+                        title={canCopy ? `${v} (click to copy)` : v}
+                        onClick={canCopy ? () => {
+                          navigator.clipboard?.writeText(full as string).then(
+                            () => toast({ text: `${k} copied.`, tone: "ok" }),
+                            () => toast({ text: "Couldn't copy.", tone: "err" }));
+                        } : undefined}
+                      >{v}</dd>
+                    </div>
+                  );
+                })}
               </dl>
               <div className="mt-3">
                 <div className="flex items-center justify-between">

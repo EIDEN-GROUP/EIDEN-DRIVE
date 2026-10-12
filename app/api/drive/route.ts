@@ -9,6 +9,7 @@ import { visibleFolderIds, loadFolders, fileOrClause, inScopeGoogleIds, isManage
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { escapeLike } from "@/lib/http";
+import { usernamesFor } from "@/lib/people";
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -42,7 +43,7 @@ export async function GET(req: Request) {
   const adb = adminClient();
   const ctx = isManager(me.role) ? null : await accessContext(adb, me);
   const visible = ctx ? ctx.folders : visibleFolderIds(folders, me);
-  let filesQuery = supa.from("file_index").select("id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id").ilike("name", `%${escapeLike(q)}%`);
+  const COLS = "id,name,mime,size,backends,owner,updated_at,folder,hash,storage_path,google_file_id,drive_account_id,google_parent_id";
   // NOTE: inactive-account and forbidden-tag exclusions are applied in JS
   // below, NOT as PostgREST NOT IN: `NOT IN` drops NULL drive_account_id rows
   // (SQL three-valued logic), which would hide legacy orphans from managers —
@@ -54,7 +55,11 @@ export async function GET(req: Request) {
   // or directly tagged (see fileOrClause).
   const strict = !!ctx?.strict;
   const orClause = fileOrClause(me, visible, ctx?.taggedFiles, strict);
-  if (orClause) filesQuery = filesQuery.or(orClause);
+  const buildQuery = (cols: string) => {
+    let fq = supa.from("file_index").select(cols).ilike("name", `%${escapeLike(q)}%`);
+    if (orClause) fq = fq.or(orClause);
+    return fq;
+  };
   // Hide pre-scope legacy rows (google rows with no account pin) from everyone
   // except managers, who need to see them to clean up. Counted separately so
   // the client can show the resync notice; dropped in JS below (a second OR
@@ -103,9 +108,21 @@ export async function GET(req: Request) {
   const seenGoogle = new Map<string, number>(); // google id -> index in scoped
   let dbOffset = offset;
   let exhausted = false;
+  // created_at arrives with migration 0018 — assume applied, drop back to the
+  // old shape on the first created_at error (per page, until applied).
+  let useCreatedAt = true;
   for (let page = 0; page < 6 && scoped.length < limit && !exhausted; page++) {
-    const { data: rows } = await filesQuery.range(dbOffset, dbOffset + limit - 1);
-    const chunk = ((rows ?? []) as Row[]);
+    // created_at arrives with migration 0018 — per page, retry without it
+    // until applied. Other errors degrade to end-of-data (as before).
+    let chunk: Row[];
+    for (;;) {
+      const fetched = await buildQuery(useCreatedAt ? `${COLS},created_at` : COLS).range(dbOffset, dbOffset + limit - 1);
+      const rows = fetched.data;
+      const rowsErr = (fetched as { error?: { message?: string } | null }).error;
+      if (rowsErr && useCreatedAt && /created_at/.test(rowsErr.message ?? "")) { useCreatedAt = false; continue; }
+      chunk = ((rows ?? []) as unknown as Row[]);
+      break;
+    }
     if (chunk.length < limit) exhausted = true;
     dbOffset += chunk.length;
     for (const r of chunk) {
@@ -173,9 +190,11 @@ export async function GET(req: Request) {
     }
   }
   if (errors.length) google_error = `${errors.join(" ")} Showing indexed files.`;
+  const ownerNames = await usernamesFor(scoped.map((r) => (r as { owner?: string | null }).owner));
   const indexed = scoped.map((r: Row) => ({
     ...r,
     updated: (r as { updated_at?: string }).updated_at,
+    owner_name: ownerNames.get((r as { owner?: string }).owner ?? "") ?? null,
     accountLabel: r.drive_account_id ? labelOf.get(r.drive_account_id) ?? undefined : undefined
   }));
   // Dedupe: a synced file appears as BOTH its index row and a live g: row.
