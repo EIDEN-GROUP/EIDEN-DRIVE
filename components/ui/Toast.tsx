@@ -15,12 +15,13 @@ export function ToastHost() {
     pushFn = (t) => {
       const id = seq++;
       setItems((p) => [...p, { ...t, id }]);
-      setTimeout(() => setItems((p) => p.filter((x) => x.id !== id)), 4000);
+      // Errors linger: a 4s toast swallows the only copy of a failure reason.
+      setTimeout(() => setItems((p) => p.filter((x) => x.id !== id)), t.tone === "err" ? 8000 : 4000);
     };
     return () => { pushFn = null; };
   }, []);
   return (
-    <div className="fixed bottom-5 right-5 z-[100] flex flex-col gap-2" aria-live="polite" role="status">
+    <div className="fixed bottom-5 left-5 z-[100] flex flex-col gap-2" aria-live="polite" role="status">
       {items.map((t) => (
         <div key={t.id} className={`pop-in px-4 py-3 rounded-lg shadow-pop text-[13px] text-white ${t.tone === "err" ? "bg-danger" : t.tone === "ok" ? "bg-brand" : "bg-[#2b2b36]"}`}>
           {t.text}

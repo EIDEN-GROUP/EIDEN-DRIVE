@@ -1,7 +1,7 @@
 import { adminClient } from "@/lib/supabase-admin";
 import { bucketFor } from "@/lib/storage";
-import { isBinned } from "@/lib/visibility";
-import { driveCtxFor, accountAccessToken } from "@/lib/drive-accounts";
+import { isBinned, googleInScope } from "@/lib/visibility";
+import { driveCtxFor, accountAccessToken, getAccounts } from "@/lib/drive-accounts";
 import { resolveShare, throttled } from "@/lib/share";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +12,20 @@ const RAW_MAX = 25 * 1024 * 1024;
 
 function denied() {
   return Response.json({ error: "this link is invalid, expired or revoked" }, { status: 404 });
+}
+
+// Served from the app's own origin with the uploader's MIME — treat as
+// hostile (same policy as the in-app download route): script-capable types
+// are download-only + sandboxed, never inline-executable.
+function rawHeaders(mime: string, name: string): Record<string, string> {
+  const risky = /^(text\/html|application\/xhtml|image\/svg|text\/xml|application\/xml|text\/javascript|application\/javascript)/i.test(mime) || /\.(x?html?|svg|xml|m?js)$/i.test(name);
+  return {
+    "content-type": mime,
+    "content-disposition": `${risky ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(name)}`,
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, no-store",
+    ...(risky ? { "content-security-policy": "sandbox; default-src 'none'" } : {})
+  };
 }
 
 async function load(token: string, ip: string) {
@@ -30,6 +44,13 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
   const { file } = r.shared;
   // A trashed file's public link dies with it (restore revives the link too).
   if (await isBinned(adminClient(), file.id)) return denied();
+  // Links are minted in-scope but rows outlive listings: re-scope must kill
+  // the bytes too, not just the Workspace row. Revalidate on every serve.
+  if (file.google_file_id && file.drive_account_id) {
+    try {
+      if (!(await googleInScope(adminClient(), await getAccounts(), file.drive_account_id, file.google_file_id))) return denied();
+    } catch { return denied(); }
+  }
 
   if (kind === "meta") {
     return Response.json({
@@ -64,16 +85,21 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
   }
 
   // Raw bytes, with Range support so video/audio seek instead of stalling.
+  // Both branches cap at RAW_MAX: the whole blob is buffered into memory, so
+  // an uncapped branch is a one-link OOM (the index `size` is checked, not trusted blindly — the buffer is what matters).
   try {
+    if (typeof file.size === "number" && file.size > RAW_MAX) {
+      return Response.json({ error: "too large for link preview — open it signed in" }, { status: 400 });
+    }
     let buf: Buffer;
     if (file.storage_path) {
       const { data: blob, error } = await adminClient().storage.from(bucketFor(file)).download(file.storage_path);
       if (error || !blob) return denied();
       buf = Buffer.from(await blob.arrayBuffer());
-    } else if (file.google_file_id) {
-      if (typeof file.size === "number" && file.size > RAW_MAX) {
+      if (buf.byteLength > RAW_MAX) {
         return Response.json({ error: "too large for link preview — open it signed in" }, { status: 400 });
       }
+    } else if (file.google_file_id) {
       const ctx = await driveCtxFor(file.drive_account_id);
       const g = ctx?.drive;
       if (!g) return denied();
@@ -96,9 +122,9 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
           return new Response(ab.slice(start, end + 1), {
             status: 206,
             headers: {
-              "content-type": mime, "content-length": String(end - start + 1),
+              "content-length": String(end - start + 1),
               "content-range": `bytes ${start}-${end}/${ab.byteLength}`,
-              "accept-ranges": "bytes", "x-content-type-options": "nosniff", "cache-control": "private, no-store"
+              "accept-ranges": "bytes", ...rawHeaders(mime, file.name)
             }
           });
         }
@@ -106,7 +132,7 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
       return new Response("range not satisfiable", { status: 416 });
     }
     return new Response(ab, {
-      headers: { "content-type": mime, "content-length": String(ab.byteLength), "accept-ranges": "bytes", "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`, "x-content-type-options": "nosniff", "cache-control": "private, no-store" }
+      headers: { "content-length": String(ab.byteLength), "accept-ranges": "bytes", ...rawHeaders(mime, file.name) }
     });
   } catch {
     return denied();

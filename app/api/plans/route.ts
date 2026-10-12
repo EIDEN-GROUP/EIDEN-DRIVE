@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
+import { folderUsable } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Row = z.object({
@@ -41,6 +42,10 @@ export async function POST(req: Request) {
   if (p.data.folder) {
     const { data: f } = await db.from("folders").select("id").eq("id", p.data.folder).maybeSingle();
     if (!f) return Response.json({ error: "folder not found" }, { status: 404 });
+    // Existence alone isn't enough: linking into an outside-department folder
+    // must obey the same confinement as uploads/copies.
+    const dst = await folderUsable(db, me, p.data.folder);
+    if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
   }
   const { data, error } = await db.from("plans").insert({
     owner: me.id, title: p.data.title, detail: p.data.detail ?? null,

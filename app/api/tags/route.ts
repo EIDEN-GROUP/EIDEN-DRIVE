@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { parseJson } from "@/lib/http";
+import { parseJson, dbError } from "@/lib/http";
 
 const COLOR = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 const NAME = z.string().trim().min(1).max(32);
@@ -21,7 +21,7 @@ export async function GET() {
     db.from("file_tags").select("file_id,tag_id").limit(20000),
     db.from("folder_tags").select("folder_id,tag_id").limit(5000)
   ]);
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbError("Couldn't load tags.")(error);
   const files: Record<string, string[]> = {};
   for (const r of (ft ?? []) as { file_id: string; tag_id: string }[]) (files[r.file_id] ??= []).push(r.tag_id);
   const folders: Record<string, string[]> = {};
@@ -38,8 +38,7 @@ export async function POST(req: Request) {
   const db = adminClient();
   const { data, error } = await db.from("tags").insert({ name: p.data.name, color: p.data.color, created_by: me.id }).select("id,name,color,created_by").single();
   if (error) {
-    const dup = /duplicate|unique/i.test(error.message);
-    return Response.json({ error: dup ? `A tag called “${p.data.name}” already exists.` : error.message }, { status: dup ? 409 : 500 });
+    return dbError("Couldn't create the tag.", `A tag called “${p.data.name}” already exists.`)(error);
   }
   await logAudit({ actor: me.id, actor_name: me.username, action: "add", req, detail: { tag: p.data.name } });
   return Response.json({ ok: true, tag: data }, { status: 201 });
@@ -68,8 +67,7 @@ export async function PATCH(req: Request) {
   if (p.data.color) patch.color = p.data.color;
   const { error } = await adminClient().from("tags").update(patch).eq("id", p.data.id);
   if (error) {
-    const dup = /duplicate|unique/i.test(error.message);
-    return Response.json({ error: dup ? "Another tag already uses that name." : error.message }, { status: dup ? 409 : 500 });
+    return dbError("Couldn't update the tag.", "Another tag already uses that name.")(error);
   }
   await logAudit({ actor: me.id, actor_name: me.username, action: "edit", req, detail: { tag: a.tag!.name, ...patch } });
   return Response.json({ ok: true });
@@ -83,7 +81,7 @@ export async function DELETE(req: Request) {
   const a = await authorize(p.data.id, me);
   if (a.error) return a.error;
   const { error } = await adminClient().from("tags").delete().eq("id", p.data.id); // join rows cascade
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbError("Couldn't delete the tag.")(error);
   await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { tag: a.tag!.name } });
   return Response.json({ ok: true });
 }

@@ -6,7 +6,8 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { renameDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
-import { canTouch, isBinned, binnedResponse } from "@/lib/visibility";
+import { canTouch, isBinned, binnedResponse, googleInScope } from "@/lib/visibility";
+import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({
@@ -27,6 +28,12 @@ export async function PATCH(req: Request) {
   const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null });
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   if (await isBinned(db, p.data.file_id)) return binnedResponse();
+  const rf = f as { google_file_id?: string | null; drive_account_id?: string | null };
+  if (rf.google_file_id && rf.drive_account_id) {
+    if (!(await googleInScope(db, await getAccounts(), rf.drive_account_id, rf.google_file_id))) {
+      return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+    }
+  }
   if (f.google_file_id) {
     try {
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);

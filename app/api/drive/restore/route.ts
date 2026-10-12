@@ -7,7 +7,8 @@ import { restoreDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile, can } from "@/lib/roles";
-import { googleDescendants } from "@/lib/visibility";
+import { googleDescendants, googleInScope } from "@/lib/visibility";
+import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({ file_id: z.string().uuid() });
@@ -25,6 +26,15 @@ export async function POST(req: Request) {
   const { data: inBin } = await adb.from("recovery_bin").select("file_id").eq("file_id", file_id).maybeSingle();
   if (!inBin) return Response.json({ error: "file is not in the Recovery Bin" }, { status: 409 });
   const { data: f } = await supa.from("file_index").select("id,mime,google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
+  const fr0 = f as { google_file_id?: string | null; drive_account_id?: string | null } | null;
+  // Scope binds every role including managers: restoring an out-of-scope row
+  // would unhide Drive content the workspace deliberately doesn't show.
+  if (fr0?.google_file_id && fr0?.drive_account_id) {
+    const db = adminClient();
+    if (!(await googleInScope(db, await getAccounts(), fr0.drive_account_id, fr0.google_file_id))) {
+      return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+    }
+  }
   if (f?.google_file_id) {
     try {
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);

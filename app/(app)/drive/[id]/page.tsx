@@ -2,8 +2,10 @@ import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
+import { canTouch, googleInScope } from "@/lib/visibility";
+import { getAccounts } from "@/lib/drive-accounts";
 import { Card } from "@/components/ui/primitives";
-import { classify, formatBytes, badge } from "@/lib/files";
+import { classify, formatBytes, badge, displayKind, fmtDateTime } from "@/lib/files";
 import FileActions from "@/components/drive/FileActions";
 import FilePageClient from "@/components/drive/FilePageClient";
 
@@ -12,22 +14,28 @@ export const dynamic = "force-dynamic";
 const ORIGIN = (process.env.NEXT_PUBLIC_APP_URL || "https://drive.eiden-group.com").replace(/\/$/, "");
 
 function kindLabel(mime: string, name: string): string {
-  const e = (name.split(".").pop() ?? "").toUpperCase();
-  if (mime.startsWith("image/")) return `${e} Image`;
-  if (mime.startsWith("video/")) return `${e} Video`;
-  if (mime.startsWith("audio/")) return `${e} Audio`;
-  if (mime === "application/pdf") return "PDF Document";
-  return `${e || "File"}`;
+  return displayKind(name, mime);
 }
 
 // Detailed unfurls for file links (Slack, WhatsApp, X): name, type, size,
 // location — plus a cover image when the file is visual. Absolute URLs only.
 export async function generateMetadata({ params }: { params: { id: string } }): Promise<Metadata> {
   const supa = createClient();
-  const { data: f } = await supa.from("file_index").select("id,name,mime,size,folder,drive_account_id").eq("id", params.id).maybeSingle() as { data: {
-    id: string; name: string; mime: string; size: number; folder: string | null; drive_account_id: string | null;
+  const { data: f } = await supa.from("file_index").select("id,name,mime,size,folder,owner,drive_account_id,google_file_id").eq("id", params.id).maybeSingle() as { data: {
+    id: string; name: string; mime: string; size: number; folder: string | null; owner: string; drive_account_id: string | null; google_file_id: string | null;
   } | null };
   if (!f) return { title: "File not found — Eiden Drive" };
+  // No metadata leak: unfurl crawlers and signed-out/guessing viewers get the
+  // generic title unless they could actually open the file.
+  try {
+    const me = await getProfile();
+    const db = adminClient();
+    const gate = me ? await canTouch(db, me, { id: f.id, owner: f.owner, folder: f.folder }) : { ok: false };
+    if (!gate.ok) return { title: "Eiden Drive" };
+    if (f.google_file_id && f.drive_account_id) {
+      if (!(await googleInScope(db, await getAccounts(), f.drive_account_id, f.google_file_id))) return { title: "Eiden Drive" };
+    }
+  } catch { return { title: "Eiden Drive" } }
   const row = f as { id: string; name: string; mime: string; size: number; folder: string | null; drive_account_id: string | null };
   let where = "Workspace";
   if (row.folder) {
@@ -54,7 +62,7 @@ export default async function FilePage({ params }: { params: { id: string } }) {
   const me = await getProfile();
   const supa = createClient();
   const { data: f } = await supa.from("file_index").select("*").eq("id", params.id).maybeSingle() as { data: {
-    id: string; name: string; mime: string; size: number; folder: string | null; drive_account_id: string | null;
+    id: string; name: string; mime: string; size: number; folder: string | null; owner: string; drive_account_id: string | null;
     backends: string[]; hash: string | null; storage_path: string | null; google_file_id: string | null;
   } | null };
   if (!f) {
@@ -65,6 +73,25 @@ export default async function FilePage({ params }: { params: { id: string } }) {
         <a href="/drive" className="mt-4 inline-block min-h-[44px] px-5 leading-[44px] rounded-md bg-brand text-white text-sm font-medium">Back to Drive</a>
       </section>
     );
+  }
+  // Same confinement as every other surface: without touch rights the page
+  // answers exactly like a missing file (no existence oracle).
+  if (me) {
+    const db = adminClient();
+    const gate = await canTouch(db, me, { id: f.id, owner: f.owner, folder: f.folder });
+    let scoped = true;
+    if (gate.ok && f.google_file_id && f.drive_account_id) {
+      scoped = await googleInScope(db, await getAccounts(), f.drive_account_id, f.google_file_id);
+    }
+    if (!gate.ok || !scoped) {
+      return (
+        <section className="px-1 pt-1">
+          <h1 className="page-title">File not found</h1>
+          <p className="text-sm text-muted mt-1">It may have been trashed or you followed a stale link.</p>
+          <a href="/drive" className="mt-4 inline-block min-h-[44px] px-5 leading-[44px] rounded-md bg-brand text-white text-sm font-medium">Back to Drive</a>
+        </section>
+      );
+    }
   }
   // Trashed files live on the Recovery Bin page — the file page says so
   // instead of rendering a ghost (actions would 409 anyway). Service-side
@@ -129,7 +156,7 @@ export default async function FilePage({ params }: { params: { id: string } }) {
           <Card label="Activity">
             {(acts ?? []).length === 0
               ? <p className="text-sm text-muted">No activity recorded for this file yet.</p>
-              : <ul className="text-sm">{(acts ?? []).map((a: { id: string; actor_name: string; action: string; ts: string }) => <li key={a.id} className="py-1 border-b border-line/60 last:border-0">{a.actor_name} · {a.action} · {new Date(a.ts).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</li>)}</ul>}
+              : <ul className="text-sm">{(acts ?? []).map((a: { id: string; actor_name: string; action: string; ts: string }) => <li key={a.id} className="py-1 border-b border-line/60 last:border-0">{a.actor_name} · {a.action} · {fmtDateTime(a.ts)}</li>)}</ul>}
           </Card>
         </div>
       </div>

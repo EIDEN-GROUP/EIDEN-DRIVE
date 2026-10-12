@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { Eye, Pencil, Share2, Link2, Trash2 } from "lucide-react";
 import { toast } from "@/components/ui/Toast";
+import { Ring } from "@/components/ui/Loaders";
 import FileViewer, { type ViewFile } from "./FileViewer";
 import FileEditor from "./FileEditor";
 import { editable } from "./filetext";
@@ -86,8 +87,8 @@ export default function FilePageClient({ file }: { file: { id: string; name: str
         <div className="mt-3 flex gap-2 flex-wrap">
           {[7, 30].map((d) => (
             <button key={d} onClick={() => create(d)} disabled={busy}
-              className="min-h-[40px] px-3 rounded-md border border-line text-[13px] hover:bg-tint disabled:opacity-50">
-              {busy ? "…" : `New ${d}-day link`}
+              className="min-h-[40px] px-3 rounded-md border border-line text-[13px] hover:bg-tint disabled:opacity-50 inline-flex items-center gap-2">
+              {busy && <Ring className="size-3.5" />}{busy ? "Creating…" : `New ${d}-day link`}
             </button>
           ))}
         </div>

@@ -33,9 +33,13 @@ export default function Menu({ trigger, items, label, align = "right", active, t
     const close = () => setPos(null);
     const down = (e: MouseEvent) => { const t = e.target as Node; if (!btn.current?.contains(t) && !panel.current?.contains(t)) close(); };
     const key = (e: KeyboardEvent) => { if (e.key === "Escape") { close(); btn.current?.focus(); } };
+    // Scroll inside the open panel (long pickers) must NOT close it — only
+    // scrolling anywhere else does. The old capture-all listener killed the
+    // upload-destination picker the moment the Explorer moved.
+    const sc = (e: Event) => { const t = e.target as Node; if (!panel.current?.contains(t) && !btn.current?.contains(t)) close(); };
     document.addEventListener("mousedown", down); document.addEventListener("keydown", key);
-    window.addEventListener("resize", close); window.addEventListener("scroll", close, true);
-    return () => { document.removeEventListener("mousedown", down); document.removeEventListener("keydown", key); window.removeEventListener("resize", close); window.removeEventListener("scroll", close, true); };
+    window.addEventListener("resize", close); window.addEventListener("scroll", sc, true);
+    return () => { document.removeEventListener("mousedown", down); document.removeEventListener("keydown", key); window.removeEventListener("resize", close); window.removeEventListener("scroll", sc, true); };
   }, [open]);
 
   return (

@@ -133,9 +133,17 @@ async function walkFolderPage(pageToken?: string, rootId?: string, drive?: Drive
     if (res.data.nextPageToken) head.token = res.data.nextPageToken;
     else cur.queue.shift();
   }
-  const next = cur.queue.length
-    ? Buffer.from(JSON.stringify({ ...cur, seen: [...seen].slice(-200) })).toString("base64url")
-    : undefined;
+  const queued = cur.queue.length;
+  // `seen` survives across pages via the cursor — but the cursor rides a URL-
+  // safe token with a 20k schema cap, so it can't grow without bound. 400 ids
+  // cover realistic trees; past that the tail is dropped and an already-seen
+  // folder may be descended twice (extra billed calls, never index dupes —
+  // sync upserts by google id, so a re-walk is idempotent, just slower).
+  let seenOut = [...seen].slice(-400);
+  let next = queued ? Buffer.from(JSON.stringify({ ...cur, seen: seenOut })).toString("base64url") : undefined;
+  if (next && next.length > 15000) {
+    next = Buffer.from(JSON.stringify({ ...cur, seen: [] })).toString("base64url");
+  }
   return { files: out, nextPageToken: next };
 }
 

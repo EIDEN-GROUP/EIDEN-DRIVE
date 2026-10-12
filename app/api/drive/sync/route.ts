@@ -7,6 +7,7 @@ import { logAudit } from "@/lib/audit";
 import { listDrivePage } from "@/lib/google-drive";
 import { withTimeout, googleErrorMessage } from "@/lib/errors";
 import { getAccounts, clientFor, type DriveAccount } from "@/lib/drive-accounts";
+import { inScopeGoogleIds, bustScopeCache } from "@/lib/visibility";
 
 // Manager+: incremental Google → file_index sync (upsert by google_file_id).
 // ONE page (≤200 files) per request PER ACCOUNT — the browser chains
@@ -55,6 +56,10 @@ export async function POST(req: Request) {
     const row = {
       name: f.name ?? "?", mime: f.mimeType ?? "application/octet-stream",
       size: Number(f.size ?? 0), google_file_id: f.id, drive_account_id: acct.id,
+      // Schema holds ONE parent: multi-parent Drive files scope-check against
+      // parents[0] only. A file whose first parent is out-of-scope but second
+      // is in-scope hides until its in-scope parent is recorded (next sync
+      // keeps the first stable parent it sees — no flapping, rare edge).
       google_parent_id: f.parents?.[0] ?? null
     };
     const ex = have.get(f.id);
@@ -71,14 +76,70 @@ export async function POST(req: Request) {
     }
   }
   const done = !page.nextPageToken;
+  // Tombstone sweep (account finished): Drive-deleted, Drive-trashed, and
+  // moved-out-of-scope files never appear in the listing above, so upserts
+  // alone leave them as live downloadable ghosts. Re-list Drive-side ids and
+  // retire indexed rows that are in-scope but gone from Drive: pure Google
+  // rows are deleted (audit detached, like purge), hybrids keep local bytes
+  // with the google pin removed. Out-of-scope rows are NOT touched — they're
+  // hidden by the listing, not dead. Bounded: 50 extra pages max.
+  let sweptDeleted = 0, sweptUnpinned = 0;
   if (done) {
-    await db.from("jobs").insert({ kind: "drive-sync", status: "done", payload: { by: me.username, account: acct.label, inserted, updated } });
+    try {
+      const d = clientFor(acct);
+      const seen = new Set<string>();
+      if (d) {
+        let tok: string | undefined;
+        for (let i = 0; i < 50; i++) {
+          const p = await withTimeout(25_000, listDrivePage(tok, { drive: d, rootId: acct.root_id ?? "" }), `sync sweep (${acct.label})`);
+          for (const f of p.files) if (f.id) seen.add(f.id);
+          tok = p.nextPageToken;
+          if (!tok) break;
+        }
+      }
+      const scope = acct.root_id ? await inScopeGoogleIds(db, acct.id, acct.root_id) : null;
+      // App-trashed rows are trashed Drive-side too — sweeping them would
+      // hard-delete Recovery Bin state. They stay until restore/purge.
+      const binned = new Set<string>();
+      for (let boff = 0; ; boff += 1000) {
+        const { data: brows } = await db.from("recovery_bin").select("file_id").range(boff, boff + 999);
+        const bchunk = ((brows ?? []) as { file_id: string }[]);
+        for (const b of bchunk) binned.add(b.file_id);
+        if (bchunk.length < 1000) break;
+      }
+      for (let off = 0; ; off += 500) {
+        const { data: rows } = await db.from("file_index")
+          .select("id,google_file_id,storage_path").eq("drive_account_id", acct.id).not("google_file_id", "is", null).range(off, off + 499);
+        const chunk = ((rows ?? []) as { id: string; google_file_id: string; storage_path: string | null }[]);
+        for (const r of chunk) {
+          if (binned.has(r.id)) continue;
+          // Only sweep rows that SHOULD be in the subtree: unscoped accounts
+          // (scope null) sweep everything listed; scoped accounts sweep only
+          // in-scope ids (out-of-scope rows are hidden, not dead).
+          const shouldBeThere = !scope || scope.ids.has(r.google_file_id) || scope.noparent.has(r.google_file_id);
+          if (!shouldBeThere || seen.has(r.google_file_id)) continue;
+          if (r.storage_path) {
+            await db.from("file_index").update({ google_file_id: null, google_parent_id: null, drive_account_id: null }).eq("id", r.id);
+            sweptUnpinned++;
+          } else {
+            await db.from("recovery_bin").delete().eq("file_id", r.id);
+            await db.from("approvals").delete().eq("file_id", r.id);
+            await db.from("audit_logs").update({ file_id: null }).eq("file_id", r.id);
+            await db.from("file_index").delete().eq("id", r.id);
+            sweptDeleted++;
+          }
+        }
+        if (chunk.length < 500) break;
+      }
+    } catch { /* sweep is best-effort: upserts already landed, counts report 0 */ }
+    bustScopeCache(acct.id);
+    await db.from("jobs").insert({ kind: "drive-sync", status: "done", payload: { by: me.username, account: acct.label, inserted, updated, sweptDeleted, sweptUnpinned } });
   }
   const nextAccount = done ? live[live.indexOf(acct) + 1]?.id ?? null : acct.id;
   return Response.json({
     ok: true, done: done && !nextAccount, accountId: acct.id, accountLabel: acct.label,
     nextAccountId: done ? nextAccount : acct.id,
-    nextPageToken: page.nextPageToken ?? null, inserted, updated, pageSize: ids.length
+    nextPageToken: page.nextPageToken ?? null, inserted, updated, sweptDeleted, sweptUnpinned, pageSize: ids.length
   });
 }
 

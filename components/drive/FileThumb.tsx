@@ -5,15 +5,19 @@ import { viewKind, nativeVideo, needsHelp, googleIdOf } from "./filetext";
 import type { FileRow } from "./Explorer";
 
 // Signed-URL cache: one ?json=1 fetch per Storage file per session.
-const urlCache = new Map<string, string>();
+// Signed URLs expire, so entries carry a timestamp (5-min TTL) — a stale hit
+// else renders a broken thumb with no refetch.
+const urlCache = new Map<string, { url: string; at: number }>();
+const URL_TTL = 5 * 60 * 1000;
 
 async function resolveUrl(f: FileRow): Promise<string | null> {
   const hit = urlCache.get(f.id);
-  if (hit) return hit;
+  if (hit && Date.now() - hit.at < URL_TTL) return hit.url;
+  if (hit) urlCache.delete(f.id);
   if (f.storage_path) {
     const r = await fetch(`/api/drive/download?file_id=${encodeURIComponent(f.id)}&json=1`);
     const d = await r.json().catch(() => ({}));
-    if (r.ok && d.url) { urlCache.set(f.id, d.url); return d.url; }
+    if (r.ok && d.url) { urlCache.set(f.id, { url: d.url, at: Date.now() }); return d.url; }
     return null;
   }
   // Google-hosted (indexed or live): stream through the same-origin endpoint.
@@ -45,6 +49,12 @@ export default function FileThumb({ file, size = 40 }: { file: FileRow; size?: n
   const [canvasUrl, setCanvasUrl] = useState<string | null>(null);
   const seen = useRef(false);
   const ref = useRef<HTMLDivElement>(null);
+  // Failure ping-pong guard: google ⇄ direct must settle on dead after one
+  // full cycle, never toggle forever on a persistently failing file.
+  const fails = useRef(0);
+  useEffect(() => () => {
+    if (canvasUrl && canvasUrl.startsWith("blob:")) URL.revokeObjectURL(canvasUrl);
+  }, [canvasUrl]);
 
   // Direct bytes load lazily, only when scrolled near.
   useEffect(() => {
@@ -80,6 +90,9 @@ export default function FileThumb({ file, size = 40 }: { file: FileRow; size?: n
           if (!r.ok) throw new Error("fetch failed");
           return r.arrayBuffer();
         });
+        // Never hold a giant file in the tab for a thumbnail: 25 MB is plenty
+        // to decide TIFF-vs-HEIC and render a tile.
+        if (buf.byteLength > 25 * 1024 * 1024) throw new Error("too large for a thumbnail decode");
         const head = new Uint8Array(buf, 0, 12);
         const isTiff = (head[0] === 0x49 && head[1] === 0x49 && head[2] === 0x2a) || (head[0] === 0x4d && head[1] === 0x4d && head[3] === 0x2a);
         let dataUrl: string;
@@ -95,11 +108,13 @@ export default function FileThumb({ file, size = 40 }: { file: FileRow; size?: n
           px.set(rgba);
           c.getContext("2d")!.putImageData(new ImageData(px, c.width, c.height), 0, 0);
           dataUrl = c.toDataURL("image/png");
-        } else {
+        } else if (/\.(heic|heif)$/i.test(file.name)) {
           const heic2any = (await import("heic2any")).default;
           const out = await heic2any({ blob: new Blob([buf]), toType: "image/jpeg", quality: 0.9 });
           const blob = Array.isArray(out) ? out[0] : out;
           dataUrl = URL.createObjectURL(blob);
+        } else {
+          throw new Error("nothing left to try");
         }
         if (!gone) setCanvasUrl(dataUrl);
       } catch {
@@ -113,7 +128,10 @@ export default function FileThumb({ file, size = 40 }: { file: FileRow; size?: n
   const box: React.CSSProperties = { width: size, height: size };
   const imgCls = "rounded-md bg-tint grid place-items-center shrink-0 overflow-hidden";
   const fail = () => {
-    // Advance one rung: google → direct → decode → dead.
+    // Advance one rung: google → direct → decode → dead. After one full
+    // cycle a persistently failing file settles on dead instead of ping-ponging.
+    fails.current++;
+    if (fails.current >= 3) { setStage("dead"); return; }
     if (stage === "google") {
       if (kind === "video" && nativeVideo(file.name, file.mime)) { setUrl(null); setStage("direct"); }
       else setStage("dead");

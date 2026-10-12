@@ -31,9 +31,11 @@ export function googleErrorMessage(m: string): string {
     return "Google took too long to answer — retry; if it keeps happening, the drive is throttling us.";
   }
   if (/quota|rate.?limit|429|403.*limit/i.test(m)) {
-    return `Google rate-limited us (${m}). Wait a minute and retry Sync — nothing was lost.`;
+    // Raw Google text stays server-side (it leaks quota internals and
+    // request ids): the client gets the shape, not the string.
+    return "Google rate-limited us. Wait a minute and retry Sync — nothing was lost.";
   }
-  return `Google Drive unreachable right now (${m}). Showing indexed files.`;
+  return "Google Drive unreachable right now. Showing indexed files.";
 }
 
 export function fetchTimeout(ms: number): { signal: AbortSignal; done: () => void } {

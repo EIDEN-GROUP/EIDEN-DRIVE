@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, RefreshCw, Loader2, AlertTriangle, Gauge } from "lucide-react";
 import { nativeVideo } from "./filetext";
 
@@ -17,9 +17,10 @@ import { nativeVideo } from "./filetext";
 // what you are actually watching and why.
 const CONVERT_MAX = 300 * 1024 * 1024;
 
-function useSpeedMbps(src: string): number | null | "measuring" {
+function useSpeedMbps(src: string | null): number | null | "measuring" {
   const [out, setOut] = useState<number | null | "measuring">("measuring");
   useEffect(() => {
+    if (!src) { setOut(null); return; }
     let gone = false;
     (async () => {
       try {
@@ -61,9 +62,12 @@ export default function VideoPlayer({ src, fileName, googleId, size, canDownload
     try { const v = localStorage.getItem("eiden-video-q"); return v === "high" || v === "saver" ? v : "auto"; }
     catch { return "auto"; }
   });
-  const speed = useSpeedMbps(src);
   const [phase, setPhase] = useState<"direct" | "drive" | "convert-offer">(directOk ? "direct" : googleId ? "drive" : "convert-offer");
+  // The 1 MB probe costs real bandwidth: measure only the direct stream.
+  const speed = useSpeedMbps(phase === "direct" ? src : null);
   const [stalls, setStalls] = useState(0);
+  const mountedAt = useRef(0);
+  useEffect(() => { mountedAt.current = Date.now(); }, []);
 
   function pick(m: QMode) {
     setMode(m);
@@ -75,19 +79,23 @@ export default function VideoPlayer({ src, fileName, googleId, size, canDownload
   }
 
   // Stall detector: buffering twice on Auto surfaces a one-tap Saver switch —
-  // but the call is the viewer's, never automatic. Original pixels stay default.
+  // but the call is the viewer's, never automatic. Stalls in the first 5 s
+  // are startup/seeks, not network — ignore them so the hint isn't a false positive.
   function onStall() {
+    if (Date.now() - mountedAt.current < 5000) return;
     setStalls((s) => s + 1);
   }
   const showSaverHint = stalls >= 2 && (phase === "direct" && !!googleId);
 
   const quality = phase === "drive" ? "Saver · Google transcode" : phase === "convert-offer" ? "Convert" : "Original · direct";
-  const speedTxt = speed === "measuring" ? "measuring…" : typeof speed === "number" ? `${speed >= 10 ? Math.round(speed) : speed.toFixed(1)} Mbps` : "speed unknown";
+  // The probe only measures the direct stream: showing its Mbps next to the
+  // Drive-transcode badge would attribute one path's speed to the other.
+  const speedTxt = phase !== "direct" ? "" : speed === "measuring" ? "measuring…" : typeof speed === "number" ? `${speed >= 10 ? Math.round(speed) : speed.toFixed(1)} Mbps` : "speed unknown";
 
   const bar = (
     <div className="flex items-center gap-1.5 px-3 py-1.5 text-[11.5px] text-muted">
       <Gauge size={13} aria-hidden="true" />
-      <span className="tabular-nums">{mode === "auto" ? `Auto · ${quality} · ${speedTxt}` : `${mode === "high" ? "High" : "Saver"} · ${speedTxt}`}</span>
+      <span className="tabular-nums">{mode === "auto" ? `Auto · ${quality}${speedTxt ? ` · ${speedTxt}` : ""}` : `${mode === "high" ? "High" : "Saver"}${speedTxt ? ` · ${speedTxt}` : ""}`}</span>
       <span className="flex-1" />
       {(["auto", "high", "saver"] as QMode[]).map((m) => (
         <button key={m} onClick={() => pick(m)} aria-pressed={mode === m}

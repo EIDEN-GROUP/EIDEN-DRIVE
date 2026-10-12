@@ -58,6 +58,23 @@ export async function POST(req: Request) {
           return Response.json({ error: "destination folder is outside this drive's shared scope" }, { status: 403 });
         }
       }
+      // The destination must be a real folder in the SAME account, not binned,
+      // and already indexed (unindexed ids can't be scope-checked). Moving to
+      // My Drive root (null) is refused: the row would go placeless-but-visible
+      // while Drive keeps its old parents — index and reality would diverge.
+      if (newParent !== scopeRoot) {
+        const { data: pf } = await db.from("file_index")
+          .select("id,mime,drive_account_id").eq("google_file_id", newParent).eq("drive_account_id", row.drive_account_id).maybeSingle();
+        const prow = pf as { id: string; mime: string; drive_account_id: string } | null;
+        if (!prow) return Response.json({ error: "destination folder isn't indexed — open it in the drive tree (Sync) first" }, { status: 409 });
+        if (prow.mime !== "application/vnd.google-apps.folder") {
+          return Response.json({ error: "destination is a file, not a folder" }, { status: 400 });
+        }
+        const { data: pb } = await db.from("recovery_bin").select("file_id").eq("file_id", prow.id).maybeSingle();
+        if (pb) return Response.json({ error: "destination folder is in the Recovery Bin" }, { status: 409 });
+      }
+    } else if (row.google_file_id && p.data.google_parent !== undefined && !newParent) {
+      return Response.json({ error: "moving out of every folder isn't allowed — pick a destination inside the drive" }, { status: 400 });
     }
   } else if (newParent) {
     return Response.json({ error: "this file lives in Supabase only — pass folder, not google_parent" }, { status: 400 });

@@ -20,7 +20,11 @@ function LoginForm() {
   const [reqMsg, setReqMsg] = useState("");
   const [reqState, setReqState] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [reqError, setReqError] = useState("");
-  const next = useSearchParams().get("next") ?? "/drive";
+  const rawNext = useSearchParams().get("next") ?? "/drive";
+  // Same-origin paths only: an attacker-crafted ?next=//evil.com would else
+  // bounce a fresh login straight to a phishing page (the server callback
+  // already rejects // — the client must too).
+  const next = rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/drive";
   // Inputs are rendered only after mount: browser extensions (password managers, autofill) add nodes/attributes to
   // form fields before React hydrates, which makes hydration fail ("initial UI does not match the server").
   // With nothing form-like in the server HTML there is nothing for them to mutate.

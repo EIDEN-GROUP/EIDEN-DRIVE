@@ -7,6 +7,7 @@ import { getAccounts } from "@/lib/drive-accounts";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { newToken, tokenHash } from "@/lib/share";
+import { rateLimited, clientIp } from "@/lib/rate";
 import { parseJson, parseQuery } from "@/lib/http";
 
 // Owners and managers can mint public preview links. The link previews only —
@@ -14,6 +15,10 @@ import { parseJson, parseQuery } from "@/lib/http";
 export async function POST(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
+  // Abuse damping: each mint is a 90-day public bearer — no unlimited minting.
+  if (rateLimited(`share-mint:${me.id}`, 30) || rateLimited(`share-mint:ip:${clientIp(req)}`, 60)) {
+    return Response.json({ error: "slow down — too many share links" }, { status: 429 });
+  }
   const p = await parseJson(req, z.object({ file_id: z.string().uuid(), days: z.number().int().min(1).max(90).default(30) }));
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
@@ -49,6 +54,12 @@ export async function GET(req: Request) {
   const p = parseQuery(req, z.object({ file_id: z.string().uuid() }));
   if (p.error) return p.error;
   const db = adminClient();
+  // Ownership check (the mint and revoke paths both have it): without this,
+  // any signed-in member could probe arbitrary file ids for share timing.
+  const { data: f } = await db.from("file_index").select("id,owner,folder").eq("id", p.data.file_id).maybeSingle();
+  if (!f) return Response.json({ error: "file not found" }, { status: 404 });
+  const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null });
+  if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   const { data } = await db.from("share_links").select("id,created_at,expires_at").eq("file_id", p.data.file_id).order("created_at", { ascending: false }).limit(10);
   // Note: URLs are shown once at creation (only the hash is stored).
   return Response.json({

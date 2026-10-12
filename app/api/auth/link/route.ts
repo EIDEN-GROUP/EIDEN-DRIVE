@@ -4,23 +4,22 @@ import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { sendMail } from "@/lib/mail";
 import { parseJson } from "@/lib/http";
+import { rateLimited, clientIp } from "@/lib/rate";
 
 const Body = z.object({ email: z.string().trim().toLowerCase().email().max(254), next: z.string().max(200).optional() });
 
 // Public sign-in link, sent through OUR SMTP (never Supabase's sender).
 // Always answers "check your email" — whether the address exists or not — so
-// addresses can't be enumerated. Throttled per address.
-const hits = new Map<string, number>();
-
+// addresses can't be enumerated. Bounded throttle per address AND per IP:
+// the old per-email-only Map was unbounded and rotating emails bypassed it
+// (SMTP bombing + listUsers pagination cost per call).
 export async function POST(req: Request) {
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ ok: true }); // same shape either way
   const ok = { ok: true };
-  const now = Date.now();
-  const last = hits.get(p.data.email) ?? 0;
-  if (now - last < 60_000) return Response.json(ok);
-  hits.set(p.data.email, now);
+  const ip = clientIp(req);
+  if (rateLimited(`auth-link:em:${p.data.email}`, 1) || rateLimited(`auth-link:ip:${ip}`, 10)) return Response.json(ok);
 
   const db = adminClient();
   // Existence check that doesn't leak: resolve the auth user id first.

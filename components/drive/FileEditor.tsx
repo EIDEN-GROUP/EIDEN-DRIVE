@@ -18,17 +18,27 @@ export default function FileEditor({ file, onClose, onSaved }: {
   const [dirty, setDirty] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const preRef = useRef<HTMLPreElement>(null);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+
+  // Tabs hold ~GBs badly: refuse files over 5 MB up front instead of freezing
+  // the tab on r.text(). The viewer shows the same cap; download for the rest.
+  const EDIT_CAP = 5 * 1024 * 1024;
 
   useEffect(() => {
     let dead = false;
     (async () => {
       try {
+        if (typeof file.size === "number" && file.size > EDIT_CAP) {
+          throw new Error(`This file is too large to edit in the browser (${(file.size / 1048576).toFixed(1)} MB — cap is 5 MB). Download it to edit.`);
+        }
         const r = await fetch(`/api/drive/download?file_id=${file.id}&raw=1`);
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));
           throw new Error((d as { error?: string }).error ?? `couldn't load (${r.status})`);
         }
         const t = await r.text();
+        if (t.length > EDIT_CAP) throw new Error("This file is too large to edit in the browser (over 5 MB of text). Download it to edit.");
         if (!dead) setText(t);
       } catch (e) {
         if (!dead) setErr(e instanceof Error ? e.message : "Couldn't load file.");
@@ -36,6 +46,12 @@ export default function FileEditor({ file, onClose, onSaved }: {
     })();
     return () => { dead = true; };
   }, [file.id]);
+
+  function tryClose() {
+    // Backdrop/X with unsaved edits used to discard silently — confirm first.
+    if (dirtyRef.current && !window.confirm("Discard unsaved changes?")) return;
+    onClose();
+  }
 
   function syncScroll() {
     if (taRef.current && preRef.current) {
@@ -78,7 +94,7 @@ export default function FileEditor({ file, onClose, onSaved }: {
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={`Edit ${file.name}`}>
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/50" onClick={tryClose} />
       <div className="pop-in relative w-full max-w-4xl h-[84vh] rounded-xl bg-surface border border-line shadow-pop flex flex-col overflow-hidden">
         <div className="flex items-center gap-2 px-4 min-h-[56px] border-b border-line">
           <p className="text-[14px] font-medium truncate flex-1">{file.name}{dirty && <span className="text-muted"> •</span>}</p>
@@ -87,7 +103,7 @@ export default function FileEditor({ file, onClose, onSaved }: {
             className="min-h-[40px] px-3 rounded-md bg-brand text-white text-[13px] font-medium disabled:opacity-40 flex items-center gap-1.5">
             {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save
           </button>
-          <button onClick={onClose} aria-label="Close editor" className="size-11 grid place-items-center rounded-md hover:bg-tint"><X size={18} /></button>
+          <button onClick={tryClose} aria-label="Close editor" className="size-11 grid place-items-center rounded-md hover:bg-tint"><X size={18} /></button>
         </div>
         {err ? (
           <p className="p-8 text-center text-[14px]">{err}</p>

@@ -18,8 +18,16 @@ export function useBytes(file: ViewFile, enabled = true) {
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));
           if (d.too_large && file.backends?.includes("local") && (file.size ?? 0) <= BYTES_CAP) {
-            const j = await fetch(`/api/drive/download?file_id=${encodeURIComponent(file.id)}&json=1`, { signal: ctrl.signal }).then((x) => x.json());
+            const j = await fetch(`/api/drive/download?file_id=${encodeURIComponent(file.id)}&json=1`, { signal: ctrl.signal }).then((x) => x.json()).catch(() => ({}));
+            if (typeof j.url !== "string" || !j.url) {
+              if (!dead) setState({ bytes: null, loading: false, error: "couldn't get a download link for this file", tooLarge: false });
+              return;
+            }
             r = await fetch(j.url, { signal: ctrl.signal });
+            if (!r.ok) {
+              if (!dead) setState({ bytes: null, loading: false, error: `couldn't read the file (${r.status})`, tooLarge: false });
+              return;
+            }
           } else {
             if (!dead) setState({ bytes: null, loading: false, error: d.error ?? `preview failed (${r.status})`, tooLarge: !!d.too_large });
             return;

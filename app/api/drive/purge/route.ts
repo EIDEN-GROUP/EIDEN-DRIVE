@@ -7,7 +7,8 @@ import { logAudit } from "@/lib/audit";
 import { deleteDriveFile } from "@/lib/google-drive";
 import { driveCtxFor } from "@/lib/drive-accounts";
 import { bucketFor } from "@/lib/storage";
-import { googleDescendants, bustScopeCache } from "@/lib/visibility";
+import { googleDescendants, bustScopeCache, googleInScope } from "@/lib/visibility";
+import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({ file_id: z.string().uuid() });
@@ -30,6 +31,13 @@ export async function POST(req: Request) {
   const { data: inBin } = await db.from("recovery_bin").select("file_id").eq("file_id", file_id).maybeSingle();
   if (!inBin) return Response.json({ error: "only files in the Recovery Bin can be deleted permanently" }, { status: 409 });
   const fr = f as { mime?: string; drive_account_id?: string | null; google_file_id?: string | null };
+  // Scope binds every role: purging an out-of-scope row would permanently
+  // erase Drive bytes the workspace deliberately doesn't show.
+  if (fr.google_file_id && fr.drive_account_id) {
+    if (!(await googleInScope(db, await getAccounts(), fr.drive_account_id, fr.google_file_id))) {
+      return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
+    }
+  }
   // Purging a Google folder purges its whole indexed subtree with it: Drive
   // deletes folders recursively, so index rows left behind would be ghosts.
   let extraIds: string[] = [];

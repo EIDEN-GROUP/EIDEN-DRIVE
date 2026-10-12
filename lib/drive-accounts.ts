@@ -36,6 +36,39 @@ export async function getAccounts(): Promise<DriveAccount[]> {
 }
 export function bustAccountCache() { cache = null; }
 
+// Fresh (UNCACHED) single-account read for write-path validation. Uploads must
+// never trust the 60 s list cache: a drive disabled or deleted seconds ago
+// must refuse new bytes now, not after the cache expires.
+export async function getAccountFresh(accountId: string): Promise<(DriveAccount & { refresh_token: string }) | null> {
+  if (!hasAdminClient()) return null;
+  const db = adminClient();
+  const { data } = await db.from("drive_accounts")
+    .select("id,label,email,refresh_token,root_id,status,priority").eq("id", accountId).maybeSingle();
+  return (data as (DriveAccount & { refresh_token: string }) | null) ?? null;
+}
+
+// Gate every byte-writing path: the target drive must exist AND be active,
+// checked fresh (not from cache). Unknown id → 404; present-but-not-active
+// (disabled/unreachable bookkeeping) → 410 so clients stop retrying the same
+// drive and say exactly why. Callers must NOT fall back to another drive on
+// an explicit pin — the user chose this one; rerouting would be a surprise.
+export async function requireActiveAccount(
+  accountId: string
+): Promise<{ account: DriveAccount & { refresh_token: string } } | { error: string; status: 404 | 410 }> {
+  let row: (DriveAccount & { refresh_token: string }) | null = null;
+  try {
+    row = await getAccountFresh(accountId);
+  } catch {
+    return { error: "couldn't verify the drive — retry", status: 410 };
+  }
+  if (!row) return { error: "chosen drive not found — it may have been disconnected; pick another drive", status: 404 };
+  if (row.status !== "active") {
+    const label = row.label ? ` (“${row.label}”)` : "";
+    return { error: `chosen drive${label} is disabled — re-enable it in Storage or pick another drive`, status: 410 };
+  }
+  return { account: row };
+}
+
 // Refresh token for an account id (service-side only — never leaves the server).
 // Null accountId = legacy env connection. Unknown/deleted ids resolve to null
 // (callers treat that as "unavailable", never as another drive).

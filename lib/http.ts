@@ -27,3 +27,19 @@ export function safeEqual(a: string, b: string): boolean {
 export function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
+
+/**
+ * Public 500 for DB errors: Supabase/Postgres messages name tables, policies
+ * and constraints (enumeration fodder). Log the real message server-side,
+ * send the client a generic sentence. Duplicate/unique violations get a 409
+ * with a caller-supplied friendly message instead.
+ */
+export function dbError(fallback: string, dupMessage?: string): (e: { message: string }) => Response {
+  return (e) => {
+    console.error("[db]", e.message);
+    if (dupMessage && /duplicate|unique/i.test(e.message)) {
+      return Response.json({ error: dupMessage }, { status: 409 });
+    }
+    return Response.json({ error: fallback }, { status: 500 });
+  };
+}

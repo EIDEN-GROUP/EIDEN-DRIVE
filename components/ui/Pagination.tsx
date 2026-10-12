@@ -25,10 +25,10 @@ export function usePagination<T>(items: T[], { defaultSize = 25, sizes = DEFAULT
 }
 export type PagerState = Pick<ReturnType<typeof usePagination>, "page" | "pages" | "size" | "sizes" | "total" | "from" | "to" | "setPage" | "setSize">;
 
-/** Footer bar: rows per page · range · first / prev / numbered pages / next / last. Hidden when everything fits on one page. */
+/** Footer bar: rows per page · range · first / prev / numbered pages / next / last. Page buttons hide when everything fits on one page — the size picker and range never do (hiding them orphaned the "Rows per page" control with no feedback). */
 export default function Pagination({ pager, noun = "items", className = "" }: { pager: PagerState; noun?: string; className?: string }) {
   const { page, pages, size, sizes, total, from, to, setPage, setSize } = pager;
-  if (total <= Math.min(...sizes)) return null;
+  const single = total <= Math.min(...sizes);
   const btn = "size-9 grid place-items-center rounded-lg border border-line bg-surface text-ink/80 hover:bg-tint disabled:opacity-40 disabled:hover:bg-surface transition-colors";
   return (
     <nav aria-label={`${noun} pagination`} className={`flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-1 py-3 text-[13px] ${className}`}>
@@ -40,6 +40,7 @@ export default function Pagination({ pager, noun = "items", className = "" }: { 
         </select>
       </label>
       <span className="text-muted tabular-nums" aria-live="polite">{from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()} {noun}</span>
+      {!single && (
       <div className="flex items-center gap-1.5">
         <button className={btn} onClick={() => setPage(1)} disabled={page === 1} aria-label="First page"><ChevronsLeft size={15} /></button>
         <button className={btn} onClick={() => setPage(page - 1)} disabled={page === 1} aria-label="Previous page"><ChevronLeft size={15} /></button>
@@ -50,6 +51,7 @@ export default function Pagination({ pager, noun = "items", className = "" }: { 
         <button className={btn} onClick={() => setPage(page + 1)} disabled={page === pages} aria-label="Next page"><ChevronRight size={15} /></button>
         <button className={btn} onClick={() => setPage(pages)} disabled={page === pages} aria-label="Last page"><ChevronsRight size={15} /></button>
       </div>
+      )}
     </nav>
   );
 }

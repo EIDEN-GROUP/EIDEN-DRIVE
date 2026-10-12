@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { parseJson } from "@/lib/http";
+import { rateLimited, clientIp } from "@/lib/rate";
 
 const Body = z.object({
   name: z.string().trim().min(1).max(80),
@@ -17,6 +18,12 @@ export async function POST(req: Request) {
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
+  // Public + fans out to 50 managers: cap it (3/hr per IP, 2/hr per email) or
+  // it's a free DB + notification spam cannon. Same success shape either way.
+  const ip = clientIp(req);
+  if (rateLimited(`access-req:ip:${ip}`, 3, 3600_000) || rateLimited(`access-req:em:${p.data.email}`, 2, 3600_000)) {
+    return Response.json({ ok: true }, { status: 201 });
+  }
   const db = adminClient();
   const { name, email, message } = p.data;
   const { data: dup } = await db.from("access_requests").select("id").eq("email", email).eq("status", "pending").maybeSingle();

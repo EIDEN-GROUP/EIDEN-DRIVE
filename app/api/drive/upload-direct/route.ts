@@ -4,9 +4,9 @@ import { Readable } from "node:stream";
 import { adminClient } from "@/lib/supabase-admin";
 import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
-import { rootFor } from "@/lib/google-drive";
+import { rootFor, deleteDriveFile } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
-import { pickUploadAccount, clientFor, getAccounts } from "@/lib/drive-accounts";
+import { pickUploadAccount, clientFor, getAccounts, requireActiveAccount } from "@/lib/drive-accounts";
 import { notifyUpload } from "@/lib/upload-notify";
 import { folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
 
@@ -56,6 +56,12 @@ export async function POST(req: Request) {
     const dst = await folderUsable(db, me, folder);
     if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
   }
+  // Explicit pin: verify the drive exists and is active FIRST (fresh, cheap),
+  // before quota probes burn live Google calls. Unknown → 404, disabled → 410.
+  if (want !== "auto") {
+    const chk = await requireActiveAccount(want);
+    if ("error" in chk) return Response.json({ error: chk.error }, { status: chk.status });
+  }
   const pick = await pickUploadAccount(blob.size, want === "auto" ? null : want);
   if (!pick.account) {
     return Response.json({ error: pick.reason ?? "no drive available" }, { status: 502 });
@@ -100,7 +106,13 @@ export async function POST(req: Request) {
       backends: ["google"], owner: me.id, folder,
       storage_path: null, google_file_id: created.data.id, google_parent_id, drive_account_id: pick.account.id
     }).select("id").single();
-    if (error) throw new Error(error.message);
+    if (error) {
+      // The bytes already landed in Drive but the index row doesn't exist —
+      // remove the Drive file so it can't orphan invisibly. Best-effort: the
+      // 500 below is truthful either way (no false success).
+      try { await deleteDriveFile(created.data.id, d); } catch { /* ignore */ }
+      throw new Error(error.message);
+    }
     await db.from("versions").insert({ file_id: data.id, v: 1, hash: hash ?? "", actor: me.id });
     bustScopeCache(pick.account.id);
     await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: data.id, req, detail: { backends: ["google"], direct: true } });

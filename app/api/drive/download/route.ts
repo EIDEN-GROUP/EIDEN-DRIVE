@@ -8,6 +8,7 @@ import { logAudit } from "@/lib/audit";
 import { signedDownloadUrl, bucketFor } from "@/lib/storage";
 import { driveCtxFor, accountAccessToken, getAccounts } from "@/lib/drive-accounts";
 import { canTouch, googleInScope, liveInScope, isBinned, binnedResponse } from "@/lib/visibility";
+import { rateLimited } from "@/lib/rate";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ file_id: z.string().max(300), raw: z.string().optional(), json: z.string().optional(), thumb: z.string().optional() });
@@ -99,6 +100,11 @@ function parseLiveId(file_id: string): { accountId: string | null; googleId: str
 export async function GET(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
+  // Abuse damping: each hit mints short signed URLs / streams bytes — no
+  // unlimited signed-URL minting per user.
+  if (rateLimited(`download:${me.id}`, 240)) {
+    return Response.json({ error: "slow down — too many requests" }, { status: 429 });
+  }
   const p = parseQuery(req, Q);
   if (p.error) return p.error;
   const { file_id } = p.data;
@@ -114,9 +120,16 @@ export async function GET(req: Request) {
         return await googleThumb(liveId.googleId, liveId.accountId);
       }
       const supa = createClient();
-      const { data: tf } = await supa.from("file_index").select("google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
+      const { data: tf } = await supa.from("file_index").select("id,owner,folder,google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
       const gid = (tf as { google_file_id?: string | null } | null)?.google_file_id;
       if (!gid) throw new Error("this file lives in Supabase, not Google — no Drive thumbnail exists");
+      // Covers are not exempt from confinement: ownership + bin + scope.
+      const tfr = tf as { id: string; owner: string; folder: string | null; drive_account_id?: string | null } | null;
+      if (tfr) {
+        const gate = await canTouch(adminClient(), me, { id: tfr.id, owner: tfr.owner, folder: tfr.folder });
+        if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
+        if (await isBinned(adminClient(), tfr.id)) return binnedResponse();
+      }
       const aid = (tf as { drive_account_id?: string | null } | null)?.drive_account_id ?? null;
       const accs = await getAccounts();
       if (!(await googleInScope(adminClient(), accs, aid, gid))) {

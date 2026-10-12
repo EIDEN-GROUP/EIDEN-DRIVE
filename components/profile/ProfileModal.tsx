@@ -35,6 +35,12 @@ export default function ProfileModal({ onClose }: { onClose: () => void }) {
   }, []);
 
   async function savePhone() {
+    const v = phone.trim();
+    // maxLength alone accepted anything: keep it to plausible phone characters.
+    if (v && !/^[+\d][\d\s\-().]{3,22}$/.test(v)) {
+      toast({ text: "That doesn't look like a phone number.", tone: "err" });
+      return;
+    }
     setSaving(true);
     const r = await fetch("/api/profile", {
       method: "PATCH", headers: { "content-type": "application/json" },
@@ -51,6 +57,8 @@ export default function ProfileModal({ onClose }: { onClose: () => void }) {
   async function uploadAvatar(files: FileList | null) {
     const f = files?.[0];
     if (!f || !p) return;
+    // Second pick mid-upload used to race (wrong file could win): refuse.
+    if (upping || saving) { if (fileRef.current) fileRef.current.value = ""; return; }
     if (!f.type.startsWith("image/")) { toast({ text: "Pick an image file.", tone: "err" }); return; }
     if (f.size > 5 * 1024 * 1024) { toast({ text: "Max 5 MB.", tone: "err" }); return; }
     setUpping(true);
@@ -84,13 +92,33 @@ export default function ProfileModal({ onClose }: { onClose: () => void }) {
     }
   }
 
+  function tryClose() {
+    // Backdrop/X mid-save used to orphan requests (duplicate submits, lost
+    // avatars): block while a save or upload is in flight.
+    if (saving || upping) {
+      toast({ text: "Wait for the save to finish first.", tone: "err" });
+      return;
+    }
+    onClose();
+  }
+
+  // Escape closes (when idle); autofocus the dialog for screen readers.
+  const dlgRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    dlgRef.current?.focus();
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") tryClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saving, upping]);
+
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Your profile">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="pop-in relative w-full max-w-sm rounded-xl bg-surface border border-line shadow-pop overflow-hidden">
+      <div className="absolute inset-0 bg-black/50" onClick={tryClose} />
+      <div ref={dlgRef} tabIndex={-1} className="pop-in relative w-full max-w-sm rounded-xl bg-surface border border-line shadow-pop overflow-hidden outline-none">
         <div className="flex items-center min-h-[56px] px-4 border-b border-line">
           <p className="text-[15px] font-medium flex-1">Your profile</p>
-          <button onClick={onClose} aria-label="Close profile" className="size-11 grid place-items-center rounded-md hover:bg-tint"><X size={18} /></button>
+          <button onClick={tryClose} aria-label="Close profile" className="size-11 grid place-items-center rounded-md hover:bg-tint"><X size={18} /></button>
         </div>
         {!p ? (
           <div className="p-6 space-y-3" aria-label="Loading profile">

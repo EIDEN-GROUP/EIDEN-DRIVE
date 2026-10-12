@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { getAccounts, type DriveAccount } from "@/lib/drive-accounts";
-import { inScopeGoogleIds } from "@/lib/visibility";
+import { inScopeGoogleIds, allBinnedIds, accessContext, isManager } from "@/lib/visibility";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({ accountId: z.string().uuid() });
@@ -23,17 +23,44 @@ export async function GET(req: Request) {
   if (!acct || acct.status !== "active") return Response.json({ error: "drive not available" }, { status: 404 });
   const db = adminClient();
   const { data, error } = await db.from("file_index")
-    .select("id,name,mime,size,google_file_id,google_parent_id,backends")
+    .select("id,name,mime,size,google_file_id,google_parent_id,backends,owner")
     .eq("drive_account_id", p.data.accountId)
     .not("google_file_id", "is", null)
     .order("name")
     .limit(2000);
   if (error) return Response.json({ error: error.message }, { status: 500 });
+  type TRow = { id: string; google_file_id: string; google_parent_id: string | null; owner?: string | null };
   // Binned rows hide here too (they live on the Recovery Bin page).
-  const { data: binRows } = await db.from("recovery_bin").select("file_id").limit(5000);
-  const binned = new Set(((binRows ?? []) as { file_id: string }[]).map((b) => b.file_id));
-  let all = ((data ?? []) as { id: string; google_file_id: string; google_parent_id: string | null }[])
+  const binned = await allBinnedIds(db);
+  let all = ((data ?? []) as TRow[])
     .filter((r) => !binned.has(r.id));
+  // Department-tag mode: members see only own rows, rows carrying their tag,
+  // and tagged folders' whole subtrees — consistently with the Workspace list.
+  // (Fallback: no assigned matching tag → everything shows, same as the list.)
+  if (!isManager(me.role)) {
+    const ctx = await accessContext(db, me);
+    if (ctx.strict) {
+      const byGoogle = new Map(all.map((r) => [r.google_file_id, r]));
+      const kidsOf = new Map<string, string[]>();
+      for (const r of all) {
+        if (r.google_parent_id) {
+          const l = kidsOf.get(r.google_parent_id) ?? [];
+          l.push(r.google_file_id);
+          kidsOf.set(r.google_parent_id, l);
+        }
+      }
+      const keep = new Set<string>();
+      const grow = (gid: string) => {
+        if (keep.has(gid)) return;
+        keep.add(gid);
+        for (const c of kidsOf.get(gid) ?? []) grow(c);
+      };
+      for (const r of all) {
+        if (r.owner === me.id || ctx.taggedFiles.has(r.id)) grow(r.google_file_id);
+      }
+      all = all.filter((r) => keep.has(r.google_file_id));
+    }
+  }
   // Scope server-side (never trust the client to trim the tree): on a scoped
   // account only the root's subtree leaves this endpoint. Navigating to an
   // out-of-scope folder id by hand finds nothing here. Placeless rows

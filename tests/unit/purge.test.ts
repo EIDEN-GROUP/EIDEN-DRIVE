@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const state = { role: "manager" as "admin" | "manager" | "member" | null, file: null as null | Record<string, unknown>, inBin: true, storageErr: null as null | string, googleErr: null as null | Error, ctx: true, kids: null as null | Record<string, unknown>[], kidIds: null as null | string[] };
+const state = { role: "manager" as "admin" | "manager" | "member" | null, file: null as null | Record<string, unknown>, inBin: true, storageErr: null as null | string, googleErr: null as null | Error, ctx: true, kids: null as null | Record<string, unknown>[], kidIds: null as null | string[], scoped: true };
 const ops: string[] = [];
 
 function table(name: string) {
@@ -22,8 +22,8 @@ vi.mock("@/lib/audit", () => ({ logAudit: async () => { ops.push("audit"); } }))
 vi.mock("@/lib/supabase-admin", () => ({
   adminClient: () => ({ from: table, storage: { from: () => ({ remove: async () => { ops.push("storage:remove"); return { error: state.storageErr ? { message: state.storageErr } : null }; } }) } })
 }));
-vi.mock("@/lib/drive-accounts", () => ({ driveCtxFor: async () => (state.ctx ? { drive: {}, rootId: "", label: "Main" } : null) }));
-vi.mock("@/lib/visibility", () => ({ googleDescendants: async () => state.kidIds ?? [], bustScopeCache: () => {} }));
+vi.mock("@/lib/drive-accounts", () => ({ driveCtxFor: async () => (state.ctx ? { drive: {}, rootId: "", label: "Main" } : null), getAccounts: async () => [] }));
+vi.mock("@/lib/visibility", () => ({ googleDescendants: async () => state.kidIds ?? [], bustScopeCache: () => {}, googleInScope: async () => state.scoped }));
 vi.mock("@/lib/google-drive", () => ({ deleteDriveFile: async () => { ops.push("google:delete"); if (state.googleErr) throw state.googleErr; return {}; } }));
 
 import { POST } from "@/app/api/drive/purge/route";
@@ -32,7 +32,7 @@ const call = (body: unknown = { file_id: FILE_ID }) => POST(new Request("http://
 
 describe("POST /api/drive/purge (permanent delete)", () => {
   beforeEach(() => {
-    ops.length = 0; Object.assign(state, { role: "manager", inBin: true, storageErr: null, googleErr: null, ctx: true, kids: null, kidIds: null,
+    ops.length = 0; Object.assign(state, { role: "manager", inBin: true, storageErr: null, googleErr: null, ctx: true, kids: null, kidIds: null, scoped: true,
       file: { id: FILE_ID, name: "old.pdf", size: 10, hash: "abc", storage_path: "u1/old.pdf", google_file_id: "g1", drive_account_id: "acc" } });
   });
   it("is manager/admin only", async () => {
@@ -75,5 +75,11 @@ describe("POST /api/drive/purge (permanent delete)", () => {
     expect(await r.json()).toMatchObject({ ok: true, purged: 2 });
     expect(ops.filter((o) => o === "storage:remove")).toHaveLength(1); // hybrid child's bytes
     expect(ops).toContain("delete:file_index");
+  });
+  it("refuses an out-of-scope Google row (scope binds managers too)", async () => {
+    state.scoped = false;
+    const r = await call();
+    expect(r.status).toBe(403);
+    expect(ops).toEqual([]); // no bytes touched
   });
 });

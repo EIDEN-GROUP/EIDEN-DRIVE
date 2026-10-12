@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 // Nothing to paste into env: the account is live immediately.
 import { GOOGLE_REDIRECT_URI } from "@/lib/google-auth";
 import { logAudit } from "@/lib/audit";
-import { getProfile } from "@/lib/roles";
+import { getProfile, can } from "@/lib/roles";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { bustAccountCache } from "@/lib/drive-accounts";
 
@@ -21,6 +21,18 @@ export async function GET(req: Request) {
   const urlState = url.searchParams.get("state");
   if (!cookieState || !urlState || cookieState !== urlState) {
     return new Response("Invalid or expired OAuth state. Start again from /api/auth/google (sign in as Admin/Manager).", { status: 400 });
+  }
+  // Privilege re-check at STORE time, not just at flow start: the start route
+  // is gated, but minutes pass before Google redirects back. Signed-in users
+  // must still be managers; signed-out setup mode is allowed only while the
+  // one-time APP_SETUP_KEY is still configured (remove it after setup).
+  const storer = await getProfile();
+  if (storer) {
+    if (!can(storer.role, "manage-users")) {
+      return new Response("Managers only — ask an admin to connect this drive.", { status: 403 });
+    }
+  } else if (!process.env.APP_SETUP_KEY) {
+    return new Response("Sign in as Admin/Manager first, then start again from /api/auth/google.", { status: 403 });
   }
   let label = "drive";
   try {

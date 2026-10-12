@@ -2,6 +2,7 @@
 import { useMemo, useState } from "react";
 import { Check, Plus, X } from "lucide-react";
 import Modal from "../ui/Modal";
+import { Ring } from "../ui/Loaders";
 import { SWATCHES, type Tag, type TagKind, type TagsApi } from "./useTags";
 
 /** Small coloured dot (a11y: always paired with the tag name somewhere, or given a title). */
@@ -71,7 +72,7 @@ export function TagEditor({ tag, api, onClose }: { tag?: Tag; api: TagsApi; onCl
         </div>
         <div className="flex justify-end gap-2">
           <button type="button" onClick={onClose} className="min-h-[44px] px-4 rounded-md border border-line text-[13.5px] hover:bg-tint">Cancel</button>
-          <button disabled={busy || !name.trim()} className="min-h-[44px] px-5 rounded-md bg-brand text-white text-[13.5px] font-medium disabled:opacity-50">{busy ? "Saving…" : tag ? "Save" : "Create tag"}</button>
+          <button disabled={busy || !name.trim()} className="min-h-[44px] px-5 rounded-md bg-brand text-white text-[13.5px] font-medium disabled:opacity-50 inline-flex items-center gap-2">{busy && <Ring className="size-4" />}{busy ? "Saving…" : tag ? "Save" : "Create tag"}</button>
         </div>
       </form>
     </Modal>
@@ -123,7 +124,7 @@ export function TagPicker({ target, api, onClose }: { target: { kind: TagKind; i
       {needle && !exact && (
         <button onClick={createAndAttach} disabled={busy}
           className="mt-2 w-full min-h-[44px] rounded-md bg-tint text-brand text-[13.5px] font-medium flex items-center justify-center gap-1.5 hover:brightness-95 disabled:opacity-50">
-          <Plus size={16} /> Create “{q.trim()}” and add
+          {busy ? <Ring className="size-4" /> : <Plus size={16} />} {busy ? "Creating…" : <>Create “{q.trim()}” and add</>}
         </button>
       )}
       <div className="mt-4 flex justify-end"><button onClick={onClose} className="min-h-[44px] px-5 rounded-md bg-brand text-white text-[13.5px] font-medium">Done</button></div>

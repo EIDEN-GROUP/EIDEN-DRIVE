@@ -35,6 +35,10 @@ export async function PATCH(req: Request) {
   const p = await parseJson(req, Update);
   if (p.error) return p.error;
   // Avatar must live under the caller's own upload prefix (same rule as uploads).
+  // Avatars are drive-exempt by construction: the pfp bucket is their only
+  // destination (upload-url rejects any drive pin alongside bucket=pfp), so
+  // there is no drive-availability check to run here — nothing can route a
+  // picture at a Google drive.
   if (p.data.avatar_path && (!p.data.avatar_path.startsWith(`${me.id}/`) || p.data.avatar_path.includes(".."))) {
     return Response.json({ error: "avatar must be inside your own upload folder" }, { status: 403 });
   }

@@ -43,9 +43,20 @@ export async function GET() {
   if (hasAdminClient()) {
     const db = adminClient();
     const { data } = await db.from("jobs").select("kind,status,created_at,payload").order("created_at", { ascending: false }).limit(30);
-    jobs = data ?? [];
-    const hb = (data ?? []).find((j: { kind: string }) => j.kind === "agent-heartbeat") as { created_at: string } | undefined;
+    const all = (data ?? []) as { kind: string; status?: string; created_at: string; payload?: Record<string, unknown> }[];
+    const hb = all.find((j) => j.kind === "agent-heartbeat");
     agentMin = hb ? Math.round((Date.now() - new Date(hb.created_at).getTime()) / 60000) : null;
+    // Job payloads carry 7-day signed byte URLs for the office agent — they
+    // must never reach anyone except managers. Members see only their own
+    // jobs, with the agent's download URL stripped (status stays visible).
+    if (can(me.role, "manage-users")) {
+      jobs = all;
+    } else {
+      jobs = all
+        .filter((j) => (j.payload as { owner?: string } | undefined)?.owner === me.id)
+        .map((j) => ({ kind: j.kind, status: j.status, created_at: j.created_at,
+          payload: { ...j.payload, url: undefined } }));
+    }
   }
   return Response.json({
     drives,

@@ -206,7 +206,10 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
               )}
             </button>
             <div ref={menuRef} className="relative">
-              <button onClick={() => { setProfileOpen(true); setUserMenu(false); }} aria-haspopup="dialog" aria-label="Open your profile"
+              {/* The dropdown used to be dead code (the button jumped straight
+                  to the profile): now the avatar opens the menu, Profile opens
+                  the dialog. Sign out stays one click away. */}
+              <button onClick={() => setUserMenu((v) => !v)} aria-haspopup="menu" aria-expanded={userMenu} aria-label="Account menu"
                 className="min-h-[44px] flex items-center gap-1 pl-1 pr-2 rounded-full hover:bg-tint">
                 {user?.avatarUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -217,13 +220,15 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
                 <ChevronDown size={17} className="text-ink/70" />
               </button>
               {userMenu && (
-                <div role="menu" className="pop-in absolute right-0 mt-2 w-[230px] rounded-lg bg-surface border border-line shadow-pop py-2 z-50">
+                <div role="menu" aria-label="Account" className="pop-in absolute right-0 mt-2 w-[230px] rounded-lg bg-surface border border-line shadow-pop py-2 z-50"
+                  onKeyDown={(e) => { if (e.key === "Escape") setUserMenu(false); }}>
                   <div className="px-4 py-2 border-b border-line">
                     <p className="text-[14px] font-medium truncate">{user?.username ?? "Signed in"}</p>
                     <p className="text-[11px] text-muted capitalize">{user?.role ?? "member"}{user?.dept ? ` · ${user.dept}` : ""}</p>
                   </div>
+                  <button role="menuitem" onClick={() => { setUserMenu(false); setProfileOpen(true); }} className="w-full text-left px-4 py-2.5 text-[13px] hover:bg-tint flex items-center gap-2">Profile</button>
                   <button role="menuitem" onClick={signOut} className="w-full text-left px-4 py-2.5 text-[13px] hover:bg-tint flex items-center gap-2"><LogOut size={15} /> Sign out</button>
-                  <Link role="menuitem" href="/account/password" className="w-full text-left px-4 py-2.5 text-[13px] hover:bg-tint flex items-center gap-2"><KeyRound size={15} /> Set password</Link>
+                  <Link role="menuitem" href="/account/password" onClick={() => setUserMenu(false)} className="w-full text-left px-4 py-2.5 text-[13px] hover:bg-tint flex items-center gap-2"><KeyRound size={15} /> Set password</Link>
                 </div>
               )}
             </div>

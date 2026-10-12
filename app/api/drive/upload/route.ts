@@ -9,7 +9,7 @@ import { UPLOAD_BUCKET, PFP_BUCKET } from "@/lib/storage";
 import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { queueUsbUpload } from "@/lib/usb";
-import { pickUploadAccount, clientFor, getAccounts } from "@/lib/drive-accounts";
+import { pickUploadAccount, clientFor, getAccounts, requireActiveAccount } from "@/lib/drive-accounts";
 import { notifyUpload } from "@/lib/upload-notify";
 import { folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
@@ -81,6 +81,25 @@ export async function POST(req: Request) {
   if (body.folder) {
     const dst = await folderUsable(db, me, body.folder);
     if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed" }, { status: 403 });
+  }
+  // Drive availability is re-validated HERE (fresh, uncached) even though
+  // upload-url already checked: the drive may have been disabled or deleted
+  // in the minutes between init, byte transfer, and register. An explicitly
+  // pinned drive that is gone/disabled fails the WHOLE upload (400/410 — an
+  // explicit pin must never silently reroute to another drive), and the
+  // already-staged Storage object is removed so it can't orphan.
+  // Auto mode needs no gate: pickUploadAccount only ever returns active
+  // drives, and a total absence degrades to local-only with push_error below.
+  if (want && want !== "auto") {
+    const chk = await requireActiveAccount(want);
+    if ("error" in chk) {
+      if (body.storage_path) {
+        try {
+          await db.storage.from(body.storage_bucket ?? UPLOAD_BUCKET).remove([body.storage_path]);
+        } catch { /* cleanup is best-effort; the row was never created */ }
+      }
+      return Response.json({ error: chk.error }, { status: chk.status });
+    }
   }
   const { data, error } = await db.from("file_index").insert({
     name: body.name, mime: body.mime ?? "application/octet-stream", size: body.size ?? 0,

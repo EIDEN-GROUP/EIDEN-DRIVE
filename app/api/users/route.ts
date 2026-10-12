@@ -5,7 +5,7 @@ import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { avatarUrlFor } from "@/lib/storage";
-import { parseJson } from "@/lib/http";
+import { parseJson, dbError } from "@/lib/http";
 
 // Managers/Admins: full directory incl. emails + sign-in info (auth data is
 // service-role only — never exposed to members). Members use the page's
@@ -56,7 +56,7 @@ export async function PATCH(req: Request) {
   if (department_tag !== undefined) patch.department_tag = department_tag;
   if (role) patch.role = role;
   const { error } = await db.from("profiles").update(patch).eq("id", user_id);
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbError("Couldn't update the user.")(error);
   await logAudit({ actor: me.id, actor_name: me.username, action: "edit", req, detail: { users: user_id, ...patch } });
   return Response.json({ ok: true });
 }
@@ -80,9 +80,9 @@ export async function DELETE(req: Request) {
     if ((count ?? 1) <= 1) return Response.json({ error: "cannot remove the last admin" }, { status: 400 });
   }
   const { error: pErr } = await db.from("profiles").delete().eq("id", p.data.user_id);
-  if (pErr) return Response.json({ error: pErr.message }, { status: 500 });
+  if (pErr) return dbError("Couldn't remove the user.")(pErr);
   const { error: uErr } = await db.auth.admin.deleteUser(p.data.user_id);
-  if (uErr) return Response.json({ error: uErr.message, note: "profile removed, auth user kept — retry or remove in Supabase dashboard" }, { status: 500 });
+  if (uErr) return Response.json({ error: "Couldn't remove the sign-in account.", note: "profile removed, auth user kept — retry or remove in Supabase dashboard" }, { status: 500 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { users: p.data.user_id, username: target.username } });
   return Response.json({ ok: true });
 }

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
+import { driveCtxFor, getAccounts, requireActiveAccount } from "@/lib/drive-accounts";
 import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { googleInScope, bustScopeCache } from "@/lib/visibility";
@@ -28,6 +28,10 @@ export async function POST(req: Request) {
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
+  // Fresh availability gate (not the cached ctx): a disabled/deleted drive
+  // refuses new folders with an exact reason instead of a vague 404.
+  const gate = await requireActiveAccount(p.data.accountId);
+  if ("error" in gate) return Response.json({ error: gate.error }, { status: gate.status });
   const ctx = await driveCtxFor(p.data.accountId);
   if (!ctx?.drive) return Response.json({ error: "drive not available" }, { status: 404 });
   const db = adminClient();

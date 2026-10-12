@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { bucketFor } from "@/lib/storage";
-import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
+import { driveCtxFor, getAccounts, requireActiveAccount } from "@/lib/drive-accounts";
 import { canTouch, folderUsable, googleInScope, bustScopeCache, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
@@ -48,6 +48,13 @@ export async function POST(req: Request) {
   }
   // Trashed sources can't be cloned back to life — restore first.
   if (await isBinned(db, p.data.file_id)) return binnedResponse();
+  // A copy writes through the source's drive account: if that drive is gone
+  // or disabled, refuse BEFORE duplicating Storage bytes (which would orphan
+  // when the Google leg then fails). Fresh check, not cache.
+  if (srcRow.google_file_id && srcRow.drive_account_id) {
+    const gate = await requireActiveAccount(srcRow.drive_account_id);
+    if ("error" in gate) return Response.json({ error: gate.error }, { status: gate.status });
+  }
   const copyName = `Copy of ${src.name}`;
   const srcFull = src as { storage_bucket?: string | null; drive_account_id?: string | null; google_parent_id?: string | null };
   // Drive-side destination: explicit override wins, else the source's own

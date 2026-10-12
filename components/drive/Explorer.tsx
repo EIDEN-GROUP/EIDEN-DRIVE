@@ -1,5 +1,5 @@
 "use client";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
@@ -10,16 +10,19 @@ import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import Modal from "../ui/Modal";
 import Menu from "../ui/Menu";
+import { Ring, Dots, SparkleLoader, UploadPanel, type UploadItem, type UploadStatus } from "../ui/Loaders";
+import { uploadResumable, cancelResumableSession, UploadCancelled } from "@/lib/upload-resumable-client";
+import { RESUMABLE_MAX } from "@/lib/resumable";
 import FileThumb from "./FileThumb";
 import FileViewer, { type ViewFile } from "./FileViewer";
 import FileEditor from "./FileEditor";
-import { editable, viewKind } from "./filetext";
+import { editable } from "./filetext";
 import { FileGlyph, FileIcon, FolderIcon, kindOf } from "../ui/Glyphs";
 import Pagination, { usePagination } from "../ui/Pagination";
 import { useTags } from "../tags/useTags";
 import { TagChip, TagDot, TagDots, TagEditor, TagPicker } from "../tags/TagUI";
 import type { Tag, TagKind } from "../tags/useTags";
-import { badge, classify, formatBytes } from "@/lib/files";
+import { badge, classify, displayKind, fmtDateTime, formatBytes } from "@/lib/files";
 
 export interface Folder { id: string; name: string; parent: string | null; dept: string | null }
 export interface FileRow {
@@ -48,6 +51,7 @@ interface Row {
 
 const TAG_COLORS = ["#e5322d", "#2331e0", "#22c32e", "#f59e0b", "#ec4899", "#0ea5a4", "#8b5cf6"];
 const DOC_KINDS = ["PDF", "DOCX", "XLSX", "PPTX", "HTML"];
+const RECENT_LIMIT = 50;
 
 async function sha256(file: File): Promise<string> {
   const buf = await file.arrayBuffer();
@@ -56,42 +60,7 @@ async function sha256(file: File): Promise<string> {
 }
 
 function fmtDate(d?: string | null): string {
-  if (!d) return "--";
-  const t = new Date(d);
-  if (isNaN(t.getTime())) return "--";
-  const date = t.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
-  let h = t.getHours();
-  const m = String(t.getMinutes()).padStart(2, "0");
-  const ap = h >= 12 ? "pm" : "am";
-  h = h % 12 || 12;
-  return `${date}, ${h}:${m} ${ap}`;
-}
-
-function kindLabel(name: string, cls: string, mime?: string | null): string {
-  if (mime === "application/vnd.google-apps.folder") return "Folder";
-  const ext = (name.split(".").pop() ?? "").toLowerCase();
-  const k = viewKind(name);
-  const E = ext.toUpperCase();
-  switch (k) {
-    case "image": return `${E} image`;
-    case "video": return "Video";
-    case "audio": return "Audio";
-    case "pdf": return "PDF document";
-    case "docx": case "odf": case "rtf": return "Document";
-    case "legacy": return "Legacy Office file";
-    case "sheet": return "Spreadsheet";
-    case "csv": return "CSV table";
-    case "slides": return "Presentation";
-    case "archive": return "Archive";
-    case "ebook": return "Ebook";
-    case "font": return "Font";
-    case "json": return "JSON data";
-    case "notebook": return "Notebook";
-    case "markdown": return "Markdown";
-    case "html": return "Web page";
-    case "code": return ["txt", "log"].includes(ext) ? "Text file" : "Source / text";
-    default: return cls === "DESIGN" ? "Design file" : ext ? `${E} file` : "File";
-  }
+  return fmtDateTime(d);
 }
 
 export default function Explorer() {
@@ -157,9 +126,17 @@ export default function Explorer() {
   const [supaOff, setSupaOff] = useState(false);
   useEffect(() => {
     try {
-      if (localStorage.getItem("eiden-usb") === "1") setUsbTarget(true);
+      const usb = localStorage.getItem("eiden-usb") === "1";
       if (localStorage.getItem("eiden-mirror") === "0") setMirrorOff(true);
-      if (localStorage.getItem("eiden-supabase") === "0") setSupaOff(true);
+      const supa = localStorage.getItem("eiden-supabase") === "0";
+      if (supa) {
+        setSupaOff(true);
+        // Persisted conflict (USB on + Supabase off) used to silently drop the
+        // USB copy: resolve it at load — USB off, Supabase stays off.
+        if (usb) { try { localStorage.setItem("eiden-usb", "0"); } catch { /* ignore */ } }
+      } else if (usb) {
+        setUsbTarget(true);
+      }
     } catch { /* ignore */ }
   }, []);
   function toggleUsb() {
@@ -224,6 +201,7 @@ export default function Explorer() {
   const [syncing, setSyncing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  const loadSeq = useRef(0);
   // Chunk size follows the "Rows per page" picker (pg.size); the auto-loader
   // below pulls one chunk at a time until the server says there is no more.
   const sizeRef = useRef(50);
@@ -231,8 +209,51 @@ export default function Explorer() {
   // while a page is in flight — dedupe against the truth at resolve time, not
   // the stale closure, so overlapping pages can never double a file.
   const filesRef = useRef<FileRow[]>([]);
-  const [uploading, setUploading] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Drive-style upload queue: every picked file becomes a panel row with its
+  // own state (hashing → uploading w/ % → indexing → done/error), cancellable
+  // mid-flight. Sequential — one active transfer, so one abort controller.
+  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
+  const [uploadPanelMin, setUploadPanelMin] = useState(false);
+  const upSeq = useRef(0);
+  const upAbort = useRef<AbortController | null>(null);
+  // Live resumable session URI for the in-flight Drive upload (Supabase-off
+  // path): Cancel deletes the Google session too, so an abandoned upload
+  // leaves no resumable state behind.
+  const upSessionUri = useRef<string | null>(null);
+  const upCancelAll = useRef(false);
+  const uploadActive = uploadItems.some((i) => i.status === "hashing" || i.status === "uploading" || i.status === "indexing");
+  function setItem(key: number, patch: Partial<UploadItem>) {
+    setUploadItems((prev) => prev.map((it) => (it.key === key ? { ...it, ...patch } : it)));
+  }
+  function cancelUploads() {
+    upCancelAll.current = true;
+    upAbort.current?.abort();
+    const uri = upSessionUri.current;
+    upSessionUri.current = null;
+    if (uri) void cancelResumableSession(uri);
+  }
+  // Signed-URL PUT with real byte progress (fetch can't report upload
+  // progress). Aborts via the shared controller when the panel cancels.
+  function putWithProgress(url: string, file: File, mime: string, key: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const ctl = new AbortController();
+      upAbort.current = ctl;
+      ctl.signal.addEventListener("abort", () => xhr.abort());
+      xhr.timeout = 600_000; // 10 min ≈ 1.3 Mbps floor on 100 MB, fails loudly
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) setItem(key, { pct: (e.loaded / e.total) * 100 });
+      };
+      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error("byte upload failed")));
+      xhr.onerror = () => reject(new Error("byte upload failed"));
+      xhr.onabort = () => reject(new Error("cancelled"));
+      xhr.ontimeout = () => reject(new Error("byte upload timed out"));
+      xhr.open("PUT", url);
+      xhr.setRequestHeader("content-type", mime);
+      xhr.send(file);
+    });
+  }
   // Load failure worth showing (with Retry) — silent background refreshes only toast.
   const [loadError, setLoadError] = useState<string | null>(null);
   // Clipboard survives reloads; silent 60s auto-refresh (no skeleton flash).
@@ -253,6 +274,9 @@ export default function Explorer() {
   const load = useCallback(async (query: string, from = 0, append = false, silent = false) => {
     if (append) setLoadingMore(true);
     else if (!silent) { setLoading(true); setLoadError(null); }
+    // Sequence guard: search debounce + silent refresh + manual refresh can
+    // overlap — a stale resolve must never clobber fresher state.
+    const seq = ++loadSeq.current;
     // Every leg has a timeout: a stalled server must fail loudly with Retry,
     // never spin the skeletons forever (the "root stopped responding" bug).
     const c = new AbortController();
@@ -272,6 +296,7 @@ export default function Explorer() {
         get(`/api/drive?q=${encodeURIComponent(query)}&limit=${limit}&offset=${from}${append ? "&append=1" : ""}`),
         append ? null : get("/api/drive/bin")
       ]);
+      if (seq !== loadSeq.current) return; // superseded — drop, don't paint
       if (fr) setFolders(fr.results ?? []);
       if (append) {
         const incoming = (dr.results ?? []) as FileRow[];
@@ -339,9 +364,23 @@ export default function Explorer() {
   useEffect(() => {
     try { const v = localStorage.getItem("eiden-upload-drive"); if (v) setDriveSel(v); } catch { /* ignore */ }
   }, []);
-  // A remembered drive that no longer exists falls back to Auto.
-  useEffect(() => { if (driveSel && accounts.length && !accounts.some((a) => a.id === driveSel)) setDriveSel(""); }, [accounts, driveSel]);
+  // A remembered drive that no longer exists — or was disabled since — falls
+  // back to Auto. Without this a stale pin would aim every upload at a drive
+  // the server now refuses (the backend still re-checks fresh: this is just
+  // the fast, no-wasted-hashing path).
+  useEffect(() => {
+    if (driveSel && accounts.length && !accounts.some((a) => a.id === driveSel && a.status === "active")) {
+      setDriveSel("");
+      try { localStorage.setItem("eiden-upload-drive", ""); } catch { /* ignore */ }
+    }
+  }, [accounts, driveSel]);
   function chooseUploadDrive(id: string) {
+    // The picker only lists active drives, but refuse a stale/inactive pick
+    // anyway — never persist a destination the server would reject.
+    if (id && !accounts.some((a) => a.id === id && a.status === "active")) {
+      toast({ text: "That drive isn't available — staying on Auto.", tone: "err" });
+      return;
+    }
     setDriveSel(id);
     try { localStorage.setItem("eiden-upload-drive", id); } catch { /* ignore */ }
     // Picking a drive implies the mirror is wanted.
@@ -367,8 +406,13 @@ export default function Explorer() {
       if (raw) setClip(JSON.parse(raw));
     } catch { /* ignore */ }
     // Auto-refresh every 60s, silently: same call as manual Refresh but without
-    // the skeleton flash (silent=true skips setLoading).
-    const t = setInterval(() => loadRef.current(qRef.current, 0, false, true), 60000);
+    // the skeleton flash (silent=true skips setLoading). Skipped once the user
+    // has auto-loaded extra pages: a base reload would collapse them back to
+    // chunk 1 with no notice — the next manual Refresh still catches up.
+    const t = setInterval(() => {
+      if (filesRef.current.length > sizeRef.current) return;
+      loadRef.current(qRef.current, 0, false, true);
+    }, 60000);
     return () => clearInterval(t);
   }, []);
 
@@ -394,7 +438,14 @@ export default function Explorer() {
     return null;
   }, [folderById]);
   const depts = useMemo(() => Array.from(new Set(folders.map((f) => f.dept).filter(Boolean) as string[])).sort(), [folders]);
-  const tagColor = useCallback((d: string | null) => d ? TAG_COLORS[Math.max(0, depts.indexOf(d)) % TAG_COLORS.length] : null, [depts]);
+  // Tag colors hash by NAME, not by department-list position: adding or
+  // renaming a department used to reshuffle every tag's color.
+  const tagColor = useCallback((d: string | null) => {
+    if (!d) return null;
+    let h = 0;
+    for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) >>> 0;
+    return TAG_COLORS[h % TAG_COLORS.length];
+  }, []);
   const pathTo = useCallback((folderId: string): string[] => {
     const out: string[] = []; let id: string | null = folderId; let guard = 0;
     while (id && guard++ < 20) { out.unshift(id); id = folderById.get(id)?.parent ?? null; }
@@ -431,12 +482,19 @@ export default function Explorer() {
       }
       if (r.kind === "folder") return "—";
     }
-    return r.file ? badge(r.file.backends, r.file.accountLabel) || "--" : "--";
+    // Workspace files: same-name files in different folders were
+    // indistinguishable (backend badge only) — show the folder path first.
+    if (r.file?.folder) {
+      const ids = pathTo(r.file.folder);
+      const names = ids.map((id) => folderById.get(id)?.name).filter(Boolean) as string[];
+      if (names.length) return names.join(" › ");
+    }
+    return r.file ? badge(r.file.backends, r.file.accountLabel) || "—" : "—";
   }
 
   // Contained-bytes totals per folder: local ancestry via the folders table,
   // Google ancestry via recorded Drive parents (+ the open tree as fallback).
-  // Folders show their total instead of "--".
+  // Folders show their total instead of "—".
   const folderBytes = useMemo(() => {
     const local = new Map<string, number>();
     const addLocal = (fid: string, n: number, guard = 0): void => {
@@ -468,12 +526,23 @@ export default function Explorer() {
     return { local, gtotal };
   }, [files, folders, folderById, tree]);
   function folderSize(r: Row): string {
+    if (r.kind !== "folder") return "—";
     let total = 0;
-    if (r.kind !== "folder") return "--";
-    if (r.folder) total = folderBytes.local.get(r.folder.id) ?? 0;
-    else if (r.googleFolder) total = folderBytes.gtotal.get(r.googleFolder) ?? 0;
-    else if (r.id.startsWith("gdrive:")) total = folderBytes.gtotal.get(r.id.slice("gdrive:".length)) ?? 0;
-    return total > 0 ? formatBytes(total) : "--";
+    let known = false;
+    if (r.folder) {
+      // Known when the folder id is in the loaded set — then 0 really means
+      // empty ("Empty"), not "couldn't tell" ("—").
+      known = folderById.has(r.folder.id);
+      total = folderBytes.local.get(r.folder.id) ?? 0;
+    } else if (r.googleFolder) {
+      known = true;
+      total = folderBytes.gtotal.get(r.googleFolder) ?? 0;
+    } else if (r.id.startsWith("gdrive:")) {
+      known = true;
+      total = folderBytes.gtotal.get(r.id.slice("gdrive:".length)) ?? 0;
+    }
+    if (!known) return "—";
+    return total > 0 ? formatBytes(total) : "Empty";
   }
 
   // ── rows ──
@@ -482,7 +551,9 @@ export default function Explorer() {
     const fval = (f: FileRow): string | number => {
       if (sort.key === "size") return f.size ?? 0;
       if (sort.key === "updated") return f.updated_at ?? f.updated ?? "";
-      if (sort.key === "kind") return classify(f.name, f.mime);
+      // Sort by what's DISPLAYED: classify() disagrees with the Kind column
+      // (csv sorts as XLSX but shows "CSV table"), so sort the label itself.
+      if (sort.key === "kind") return displayKind(f.name, f.mime);
       return f.name.toLowerCase();
     };
     const sortFiles = (list: FileRow[]) => [...list].sort((a, b) => { const va = fval(a), vb = fval(b); return (va < vb ? -1 : va > vb ? 1 : 0) * dir; });
@@ -499,7 +570,7 @@ export default function Explorer() {
       expandable: files.some((x) => x.google_parent_id === f.google_file_id) });
 
     if (nav.kind === "bin") return [];
-    if (nav.kind === "recent") return sortFiles(files.filter((f) => !isGFolder(f))).sort((a, b) => String(b.updated_at ?? b.updated ?? "").localeCompare(String(a.updated_at ?? a.updated ?? ""))).slice(0, 50).map((f) => fileRowOf(f, 0));
+    if (nav.kind === "recent") return sortFiles(files.filter((f) => !isGFolder(f))).sort((a, b) => String(b.updated_at ?? b.updated ?? "").localeCompare(String(a.updated_at ?? a.updated ?? ""))).slice(0, RECENT_LIMIT).map((f) => fileRowOf(f, 0));
     if (nav.kind === "docs") return sortFiles(files.filter((f) => !isGFolder(f) && DOC_KINDS.includes(classify(f.name, f.mime)))).map((f) => fileRowOf(f, 0));
     // Drive tree view: one account's Google folders/files from the index.
     // Top level = children of the account's configured root ONLY. A folder
@@ -531,8 +602,12 @@ export default function Explorer() {
     }
     if (q.trim()) {
       const n = q.trim().toLowerCase();
-      return [...sortFolders(folders.filter((f) => f.name.toLowerCase().includes(n))).map((f) => folderRowOf(f, 0)),
-        ...sortFiles(files.filter((f) => !isGFolder(f) && f.name.toLowerCase().includes(n))).map((f) => fileRowOf(f, 0)),
+      // Text search never silently drops the department filter: when a dept
+      // is active the query intersects it (previously the dept was ignored
+      // the moment you typed, showing other departments' files).
+      const inDept = (d: string | null) => !tagFilter || d === tagFilter;
+      return [...sortFolders(folders.filter((f) => f.name.toLowerCase().includes(n) && inDept(deptOf(f.id)))).map((f) => folderRowOf(f, 0)),
+        ...sortFiles(files.filter((f) => !isGFolder(f) && f.name.toLowerCase().includes(n) && inDept(deptOf(f.folder)))).map((f) => fileRowOf(f, 0)),
         ...sortFiles(files.filter((f) => isGFolder(f) && f.name.toLowerCase().includes(n))).map((f) => gFolderRowOf(f, 0))];
     }
     if (tagFilter) {
@@ -593,10 +668,10 @@ export default function Explorer() {
   function go(n: Nav) {
     setHist((h) => [...h.slice(0, hi + 1), n]);
     setHi((i) => i + 1);
-    setSelKey(null); setInfoOpen(false); setCtx(null); setTagFilter(null); setQ("");
+    clearSel(); setInfoOpen(false); setCtx(null); setTagFilter(null); setQ("");
   }
-  function back() { if (hi > 0) { setHi(hi - 1); setSelKey(null); } }
-  function forward() { if (hi < hist.length - 1) { setHi(hi + 1); setSelKey(null); } }
+  function back() { if (hi > 0) { setHi(hi - 1); clearSel(); } }
+  function forward() { if (hi < hist.length - 1) { setHi(hi + 1); clearSel(); } }
 
   function open(r: Row) {
     if (r.kind === "folder") {
@@ -619,20 +694,25 @@ export default function Explorer() {
   function toggleExpand(id: string) {
     setExpanded((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   }
-  // View switches collapse the tree when entering grid — even overriding a
-  // manual expand — but entering list never touches it: whatever you
-  // collapsed (or left open) is exactly how you find it when you come back.
-  // Both views read the same state, so they can never disagree.
+  // View switches never touch expansion: both views read the same `expanded`
+  // state, so list → grid → list finds the tree exactly how you left it.
   function switchView(v: View) {
     if (v === view) return;
-    if (v === "grid") setExpanded(new Set());
     setView(v);
   }
   function onRowKey(e: React.KeyboardEvent, r: Row) {
     if (e.key === "Enter") open(r);
-    else if (e.key === " ") { e.preventDefault(); setSelKey(r.key); }
+    else if (e.key === " ") { e.preventDefault(); setSelKey(r.key); setMulti([]); }
     else if (e.key === "ArrowRight" && r.kind === "folder" && !expanded.has(r.id)) toggleExpand(r.id);
     else if (e.key === "ArrowLeft" && r.kind === "folder" && expanded.has(r.id)) toggleExpand(r.id);
+    // Keyboard route to the right-click menu (Shift+F10 / Menu key): rows
+    // were pointer-only, locking out keyboard and screen-reader users.
+    else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+      e.preventDefault();
+      const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      setSelKey(r.key);
+      setCtx({ x: Math.min(box.left + 40, window.innerWidth - 200), y: Math.min(box.bottom + 4, window.innerHeight - 260), row: r });
+    }
   }
 
   // Click selection: plain = single, Ctrl/Cmd = toggle, Shift = range from anchor.
@@ -671,14 +751,19 @@ export default function Explorer() {
 
   async function bulkTrash() {
     setConfirmBulk(false);
-    if (!selRows.length) return;
+    if (!selRows.length || bulkBusy) return;
+    setBulkBusy(true);
+    // Live Google rows (g:) are counted in the selection but can only be
+    // trashed from the drive tree — say so instead of silently skipping.
+    const skippedLive = [...selSet].filter((k) => k.startsWith("g:")).length;
     let ok = 0;
     for (const r of selRows) {
       const res = await fetch("/api/drive/trash", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: r.id }) });
       if (res.ok) ok++;
     }
     clearSel();
-    toast({ text: ok === selRows.length ? `${ok} file${ok === 1 ? "" : "s"} moved to Recovery Bin.` : `${ok}/${selRows.length} trashed — the rest failed.`, tone: ok ? "ok" : "err" });
+    setBulkBusy(false);
+    toast({ text: `${ok} file${ok === 1 ? "" : "s"} moved to Recovery Bin.${skippedLive ? ` ${skippedLive} live Google row${skippedLive === 1 ? "" : "s"} skipped — trash those from the drive tree.` : ""}${ok < selRows.length ? ` ${selRows.length - ok} failed.` : ""}`, tone: ok ? "ok" : "err" });
     refreshAll();
   }
 
@@ -693,11 +778,14 @@ export default function Explorer() {
       a.click();
       a.remove();
     }, i * 400));
-    toast({ text: `Downloading ${downs.length} file${downs.length === 1 ? "" : "s"}…`, tone: "ok" });
+    toast({ text: `Downloading ${downs.length} file${downs.length === 1 ? "" : "s"}…${downs.length > 1 ? " if only the first arrives, allow pop-ups for this site and retry." : ""}`, tone: "ok" });
     if (downs.length < selRows.length) toast({ text: "Google-only files were skipped — sync them for a local copy.", tone: "err" });
   }
 
-  // Keyboard shortcuts (ignored while typing, viewing, or editing).
+  // Keyboard shortcuts (ignored while typing, viewing, or editing). No dep
+  // array on purpose: the handler reads fresh selection/page state every
+  // render (re-subscribing a keydown listener is ~free; a stale closure that
+  // trashes the wrong files is not).
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
@@ -706,7 +794,12 @@ export default function Explorer() {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "c") {
         const f = selRows[0]?.file;
-        if (f) { e.preventDefault(); copyFile(f); }
+        // Single-item clipboard by design: with several selected, copy the
+        // first and say so (previously it copied the first silently).
+        if (f) {
+          e.preventDefault(); copyFile(f);
+          if (selRows.length > 1) toast({ text: `${selRows.length} selected — copied the first (“${f.name}”).`, tone: "info" });
+        }
       } else if (mod && e.key.toLowerCase() === "v") {
         e.preventDefault(); pasteClip();
       } else if (mod && e.key.toLowerCase() === "a") {
@@ -724,14 +817,24 @@ export default function Explorer() {
   });
 
   // ── actions (same endpoints as before) ──
+  const [trashBusy, setTrashBusy] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [clipBusy, setClipBusy] = useState(false);
+  const [usbBusy, setUsbBusy] = useState<string | null>(null);
   async function trash(f: FileRow) {
+    if (trashBusy) return;
+    setTrashBusy(true);
     const r = await fetch("/api/drive/trash", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: f.id }) });
+    setTrashBusy(false);
     if (r.ok) {
       toast({ text: `"${f.name}" moved to Recovery Bin (90 days).`, tone: "ok" });
       setFiles((p) => p.filter((x) => x.id !== f.id));
       setSelKey(null);
       refreshAll();
-    } else toast({ text: "Trash failed. Try again.", tone: "err" });
+    } else {
+      const d = await r.json().catch(() => ({} as { error?: string }));
+      toast({ text: (d as { error?: string }).error ?? "Trash failed. Try again.", tone: "err" });
+    }
     setConfirmTrash(null);
   }
 
@@ -748,12 +851,14 @@ export default function Explorer() {
     } else { toast({ text: d.error ?? "Couldn't delete the file.", tone: "err" }); setConfirmPurge(null); }
   }
 
-  // Orphan clear (manager card): one click deletes the pre-scope leftovers,
-  // then reloads so the counts — and the card itself — disappear.
+  // Orphan clear (manager card): confirmed, then deletes the pre-scope
+  // leftovers and reloads so the counts — and the card itself — disappear.
   const [clearing, setClearing] = useState(false);
+  const [confirmClearOrphans, setConfirmClearOrphans] = useState(false);
   async function clearOrphans() {
     if (clearing) return;
     setClearing(true);
+    setConfirmClearOrphans(false);
     try {
       const r = await fetch("/api/drive/clear-orphans", { method: "POST" });
       const d = await r.json().catch(() => ({}));
@@ -767,10 +872,17 @@ export default function Explorer() {
     }
   }
 
+  const [restoreBusy, setRestoreBusy] = useState<string | null>(null);
   async function restore(id: string, name: string) {
+    if (restoreBusy) return;
+    setRestoreBusy(id);
     const r = await fetch("/api/drive/restore", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: id }) });
+    setRestoreBusy(null);
     if (r.ok) { toast({ text: `"${name}" restored.`, tone: "ok" }); setSelKey(null); refreshAll(); }
-    else toast({ text: "Restore needs a Manager account.", tone: "err" });
+    else {
+      const d = await r.json().catch(() => ({} as { error?: string }));
+      toast({ text: (d as { error?: string }).error ?? "Restore failed.", tone: "err" });
+    }
   }
 
   async function createFolder(e: React.FormEvent) {
@@ -804,6 +916,13 @@ export default function Explorer() {
   async function uploadPicked(list: FileList | null) {
     const files = list ? Array.from(list) : [];
     if (!files.length) return;
+    // One batch at a time: the picker, drag-drop and canvas button all funnel
+    // here — a second batch mid-flight used to race the queue.
+    if (uploadActive) {
+      toast({ text: "An upload is already running — wait for it to finish.", tone: "err" });
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     // Inside a drive view the drive itself is the destination, so the
     // toggles can't leave you destination-less — otherwise require one.
     if (supaOff && mirrorOff && !inDriveView) {
@@ -811,45 +930,116 @@ export default function Explorer() {
       if (fileRef.current) fileRef.current.value = "";
       return;
     }
+    const dest = inDriveView && driveView
+      ? (accounts.find((a) => a.id === driveView.accountId)?.label ?? "Drive")
+      : supaOff ? "Drive" : "Supabase";
+    // Fast availability pre-check (the backend re-validates fresh anyway):
+    // fail the batch BEFORE hashing/transferring when the pinned drive is
+    // gone or disabled — e.g. disabled after this page loaded its list.
+    const pinnedDrive = inDriveView && driveView ? driveView.accountId : (!supaOff && !mirrorOff ? driveSel || null : null);
+    if (pinnedDrive) {
+      const tgt = accounts.find((a) => a.id === pinnedDrive);
+      if (!tgt || tgt.status !== "active") {
+        toast({ text: `The chosen drive${tgt?.label ? ` (“${tgt.label}”)` : ""} isn't available — pick another drive or use Auto.`, tone: "err" });
+        if (fileRef.current) fileRef.current.value = "";
+        return;
+      }
+    }
+    const batch = files.map((f) => ({
+      key: ++upSeq.current, name: f.name, size: f.size, mime: f.type || "application/octet-stream",
+      status: "hashing" as UploadStatus, pct: null as number | null, dest,
+    }));
+    setUploadItems(batch);
+    setUploadPanelMin(false);
+    upCancelAll.current = false;
     let ok = 0;
-    for (const file of files) {
-      setUploading(files.length > 1 ? `${file.name} (${ok + 1}/${files.length})` : file.name);
+    for (let bi = 0; bi < files.length; bi++) {
+      const file = files[bi];
+      const key = batch[bi].key;
+      if (upCancelAll.current) { setItem(key, { status: "error", error: "cancelled" }); continue; }
       try {
-        const hash = await sha256(file);
-        // Supabase off: bytes ride the request straight into Drive (≤50 MB —
-        // the same server cap as the mirror path). No Storage copy exists, so
-        // there is nothing to USB-queue or version from Storage later.
+        // Size gate BEFORE hashing: sha256 buffers the whole file — rejecting
+        // a huge pick after a long hash is the OOM/timeout the cap exists to prevent.
+        if (supaOff && file.size > RESUMABLE_MAX) throw new Error("over 2 GB — Drive uploads top out at 2 GB");
+        if (!supaOff && file.size > 100 * 1024 * 1000) throw new Error("over 100 MB — the server refuses it (Storage cap)");
+        // Supabase off: resumable direct-to-Google for EVERY size (one
+        // consistent path — no Supabase bytes at any stage, small or large).
+        // Hashing a multi-GB file would buffer it all in the tab, so the
+        // hash is best-effort here (advisory only: versions accept "").
         if (supaOff) {
-          if (file.size > 50 * 1024 * 1024) throw new Error("over 50 MB — turn Supabase on for big files");
-          const fd = new FormData();
-          fd.set("file", file, file.name);
-          fd.set("name", file.name);
-          fd.set("mime", file.type || "application/octet-stream");
-          fd.set("hash", hash);
-          // Inside a drive view the file belongs to THAT drive folder — not
-          // the mirror picker, not a workspace folder.
+          let hash: string | null = null;
+          try { hash = await sha256(file); } catch { hash = null; }
+          if (upCancelAll.current) throw new Error("cancelled");
+          // Initiate: the server authorizes (auth, active drive, dept folder,
+          // scope, quota) and mints a Google session bound to this metadata.
+          const initBody: Record<string, unknown> = {
+            name: file.name, mime: file.type || "application/octet-stream", size: file.size,
+          };
+          if (hash) initBody.hash = hash;
           if (inDriveView && driveView) {
-            fd.set("drive_account", driveView.accountId);
-            if (driveView.folderId) fd.set("google_parent", driveView.folderId);
+            initBody.drive_account = driveView.accountId;
+            if (driveView.folderId) initBody.google_parent = driveView.folderId;
+            initBody.folder = null;
           } else {
-            if (curFolder) fd.set("folder", curFolder);
-            if (driveSel) fd.set("drive_account", driveSel);
+            if (curFolder) initBody.folder = curFolder;
+            if (driveSel) initBody.drive_account = driveSel;
           }
-          const direct = await fetch("/api/drive/upload-direct", { method: "POST", body: fd });
-          const dd = await direct.json().catch(() => ({}));
-          if (!direct.ok) throw new Error(dd.error ?? "direct upload failed");
-          ok++;
+          const init = await fetch("/api/drive/resumable/init", {
+            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(initBody),
+          });
+          const sess = await init.json().catch(() => ({}));
+          if (!init.ok || !sess.sessionUri) throw new Error(sess.error ?? "couldn't start the Google upload");
+          if (upCancelAll.current) {
+            void cancelResumableSession(sess.sessionUri as string);
+            throw new Error("cancelled");
+          }
+          setItem(key, { status: "uploading", pct: 0 });
+          const ctl = new AbortController();
+          upAbort.current = ctl;
+          upSessionUri.current = sess.sessionUri as string;
+          let driveFileId: string;
+          try {
+            const resource = await uploadResumable(sess.sessionUri as string, file, {
+              signal: ctl.signal,
+              onProgress: (confirmed, total) => setItem(key, { pct: (confirmed / total) * 100 }),
+            });
+            driveFileId = resource.id;
+          } finally {
+            upSessionUri.current = null;
+          }
+          if (upCancelAll.current) throw new Error("cancelled");
+          // Register: the server re-verifies the landed file against Google
+          // (size/parents/scope, drive still active) before indexing it.
+          setItem(key, { status: "indexing", pct: null });
+          const done = await fetch("/api/drive/resumable/complete", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              driveFileId, accountId: sess.accountId as string,
+              ...(initBody.folder ? { folder: initBody.folder } : {}),
+              ...(hash ? { hash } : {}),
+            }),
+          });
+          const dj = await done.json().catch(() => ({}));
+          if (!done.ok) throw new Error(dj.error ?? "couldn't register the upload");
+          setItem(key, { status: "done", pct: 100 });
           if (inDriveView && driveView) await loadTree(driveView.accountId);
           continue;
         }
-        const init = await fetch("/api/drive/upload-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size }) });
+        const hash = await sha256(file);
+        if (upCancelAll.current) throw new Error("cancelled");
+        // The init call carries the intended mirror target so the server can
+        // refuse an unavailable drive BEFORE bytes move (register re-checks).
+        // Local-only uploads (mirror off) pin nothing — validating the unused
+        // picker drive would wrongly fail them.
+        const initDrive = inDriveView && driveView ? driveView.accountId : (!mirrorOff ? (driveSel || undefined) : undefined);
+        const init = await fetch("/api/drive/upload-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, ...(initDrive ? { drive_account: initDrive } : {}) }) });
         const dj = await init.json();
         if (!init.ok) throw new Error(dj.error ?? "upload init failed");
-        const put = await fetch(dj.signedUrl, { method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file,
-          // Bytes stall forever on dead networks without this — 10 min is
-          // generous (100 MB max ≈ 1.3 Mbps floor) and fails loudly instead.
-          signal: AbortSignal.timeout(600_000) });
-        if (!put.ok) throw new Error("byte upload failed");
+        if (upCancelAll.current) throw new Error("cancelled");
+        setItem(key, { status: "uploading", pct: 0 });
+        await putWithProgress(dj.signedUrl, file, file.type || "application/octet-stream", key);
+        if (upCancelAll.current) throw new Error("cancelled");
+        setItem(key, { status: "indexing", pct: null });
         const meta = await fetch("/api/drive/upload", {
           method: "POST", headers: { "content-type": "application/json" },
           // Inside a drive view the bytes mirror into THAT drive folder (the
@@ -865,15 +1055,18 @@ export default function Explorer() {
         if (mj.push_error) toast({ text: `"${file.name}" saved locally — Google mirror skipped: ${mj.push_error}`, tone: "err" });
         if (mj.usb_queued === true) toast({ text: `"${file.name}" queued for office-USB copy (agent picks it up).`, tone: "ok" });
         else if (typeof mj.usb_queued === "string") toast({ text: `"${file.name}" USB queue failed: ${mj.usb_queued}`, tone: "err" });
+        setItem(key, { status: "done", pct: 100 });
         ok++;
       } catch (e) {
-        toast({ text: `"${file.name}": ${e instanceof Error ? e.message : "upload failed."}`, tone: "err" });
+        // Aborts surface as DOMExceptions — report the honest word instead.
+        const msg = upCancelAll.current ? "cancelled" : e instanceof Error ? e.message : "upload failed.";
+        setItem(key, { status: "error", error: msg });
       }
     }
-    setUploading(null);
+    upAbort.current = null;
     if (fileRef.current) fileRef.current.value = "";
-    if (ok === files.length) toast({ text: files.length === 1 ? `"${files[0].name}" uploaded and indexed.` : `${ok} files uploaded and indexed.`, tone: "ok" });
-    else if (ok > 0) toast({ text: `${ok}/${files.length} uploaded — the rest failed.`, tone: "err" });
+    // The panel is the summary now (its header is a live region) — no
+    // end-of-batch toast to double-announce it.
     load(q);
   }
 
@@ -921,7 +1114,7 @@ export default function Explorer() {
       // the server names (nextAccountId). One page per request per account —
       // no request ever walks a whole drive (HTTP 502-proof).
       const accts = accounts.length ? accounts : [{ id: "", label: "Primary" }];
-      let ins = 0, upd = 0, pages = 0;
+      let ins = 0, upd = 0, pages = 0, swept = 0;
       const labels: string[] = [];
       for (const a of accts) {
         let token: string | null = null;
@@ -929,9 +1122,9 @@ export default function Explorer() {
           const body: { pageToken: string | null; accountId?: string } = { pageToken: token };
           if (a.id) body.accountId = a.id;
           const r: Response = await fetch("/api/drive/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-          const d: { inserted?: number; updated?: number; done?: boolean; nextPageToken?: string | null; nextAccountId?: string | null; accountLabel?: string; error?: string } = await r.json().catch(() => ({}));
+          const d: { inserted?: number; updated?: number; sweptDeleted?: number; sweptUnpinned?: number; done?: boolean; nextPageToken?: string | null; nextAccountId?: string | null; accountLabel?: string; error?: string } = await r.json().catch(() => ({}));
           if (!r.ok) { toast({ text: d.error ?? "Sync failed.", tone: "err" }); return; }
-          ins += d.inserted ?? 0; upd += d.updated ?? 0; pages++;
+          ins += d.inserted ?? 0; upd += d.updated ?? 0; swept += (d.sweptDeleted ?? 0) + (d.sweptUnpinned ?? 0); pages++;
           if (d.accountLabel && !labels.includes(d.accountLabel)) labels.push(d.accountLabel);
           if (d.done) break;
           // Server-driven hop: done with this account but another remains.
@@ -940,7 +1133,7 @@ export default function Explorer() {
           if (!token) break;
         }
       }
-      toast({ text: `Google sync done${labels.length ? ` (${labels.join(" + ")})` : ""}: ${ins} new, ${upd} updated (${pages} page${pages === 1 ? "" : "s"}).`, tone: "ok" });
+      toast({ text: `Google sync done${labels.length ? ` (${labels.join(" + ")})` : ""}: ${ins} new, ${upd} updated${swept ? `, ${swept} gone from Drive retired` : ""} (${pages} page${pages === 1 ? "" : "s"}).`, tone: "ok" });
       refreshAll();
     } finally {
       setSyncing(false);
@@ -987,17 +1180,35 @@ export default function Explorer() {
     if (nav.kind !== "root" || nav.path.length) go({ kind: "root", path: [] });
     setTagSel([]); setTagFilter(null); setQ("");
     setDriveView({ accountId, folderId: null, path: [] });
-    setSelKey(null); setInfoOpen(false); setCtx(null);
+    clearSel(); setInfoOpen(false); setCtx(null);
     setLoadError(null);
   }
-  const taggable = (r: Row) => (r.kind === "file" ? !r.id.startsWith("g:") : !r.id.startsWith("gdrive:"));
-  const rowTags = (r: Row): Tag[] => taggable(r) ? tg.idsOf(r.kind, r.id).map((id) => tg.byId.get(id)).filter(Boolean) as Tag[] : [];
+  // Tag addressing: WHAT gets the tag. Local folders tag the folders-table row;
+  // Google Drive folders are file_index rows (folder mime), so they tag as
+  // kind "file" with the index id — tagging them as kind "folder" 404s (wrong
+  // table) and their dots never render. Drive-tree rows carry the index id
+  // explicitly; live (unsynced) rows have nothing to attach to → null.
+  function tagTarget(r: Row): { kind: TagKind; id: string } | null {
+    if (r.kind === "file" && r.file && !r.id.startsWith("g:")) return { kind: "file", id: r.file.id };
+    if (r.kind === "folder" && r.googleFolder && r.file) return { kind: "file", id: r.file.id };
+    if (r.kind === "folder" && r.folder) return { kind: "folder", id: r.folder.id };
+    if (r.indexId) return { kind: "file", id: r.indexId };
+    return null;
+  }
+  const taggable = (r: Row) => tagTarget(r) !== null;
+  const rowTags = (r: Row): Tag[] => {
+    const t = tagTarget(r);
+    return t ? tg.idsOf(t.kind, t.id).map((id) => tg.byId.get(id)).filter(Boolean) as Tag[] : [];
+  };
   function toggleTagFilter(id: string) {
     setDriveView(null);
     setTagFilter(null);
     if (nav.kind !== "root") go({ kind: "root", path: [] });
     setTagSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
-    setSelKey(null);
+    // Tag search and text search shadow each other (rows pick one branch) —
+    // clear the query so enabling a tag can't silently hide behind it.
+    setQ("");
+    clearSel();
   }
 
   function copyFile(f: FileRow, cut = false) {
@@ -1008,15 +1219,18 @@ export default function Explorer() {
   }
 
   async function copyToUsb(r: Row) {
-    if (!r.file) return;
+    if (!r.file || usbBusy) return;
+    setUsbBusy(r.id);
     const res = await fetch("/api/drive/usb", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: r.id }) });
     const d = await res.json().catch(() => ({}));
+    setUsbBusy(null);
     if (!res.ok) toast({ text: d.error ?? "Couldn't queue USB copy.", tone: "err" });
     else toast({ text: `"${r.name}" queued for office-USB copy (agent picks it up).`, tone: "ok" });
   }
 
   async function pasteClip() {
-    if (!clip) return;
+    if (!clip || clipBusy) return;
+    setClipBusy(true);
     // Cut = move (relocate, nothing duplicated); copy = duplicate. Inside a
     // drive view both land in the open Google folder; otherwise the workspace
     // folder you're standing in.
@@ -1034,6 +1248,7 @@ export default function Explorer() {
       body: JSON.stringify(body)
     });
     const d = await r.json().catch(() => ({}));
+    setClipBusy(false);
     if (!r.ok) { toast({ text: d.error ?? (cut ? "Couldn't move." : "Couldn't paste."), tone: "err" }); return; }
     if (cut) { setClip(null); try { localStorage.removeItem("eiden-clip"); } catch { /* ignore */ } }
     toast({ text: cut ? `Moved "${clip.name}".` : `Pasted as "${d.name}".`, tone: "ok" });
@@ -1189,7 +1404,7 @@ export default function Explorer() {
             {deptOpen && (
               <div className="flex flex-col gap-0.5 shrink-0">
                 {depts.map((d) => (
-                  <button key={d} onClick={() => { if (tagFilter === d) setTagFilter(null); else { setTagSel([]); setDriveView(null); if (nav.kind !== "root" || nav.path.length) go({ kind: "root", path: [] }); setTagFilter(d); setSelKey(null); } }}
+                  <button key={d} onClick={() => { if (tagFilter === d) setTagFilter(null); else { setTagSel([]); setDriveView(null); if (nav.kind !== "root" || nav.path.length) go({ kind: "root", path: [] }); setTagFilter(d); setQ(""); clearSel(); } }}
                     aria-pressed={tagFilter === d}
                     className={`w-full min-h-[44px] pl-3 pr-3 rounded-md flex items-center gap-3 text-[14.5px] text-left transition-colors ${tagFilter === d ? "bg-tint text-brand font-medium" : "text-ink/85 hover:bg-tint/60"}`}>
                     <span className="size-3 rounded-sm shrink-0" style={{ background: tagColor(d) ?? undefined }} />
@@ -1210,7 +1425,7 @@ export default function Explorer() {
           <span className="h-5 border-l border-line mx-1" />
           <button onClick={back} disabled={hi === 0} aria-label="Back" className="size-11 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronLeft size={18} /></button>
           <button onClick={forward} disabled={hi >= hist.length - 1} aria-label="Forward" className="size-11 grid place-items-center rounded-md bg-tint text-brand disabled:opacity-40"><ChevronRight size={18} /></button>
-          <h2 className="ml-2 text-[16px] text-ink/90 truncate max-w-[40%]">{title}</h2>
+          <h2 title={title} className="ml-2 text-[16px] text-ink/90 truncate max-w-[40%]">{title}</h2>
 
           <div className="ml-auto flex items-center gap-1.5">
             <div className="relative">
@@ -1228,10 +1443,10 @@ export default function Explorer() {
             <span className="h-5 border-l border-line mx-0.5" />
             {/* Upload: action + destination picker (Supabase, Drive, USB — each toggleable). */}
             <div className="flex items-stretch h-11 rounded-lg bg-brand text-white shadow-[0_1px_2px_rgba(60,30,140,.3)]">
-              <button onClick={() => fileRef.current?.click()} disabled={!!uploading || (supaOff && mirrorOff && !inDriveView)}
+              <button onClick={() => fileRef.current?.click()} disabled={uploadActive || (supaOff && mirrorOff && !inDriveView)}
                 title={destSummary()}
                 className="px-3.5 flex items-center gap-2 text-[13.5px] font-medium hover:bg-white/12 active:bg-white/20 disabled:opacity-60 transition-colors rounded-l-lg">
-                <Upload size={16} strokeWidth={2.2} /> <span className="hidden sm:inline">{uploading ? "Uploading…" : "Upload"}</span>
+                {uploadActive ? <Ring className="size-4" /> : <Upload size={16} strokeWidth={2.2} />} <span className="hidden sm:inline">{uploadActive ? "Uploading…" : "Upload"}</span>
               </button>
               <span className="my-2.5 w-px bg-white/30" aria-hidden="true" />
               <Menu label="Choose upload destinations" align="right" rootClassName="h-full"
@@ -1268,7 +1483,7 @@ export default function Explorer() {
               items={[
                 { label: "New folder", icon: <FolderPlus size={14} />, onSelect: () => setShowNewFolder(true), hidden: nav.kind !== "root" },
                 "sep",
-                { label: syncing ? "Syncing from Google…" : "Sync from Google", icon: <CloudDownload size={14} />, onSelect: syncGoogle },
+                { label: syncing ? "Syncing from Google…" : "Sync from Google", icon: syncing ? <Ring className="size-3.5" /> : <CloudDownload size={14} />, disabled: syncing, onSelect: syncGoogle },
                 { label: "Refresh", icon: <RefreshCw size={14} />, onSelect: () => load(q) },
                 "sep",
                 { label: "Also copy uploads to office USB", hint: supaOff ? "Needs Supabase on" : undefined, icon: usbTarget ? <Check size={14} /> : undefined, disabled: supaOff, onSelect: toggleUsb }
@@ -1312,10 +1527,19 @@ export default function Explorer() {
                 ))}
               </div>
             )}
+            {/* Searching while a drive is open searches ALL files (the drive
+                filter needs an empty query): say so, or uploads land somewhere
+                the user isn't looking. Clear the search to return to the drive. */}
+            {!loading && driveView && nav.kind === "root" && !!q.trim() && (
+              <div className="shrink-0 mx-3 mt-2 px-3 py-2 rounded-lg border border-line bg-soft text-[12.5px] text-ink/80" role="status">
+                Searching all files — not just this drive.{" "}
+                <button onClick={() => setQ("")} className="text-brand font-medium hover:underline min-h-[32px]">Clear to return to the drive</button>
+              </div>
+            )}
             {driveView && treeError && !treeLoading && (
               <div className="shrink-0 mx-3 mt-2 p-3 rounded-lg border border-danger/40 bg-danger/5 text-[13px]" role="alert">
                 <strong>Couldn't load this drive's folders:</strong> {treeError}{" "}
-                <button onClick={() => openDrive(driveView.accountId)} className="text-brand font-medium hover:underline min-h-[36px]">Retry</button>
+                <button onClick={() => loadTree(driveView.accountId)} className="text-brand font-medium hover:underline min-h-[36px]">Retry</button>
               </div>
             )}
             {!driveView && orphanCount > 0 && (
@@ -1325,7 +1549,7 @@ export default function Explorer() {
                   Clear them, then run <strong>Sync from Google</strong> (More actions menu) to rebuild the index inside the current scope.
                 </p>
                 <p className="mt-1 text-muted">Clear deletes the orphan rows and detaches their audit history. Storage bytes are kept. Drive bytes are never touched.</p>
-                <button onClick={clearOrphans} disabled={clearing}
+                <button onClick={() => setConfirmClearOrphans(true)} disabled={clearing}
                   className="mt-2 min-h-[40px] px-4 rounded-md bg-brand text-white text-[13px] font-medium disabled:opacity-60 hover:brightness-110 active:brightness-95 transition">
                   {clearing ? "Clearing…" : `Clear ${orphanCount} leftover${orphanCount === 1 ? "" : "s"} now`}
                 </button>
@@ -1352,16 +1576,9 @@ export default function Explorer() {
                 </div>
               )}
               {loading || (driveView && treeLoading) ? (
-                <div aria-busy="true" aria-label="Loading files" className="p-4 flex flex-col gap-2">
-                  {Array.from({ length: 8 }).map((_, i) => (
-                    <div key={i} className="flex items-center gap-3">
-                      <span className="skel size-6 shrink-0" />
-                      <span className="skel h-4 flex-1" />
-                      <span className="skel h-4 w-16 hidden md:block" />
-                      <span className="skel h-4 w-20 hidden md:block" />
-                    </div>
-                  ))}
-                  <span className="sr-only" role="status">Reading drive…</span>
+                <div aria-busy="true" aria-label="Loading files" className="flex-1 min-h-[300px] flex flex-col items-center justify-center gap-4 p-8">
+                  <SparkleLoader size={84} label="Reading drive" />
+                  <p className="text-[13px] text-muted" role="status">Reading drive…</p>
                 </div>
               ) : loadError ? (
                 <div className="h-full min-h-[260px] grid place-items-center p-8 text-center" role="alert">
@@ -1388,7 +1605,7 @@ export default function Explorer() {
                             <FileIcon name={fi?.name ?? ""} mime={fi?.mime} size={26} />
                             <span className="flex-1 truncate">{fi?.name}</span>
                             <span className="text-[11px] text-muted hidden sm:block">purges {fmtDate(b.purge_at)}</span>
-                            <button onClick={(e) => { e.stopPropagation(); restore(b.file_id, fi?.name ?? "?"); }} className="min-h-[44px] px-2 text-[12px] text-brand flex items-center gap-1 hover:underline"><Undo2 size={14} /> Restore</button>
+                            <button onClick={(e) => { e.stopPropagation(); restore(b.file_id, fi?.name ?? "?"); }} disabled={restoreBusy === b.file_id} className="min-h-[44px] px-2 text-[12px] text-brand flex items-center gap-1 hover:underline disabled:opacity-60">{restoreBusy === b.file_id ? <Ring className="size-3.5" /> : <Undo2 size={14} />} Restore</button>
                             {canPurge && <button onClick={(e) => { e.stopPropagation(); setConfirmPurge({ id: b.file_id, name: fi?.name ?? "file" }); }} aria-label={`Delete ${fi?.name ?? "file"} permanently`} title="Delete permanently" className="size-11 grid place-items-center rounded-md text-muted hover:text-danger hover:bg-danger/10 transition-colors"><Trash2 size={16} /></button>}
                           </li>
                         );
@@ -1399,7 +1616,7 @@ export default function Explorer() {
                 <EmptyState title={q ? "No matches" : "This folder is empty"} body={q ? "Clear the search or try a different name." : "Upload a file or create a folder to get started."}
                   action={!q && nav.kind === "root" ? { label: "Upload file", onClick: () => fileRef.current?.click() } : undefined} />
               ) : view === "list" ? (
-                <div role="grid" aria-label={`${rows.length} items`} className="min-w-[420px]">
+                <div role="grid" aria-label={`${rows.length} items`} aria-rowcount={rows.length + 1} className="min-w-[420px]">
                   <div role="row" className="frow sticky top-0 z-10 h-10 px-4 bg-head text-[15px] text-ink/90 border-y border-line">
                     <button role="columnheader" aria-sort={ariaSort("name")} onClick={(e) => { e.stopPropagation(); sortBy("name"); }} className="text-left flex items-center gap-1 pl-[26px]">Name {arrow("name")}</button>
                     <span role="columnheader" className="frow-hide">Tags</span>
@@ -1430,9 +1647,9 @@ export default function Explorer() {
                         </div>
                         <div role="gridcell" className="frow-hide"><TagDots tags={rowTags(r)} /></div>
                         <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{locText(r)}</div>
-                        <div role="gridcell" className="text-[11px] text-ink/75 truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : "--"}</div>
-                        <div role="gridcell" className="text-[11px] text-ink/75 tabular-nums">{r.kind === "folder" ? folderSize(r) : (r.file?.size ? formatBytes(r.file.size) : "--")}</div>
-                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.kind === "folder" ? "Folder" : (r.file ? kindLabel(r.file.name, cls, r.file.mime) : "--")}</div>
+                        <div role="gridcell" className="text-[11px] text-ink/75 truncate">{r.file ? fmtDate(r.file.updated_at ?? r.file.updated) : "—"}</div>
+                        <div role="gridcell" className="text-[11px] text-ink/75 tabular-nums">{r.kind === "folder" ? folderSize(r) : (r.file?.size ? formatBytes(r.file.size) : "—")}</div>
+                        <div role="gridcell" className="frow-hide text-[11px] text-ink/75 truncate">{r.kind === "folder" ? "Folder" : (r.file ? displayKind(r.file.name, r.file.mime) : "—")}</div>
                       </div>
                     );
                   })}
@@ -1447,7 +1664,9 @@ export default function Explorer() {
                     // the files begin — otherwise the two sections butt together.
                     const filesBreak = thumbs && !folder && ri > 0 && pg.pageItems[ri - 1].kind === "folder";
                     return (
-                      <Fragment key={r.key}>
+                      // role=row with display:contents keeps gridcell ownership
+                      // valid for AT without changing the CSS grid layout.
+                      <div key={r.key} role="row" style={{ display: "contents" }}>
                       {filesBreak && (
                         <div aria-hidden="true" className="flex items-center gap-2 px-1 pt-3 pb-1" style={{ gridColumn: "1 / -1" }}>
                           <span className="text-[11px] font-medium uppercase tracking-wider text-muted">Files</span>
@@ -1463,10 +1682,10 @@ export default function Explorer() {
                         {thumbs && r.file
                           ? <FileThumb file={r.file} size={72} />
                           : <FileIcon name={r.name} mime={r.file?.mime} folder={folder} size={64} />}
-                        <span className="text-[12.5px] leading-tight break-all line-clamp-2">{r.name}</span>
+                        <span title={r.name} className="text-[12.5px] leading-tight break-all line-clamp-2">{r.name}</span>
                         {rowTags(r).length > 0 && <TagDots tags={rowTags(r)} />}
                       </button>
-                      </Fragment>
+                      </div>
                     );
                   })}
                 </div>
@@ -1475,14 +1694,15 @@ export default function Explorer() {
                 <div ref={moreRef} aria-hidden="true" className="h-1 shrink-0" />
               )}
               {loadingMore && (
-                <div className="p-4 grid place-items-center" role="status">
+                <div className="p-4 flex items-center justify-center gap-3" role="status">
+                  <Dots className="w-12 text-brand" label="Loading more files" />
                   <p className="text-[13px] text-muted">Loading more…</p>
                 </div>
               )}
             </div>
             <div className="shrink-0 border-t border-line px-3 empty:hidden"><Pagination pager={nav.kind === "bin" ? binPg : pg} noun={nav.kind === "bin" ? "files" : "items"} /></div>
             <p className="shrink-0 h-8 px-4 flex items-center text-[11px] text-muted border-t border-line" role="status">
-              {nav.kind === "bin" ? `${bin.length} in bin` : `${folderCount} folders · ${fileRows.length} files · ${formatBytes(totalSize)}`}
+              {nav.kind === "bin" ? `${bin.length} in bin` : `${folderCount} folders · ${fileRows.length} files · ${formatBytes(totalSize)}${hasMore && !loading ? " · more below — scroll to load" : ""}`}
             </p>
           </div>
           {/* Bulk action bar */}
@@ -1504,41 +1724,57 @@ export default function Explorer() {
               className="fixed lg:static inset-x-0 bottom-0 z-30 lg:z-auto max-h-[75vh] lg:max-h-none w-full lg:w-[296px] shrink-0 overflow-y-auto bg-surface border-t lg:border-t-0 lg:border-l border-line rounded-t-2xl lg:rounded-none shadow-pop lg:shadow-none p-4 flex flex-col pop-in">
               <button onClick={() => { setSelKey(null); setInfoOpen(false); }} aria-label="Close details" className="self-end -mt-1 -mr-1 mb-1 size-11 grid place-items-center rounded-md hover:bg-tint text-muted"><X size={16} /></button>
               <div className="h-[200px] rounded-lg border border-line bg-soft grid place-items-center overflow-hidden">
-                {sel.file && classify(sel.file.name, sel.file.mime) === "IMAGE" && !sel.id.startsWith("g:")
-                  // eslint-disable-next-line @next/next/no-img-element
-                  ? <img src={`/api/drive/download?file_id=${sel.id}`} alt={`Preview of ${sel.name}`} loading="lazy" className="max-h-full max-w-full object-contain" />
+                {/* Same cover pipeline as the grid (signed-URL flow + Google
+                    thumbs): the old bare download URL 403'd Storage images. */}
+                {sel.file && (classify(sel.file.name, sel.file.mime) === "IMAGE" || classify(sel.file.name, sel.file.mime) === "VIDEO") && !sel.id.startsWith("g:")
+                  ? <FileThumb file={sel.file} size={196} />
                   : <FileIcon name={sel.name} mime={sel.file?.mime} folder={sel.kind === "folder"} size={132} />}
               </div>
               <div className="mt-3 flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-[13px] font-medium break-all">{sel.name}</p>
-                  <p className="text-[11px] text-muted">{sel.kind === "folder" ? "Folder" : (sel.file ? kindLabel(sel.file.name, classify(sel.file.name, sel.file.mime), sel.file.mime) : "Folder")}</p>
+                  <p className="text-[11px] text-muted">{sel.kind === "folder" ? "Folder" : (sel.file ? displayKind(sel.file.name, sel.file.mime) : "Folder")}</p>
                 </div>
                 {sel.file?.size ? <span className="text-[11px] text-ink/75 shrink-0">{formatBytes(sel.file.size)}</span> : null}
               </div>
               <dl className="mt-3 text-[12px]">
                 {[
-                  ["Modified", sel.file ? fmtDate(sel.file.updated_at ?? sel.file.updated) : "--"],
+                  ["Modified", sel.file ? fmtDate(sel.file.updated_at ?? sel.file.updated) : "—"],
                   ["Location", locText(sel)],
                   ...(sel.file?.accountLabel ? [["Drive", sel.file.accountLabel] as [string, string] ] : []),
-                  ["Owner", sel.file?.owner ? `${sel.file.owner.slice(0, 8)}…` : "--"],
-                  ["SHA-256", sel.file?.hash ? `${sel.file.hash.slice(0, 12)}…` : "--"]
+                  ["Owner", sel.file?.owner ? `${sel.file.owner.slice(0, 8)}…` : "—"],
+                  ["SHA-256", sel.file?.hash ? `${sel.file.hash.slice(0, 12)}…` : "—"]
                 ].map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between gap-3 py-2.5 border-b border-line">
-                    <dt className="text-ink/80">{k} :</dt><dd className="text-[11px] text-ink/75 text-right truncate">{v}</dd>
+                    {/* Full value on hover/long-press + click-to-copy: truncated
+                        ids are useless without a way to recover them. */}
+                    <dt className="text-ink/80">{k} :</dt><dd className="text-[11px] text-ink/75 text-right truncate"
+                      title={(k === "Owner" ? sel.file?.owner : sel.file?.hash) ?? v}
+                      onClick={() => {
+                        const full = k === "Owner" ? sel.file?.owner : sel.file?.hash;
+                        if (full) navigator.clipboard?.writeText(full).then(
+                          () => toast({ text: `${k} copied.`, tone: "ok" }),
+                          () => toast({ text: "Couldn't copy.", tone: "err" }));
+                      }}>{v}</dd>
                   </div>
                 ))}
               </dl>
               <div className="mt-3">
                 <div className="flex items-center justify-between">
                   <p className="text-[12px] text-ink/80">Tags</p>
-                  {taggable(sel) && nav.kind !== "bin" && (
-                    <button onClick={() => setTagPicker({ kind: sel.kind, id: sel.id, name: sel.name })}
-                      className="min-h-[36px] px-2 -mr-2 text-[12px] text-brand font-medium inline-flex items-center gap-1 hover:underline"><Plus size={13} /> Add tag</button>
-                  )}
+                  {(() => {
+                    const t = tagTarget(sel);
+                    return t && nav.kind !== "bin" ? (
+                      <button onClick={() => setTagPicker({ kind: t.kind, id: t.id, name: sel.name })}
+                        className="min-h-[36px] px-2 -mr-2 text-[12px] text-brand font-medium inline-flex items-center gap-1 hover:underline"><Plus size={13} /> Add tag</button>
+                    ) : null;
+                  })()}
                 </div>
                 <div className="mt-1 flex gap-1.5 flex-wrap">
-                  {rowTags(sel).map((t) => <TagChip key={t.id} tag={t} onRemove={nav.kind === "bin" ? undefined : () => tg.assign(sel.kind, sel.id, t.id, false)} />)}
+                  {rowTags(sel).map((t) => {
+                    const tt = tagTarget(sel);
+                    return <TagChip key={t.id} tag={t} onRemove={nav.kind === "bin" || !tt ? undefined : () => tg.assign(tt.kind, tt.id, t.id, false)} />;
+                  })}
                   {rowTags(sel).length === 0 && <span className="text-[11.5px] text-muted">{taggable(sel) ? "No tags yet" : "Tags apply to indexed files"}</span>}
                 </div>
                 {sel.dept && <p className="mt-2 text-[11.5px] text-muted">Department: <span className="text-ink/80">{sel.dept}</span></p>}
@@ -1551,7 +1787,7 @@ export default function Explorer() {
                   <a href={`/api/drive/download?file_id=${sel.id}`} aria-label="Download" className="px-4 min-h-[44px] grid place-items-center hover:text-brand"><Download size={19} strokeWidth={1.6} /></a>
                 )}
                 {sel.kind === "file" && nav.kind === "bin" && (
-                  <button onClick={() => restore(sel.id, sel.name)} aria-label="Restore" className="px-4 min-h-[44px] hover:text-brand"><Undo2 size={19} strokeWidth={1.6} /></button>
+                  <button onClick={() => restore(sel.id, sel.name)} aria-label="Restore" disabled={restoreBusy === sel.id} className="px-4 min-h-[44px] hover:text-brand disabled:opacity-60">{restoreBusy === sel.id ? <Ring className="size-4" /> : <Undo2 size={19} strokeWidth={1.6} />}</button>
                 )}
                 {sel.kind === "file" && nav.kind === "bin" && canPurge && (
                   <button onClick={() => setConfirmPurge({ id: sel.id, name: sel.name })} aria-label="Delete permanently" title="Delete permanently" className="px-4 min-h-[44px] text-muted hover:text-danger"><Trash2 size={19} strokeWidth={1.6} /></button>
@@ -1565,11 +1801,23 @@ export default function Explorer() {
         </div>
       </div>
 
-      {/* Context menu (right-click). Unavailable actions stay visible but disabled
-          with the reason — nothing silently missing, nothing silently dead. */}
+      {/* Context menu (right-click, Shift+F10, or Menu key). Unavailable actions
+          stay visible but disabled with the reason — nothing silently missing,
+          nothing silently dead. Focus lands in the menu; arrows move, Escape closes. */}
       {ctx && (
-        <div role="menu" style={{ left: ctx.x, top: ctx.y }} onClick={(e) => e.stopPropagation()}
-          className="pop-in fixed z-[70] w-[218px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px]">
+        <div role="menu" aria-label={`Actions for ${ctx.row.name}`} style={{ left: ctx.x, top: ctx.y }} onClick={(e) => e.stopPropagation()}
+          ref={(el) => el?.focus()}
+          tabIndex={-1}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") { e.stopPropagation(); setCtx(null); return; }
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            e.preventDefault();
+            const btns = Array.from((e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not([disabled])'));
+            const at = btns.indexOf(document.activeElement as HTMLButtonElement);
+            const next = e.key === "ArrowDown" ? btns[(at + 1) % btns.length] : btns[(at - 1 + btns.length) % btns.length];
+            next?.focus();
+          }}
+          className="pop-in fixed z-[70] w-[218px] py-1.5 rounded-lg bg-surface border border-line shadow-pop text-[13px] outline-none">
           {(() => {
             const r = ctx.row;
             const isLive = r.id.startsWith("g:") && !r.id.startsWith("gdrive:");
@@ -1593,7 +1841,14 @@ export default function Explorer() {
                 disabled: !(r.file && indexed), why: needSync || "Cut, then Paste where it should live",
                 show: r.kind === "file" || !!r.googleFolder },
               { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(r.key); setInfoOpen(true); }, show: true },
-              { label: "Tags…", icon: <TagIcon size={14} />, on: () => setTagPicker({ kind: r.kind, id: r.id, name: r.name }), show: taggable(r) },
+              // Tags live in EVERY file/folder menu (Workspace, Recent, Docs,
+              // drive tree) — not just Workspace root. Unindexed live rows get
+              // a disabled entry with the reason instead of a missing option.
+              { label: "Tags…", icon: <TagIcon size={14} />,
+                on: (() => { const t = tagTarget(r); return t ? () => setTagPicker({ kind: t.kind, id: t.id, name: r.name }) : undefined; })(),
+                disabled: !tagTarget(r),
+                why: !tagTarget(r) ? needSync : undefined,
+                show: (r.kind === "file" || r.kind === "folder") && nav.kind !== "bin" },
               { label: "Rename", icon: <Pencil size={14} />,
                 on: r.kind === "folder" && r.folder ? () => openRename("folder", r.folder!.id, r.folder!.name)
                   : r.kind === "folder" && r.indexId ? () => openRename("file", r.indexId!, r.name)
@@ -1606,10 +1861,10 @@ export default function Explorer() {
                 disabled: !(indexed && r.kind === "file"),
                 why: r.kind === "file" ? "Preview it instead — direct download needs a sync" : undefined,
                 show: r.kind === "file" },
-              { label: "Copy to office USB", icon: <HardDrive size={14} />,
-                on: r.file?.storage_path ? () => copyToUsb(r) : undefined,
-                disabled: !r.file?.storage_path,
-                why: "Needs a Supabase copy first (Google-only file)",
+              { label: "Copy to office USB", icon: usbBusy === r.id ? <Ring className="size-3.5" /> : <HardDrive size={14} />,
+                on: r.file?.storage_path && !usbBusy ? () => copyToUsb(r) : undefined,
+                disabled: !r.file?.storage_path || !!usbBusy,
+                why: usbBusy ? "Queuing…" : "Needs a Supabase copy first (Google-only file)",
                 show: r.kind === "file" && indexed },
               { label: "Copy link", icon: <Link2 size={14} />, on: () => copyLink(r),
                 show: !isLive && !isGFolder && r.kind === "file" },
@@ -1627,7 +1882,10 @@ export default function Explorer() {
                 show: r.kind === "folder" }
             ];
             return items.filter((i) => i.show !== false).map((i) => (
+              // Disabled items keep the reason in aria-label: they aren't
+              // focusable, so title-only text would be invisible to screen readers.
               <button key={i.label} role="menuitem" disabled={i.disabled} title={i.disabled ? i.why : undefined}
+                aria-label={i.disabled && i.why ? `${i.label}: ${i.why}` : undefined}
                 onClick={() => { if (i.disabled) return; const fn = i.on; setCtx(null); fn?.(); }}
                 className={`w-full flex items-center justify-between gap-2 px-3.5 py-2 text-left hover:bg-tint disabled:opacity-45 disabled:hover:bg-transparent ${i.danger ? "text-danger" : "text-ink"}`}>
                 <span className="truncate">{i.label}</span>{i.icon ? <span className="text-muted shrink-0">{i.icon}</span> : null}
@@ -1655,11 +1913,11 @@ export default function Explorer() {
               <span>New folder</span><span className="text-muted"><FolderPlus size={14} /></span>
             </button>
           )}
-          <button role="menuitem" disabled={!clip} title={clip ? `Paste "${clip.name}" here` : "Copy a file first"}
+          <button role="menuitem" disabled={!clip || clipBusy} title={clipBusy ? "Pasting…" : clip ? `Paste "${clip.name}" here` : "Copy a file first"}
             onClick={() => { setCanvasCtx(null); pasteClip(); }}
             className="w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint disabled:opacity-40">
-            <span>Paste{clip ? ` "${clip.name.length > 18 ? clip.name.slice(0, 17) + "…" : clip.name}"` : ""}</span>
-            <span className="text-muted"><ClipboardPaste size={14} /></span>
+            <span>{clipBusy ? "Pasting…" : <>Paste{clip ? ` "${clip.name.length > 18 ? clip.name.slice(0, 17) + "…" : clip.name}"` : ""}</>}</span>
+            <span className="text-muted">{clipBusy ? <Ring className="size-3.5" /> : <ClipboardPaste size={14} />}</span>
           </button>
         </div>
       )}
@@ -1684,21 +1942,21 @@ export default function Explorer() {
           </div>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={() => setShowNewFolder(false)} className="min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint">Cancel</button>
-            <button disabled={!newName.trim() || folderBusy} className="min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50">{folderBusy ? "Creating…" : "Create"}</button>
+            <button disabled={!newName.trim() || folderBusy} className="min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50 inline-flex items-center gap-2">{folderBusy && <Ring className="size-4" />}{folderBusy ? "Creating…" : "Create"}</button>
           </div>
         </form>
       </Modal>
 
       <ConfirmDialog open={!!confirmPurge} title={`Delete “${confirmPurge?.name}” permanently?`}
         body="This erases the file from Eiden Drive and from Google Drive. It cannot be recovered afterwards — the Recovery Bin is the last safety net."
-        confirmLabel={purging ? "Deleting…" : "Delete forever"} onClose={() => !purging && setConfirmPurge(null)} onConfirm={purge} />
+        confirmLabel="Delete forever" busy={purging} busyLabel="Deleting…" onClose={() => !purging && setConfirmPurge(null)} onConfirm={purge} />
 
       <ConfirmDialog open={!!confirmTrash} title="Move to Recovery Bin?"
         body={`"${confirmTrash?.name}" stays recoverable for 90 days. Members can never delete permanently.`}
-        confirmLabel="Move to Bin" onClose={() => setConfirmTrash(null)} onConfirm={() => confirmTrash && trash(confirmTrash)} />
+        confirmLabel="Move to Bin" busy={trashBusy} busyLabel="Moving to Bin…" onClose={() => !trashBusy && setConfirmTrash(null)} onConfirm={() => confirmTrash && trash(confirmTrash)} />
       <ConfirmDialog open={confirmBulk} title={`Trash ${selRows.length} files?`}
         body="They stay recoverable in the Recovery Bin for 90 days."
-        confirmLabel="Move all to Bin" onClose={() => setConfirmBulk(false)} onConfirm={bulkTrash} />
+        confirmLabel="Move all to Bin" busy={bulkBusy} busyLabel="Moving to Bin…" onClose={() => !bulkBusy && setConfirmBulk(false)} onConfirm={bulkTrash} />
 
       <Modal open={!!renameTarget} title={renameTarget?.kind === "folder" ? "Rename folder" : "Rename file"} onClose={() => setRenameTarget(null)} labelId="rn-title" width={400}>
         <form onSubmit={doRename} className="flex flex-col gap-4">
@@ -1709,7 +1967,7 @@ export default function Explorer() {
           </div>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={() => setRenameTarget(null)} className="min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint">Cancel</button>
-            <button disabled={!renameValue.trim() || renameBusy} className="min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50">{renameBusy ? "Renaming…" : "Rename"}</button>
+            <button disabled={!renameValue.trim() || renameBusy} className="min-h-[44px] px-4 rounded-md bg-brand text-white text-sm font-medium disabled:opacity-50 inline-flex items-center gap-2">{renameBusy && <Ring className="size-4" />}{renameBusy ? "Renaming…" : "Rename"}</button>
           </div>
         </form>
       </Modal>
@@ -1717,6 +1975,17 @@ export default function Explorer() {
       <ConfirmDialog open={!!confirmFolderDelete} title="Delete folder?"
         body={`"${confirmFolderDelete?.name}" is deleted only if it is empty. Files must be trashed individually first — managers only.`}
         confirmLabel="Delete" onClose={() => setConfirmFolderDelete(null)} onConfirm={deleteFolder} />
+
+      <ConfirmDialog open={confirmClearOrphans} title={`Clear ${orphanCount} leftover${orphanCount === 1 ? "" : "s"}?`}
+        body="This deletes the pre-scope orphan rows and detaches their audit history. Storage bytes are kept. Drive bytes are never touched. Run Sync from Google afterwards to rebuild the index."
+        confirmLabel="Clear leftovers" busy={clearing} busyLabel="Clearing…" onClose={() => !clearing && setConfirmClearOrphans(false)} onConfirm={clearOrphans} />
+
+      <UploadPanel
+        items={uploadItems} minimized={uploadPanelMin}
+        onToggleMin={() => setUploadPanelMin((v) => !v)}
+        onDismiss={() => setUploadItems([])}
+        onCancel={cancelUploads}
+      />
     </section>
   );
 }

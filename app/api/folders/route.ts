@@ -6,16 +6,18 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { visibleFolderIds, isManager, accessContext, folderUsable } from "@/lib/visibility";
-import { parseJson } from "@/lib/http";
+import { parseJson, dbError } from "@/lib/http";
 
 export async function GET() {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
   const supa = createClient();
   const { data, error } = await supa.from("folders").select("id,name,parent,dept,classification").order("name").limit(500);
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbError("Couldn't load folders.")(error);
   // Members see their department's folders: dept field OR same-named tag
   // (assigning dept "Clients" auto-unlocks everything tagged Clients).
+  // In department-tag mode (matching tag actually assigned) this narrows to
+  // only department folders + their subtrees, with fallback to all-by-default.
   const rows = (data ?? []) as { id: string; name: string; parent: string | null; dept: string | null; classification: string | null }[];
   if (isManager(me.role)) return Response.json({ results: rows });
   const ctx = await accessContext(adminClient(), me);
@@ -49,7 +51,7 @@ export async function POST(req: Request) {
   const { data, error } = await adminClient().from("folders")
     .insert({ name: body.name, parent: body.parent ?? null, dept, classification: "Internal" })
     .select("id").single();
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbError("Couldn't create the folder.")(error);
   await logAudit({ actor: me.id, actor_name: me.username, action: "add", req, detail: { folder: body.name } });
   return Response.json({ ok: true, id: data.id }, { status: 201 });
 }
@@ -72,7 +74,7 @@ export async function PATCH(req: Request) {
   const { data: f } = await db.from("folders").select("id,name").eq("id", p.data.folder_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   const { error } = await db.from("folders").update({ name: p.data.name }).eq("id", p.data.folder_id);
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbError("Couldn't rename the folder.")(error);
   await logAudit({ actor: me.id, actor_name: me.username, action: "rename", req, detail: { folder: p.data.folder_id, from: f.name, to: p.data.name } });
   return Response.json({ ok: true });
 }
@@ -95,7 +97,7 @@ export async function DELETE(req: Request) {
   const { data: f } = await db.from("folders").select("name").eq("id", p.data.folder_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   const { error } = await db.from("folders").delete().eq("id", p.data.folder_id);
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  if (error) return dbError("Couldn't delete the folder.")(error);
   await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { folder: p.data.folder_id, name: f.name } });
   return Response.json({ ok: true });
 }

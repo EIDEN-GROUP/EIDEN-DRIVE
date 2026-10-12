@@ -3,12 +3,19 @@ import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { X, Download, Pencil, FileWarning, ExternalLink } from "lucide-react";
 import { viewKind, editable, type ViewKind } from "./filetext";
+import { displayKind } from "@/lib/files";
+import { SparkleLoader } from "../ui/Loaders";
 import VideoPlayer from "./VideoPlayer";
 import { useBytes } from "../viewer/useBytes";
 import { decodeText, fmtBytes, looksLikeText, rtfToText, sniff } from "../viewer/lib";
 import TextView from "../viewer/TextView";
 
-const Loading = () => <div className="p-6 space-y-3" aria-label="Loading viewer"><div className="skel h-5 w-1/2" /><div className="skel h-4 w-full" /><div className="skel h-4 w-5/6" /></div>;
+const Loading = () => (
+  <div className="p-6 flex flex-col items-center justify-center gap-3 min-h-[280px]" aria-label="Loading viewer">
+    <SparkleLoader size={64} label="Loading preview" />
+    <p className="text-[13px] text-muted" role="status">Loading preview…</p>
+  </div>
+);
 const lazy = <P extends object>(load: () => Promise<{ default: React.ComponentType<P> }>) => dynamic(load, { ssr: false, loading: Loading });
 const MarkdownView = lazy(() => import("../viewer/MarkdownView"));
 const CsvView = lazy(() => import("../viewer/CsvView"));
@@ -27,11 +34,6 @@ const BinaryView = lazy(() => import("../viewer/BinaryView"));
 
 export interface ViewFile { id: string; name: string; mime?: string; size?: number; backends?: string[]; googleId?: string | null }
 
-const LABEL: Record<ViewKind, string> = {
-  image: "Image", video: "Video", audio: "Audio", pdf: "PDF", markdown: "Markdown", html: "HTML", code: "Text", csv: "Table", json: "JSON", notebook: "Notebook",
-  docx: "Word document", sheet: "Spreadsheet", slides: "Presentation", odf: "OpenDocument", archive: "Archive", ebook: "Ebook", font: "Font", rtf: "Rich text",
-  legacy: "Legacy Office", office: "Office", unknown: "File"
-};
 const BYTE_KINDS = new Set<ViewKind>(["markdown", "html", "code", "csv", "json", "notebook", "docx", "sheet", "slides", "odf", "ebook", "archive", "font", "rtf", "legacy", "office", "unknown", "pdf"]);
 const TEXT_CAP = 5 * 1024 * 1024;
 
@@ -99,7 +101,9 @@ export default function FileViewer({ file, onClose, onEdit }: { file: ViewFile; 
   const canEdit = !isLive && editable(file.name, file.mime) && ["markdown", "html", "code", "csv", "json"].includes(eff);
   const dl = `/api/drive/download?file_id=${encodeURIComponent(file.id)}`;
   const urlKind = eff === "image" || eff === "video" || eff === "audio";
-  const src = blobUrl ?? embedUrl;
+  // Unknown-but-sniffed video/audio streams instead of buffering the whole
+  // file into a blob: a mislabeled 500 MB video would else sit fully in RAM.
+  const src = kind0 === "unknown" && (eff === "video" || eff === "audio") ? rawUrl : (blobUrl ?? embedUrl);
 
   let body: React.ReactNode;
   if (needBytes && loading) body = <Loading />;
@@ -150,7 +154,7 @@ export default function FileViewer({ file, onClose, onEdit }: { file: ViewFile; 
         <div className="flex items-center gap-2 px-4 py-2 min-h-[56px] border-b border-line shrink-0 flex-wrap">
           <div className="min-w-0 flex-1 basis-40">
             <p className="text-[14px] font-medium truncate" title={file.name}>{file.name}</p>
-            <p className="text-[11.5px] text-muted truncate">{LABEL[eff]}{sn && kind0 === "unknown" ? ` · detected: ${sn.label}` : ""}{file.size ? ` · ${fmtBytes(file.size)}` : ""}</p>
+            <p className="text-[11.5px] text-muted truncate">{displayKind(file.name, file.mime)}{sn && kind0 === "unknown" ? ` · detected: ${sn.label}` : ""}{file.size ? ` · ${fmtBytes(file.size)}` : ""}</p>
           </div>
           {canEdit && <button onClick={() => onEdit(file)} className="min-h-[40px] px-3 rounded-md border border-line text-[13px] flex items-center gap-1.5 hover:bg-tint"><Pencil size={14} /> Edit</button>}
           {file.googleId && <a href={`https://drive.google.com/file/d/${file.googleId}/view`} target="_blank" rel="noreferrer" className="hidden sm:flex min-h-[40px] px-3 rounded-md border border-line text-[13px] items-center gap-1.5 hover:bg-tint"><ExternalLink size={14} /> Google Drive</a>}

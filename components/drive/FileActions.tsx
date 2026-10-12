@@ -47,7 +47,7 @@ export default function FileActions({ id, name, googleId, downloadable }: {
       </div>
       <ConfirmDialog open={confirm} title="Move to Recovery Bin?"
         body={`"${name}" stays recoverable for 90 days. Members can never delete permanently.`}
-        confirmLabel={busy ? "Moving…" : "Move to Bin"}
+        confirmLabel="Move to Bin" busy={busy} busyLabel="Moving…"
         onClose={() => !busy && setConfirm(false)} onConfirm={trash} />
     </>
   );
