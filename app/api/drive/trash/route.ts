@@ -4,7 +4,7 @@ import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
 import { trashDriveFile } from "@/lib/google-drive";
-import { driveCtxFor } from "@/lib/drive-accounts";
+import { driveCtxFor, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile, needsApproval } from "@/lib/roles";
 import { canTouch, googleInScope, googleDescendants, bustScopeCache } from "@/lib/visibility";
@@ -51,9 +51,22 @@ export async function POST(req: Request) {
   if (be) return Response.json({ error: `could not move to bin: ${be.message}` }, { status: 500 });
 
   if (f.google_file_id) {
+    // Fail closed BEFORE touching Google: a deleted/disabled/legacy drive
+    // must refuse here (rolling back the bin row), never trash-by-env-token
+    // or fake-success via the lib's unconfigured stub.
+    const pin = (f as { drive_account_id?: string | null }).drive_account_id;
+    const block = await driveGoneReason(pin);
+    if (block) {
+      await db.from("recovery_bin").delete().eq("file_id", file_id);
+      return driveBlockedResponse(block);
+    }
     try {
-      const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
-      await trashDriveFile(String(f.google_file_id), ctx?.drive ?? undefined);
+      const ctx = await driveCtxFor(pin);
+      if (!ctx?.drive) {
+        await db.from("recovery_bin").delete().eq("file_id", file_id);
+        return driveBlockedResponse({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", status: 410 });
+      }
+      await trashDriveFile(String(f.google_file_id), ctx.drive);
       // Google folders trash as a subtree in Drive — the index must match:
       // bin every indexed descendant or the children keep listing as ghosts.
       // (Drive restore later unhides the whole subtree; restore clears these.)

@@ -6,7 +6,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { bucketFor } from "@/lib/storage";
-import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
+import { driveCtxFor, getAccounts, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
 import { canTouch, googleInScope, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
@@ -55,9 +55,13 @@ export async function PATCH(req: Request) {
       const { error } = await db.storage.from(bucketFor(f)).update(f.storage_path, bytes, { contentType: f.mime ?? "text/plain", upsert: true });
       if (error) throw new Error(error.message);
     } else if (f.google_file_id) {
+      // Fail closed before overwriting Drive bytes: dead/legacy drives refuse
+      // instead of writing through the wrong token (or the lib stub).
+      const block = await driveGoneReason((f as { drive_account_id?: string | null }).drive_account_id);
+      if (block) return driveBlockedResponse(block);
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
       const g = ctx?.drive;
-      if (!g) throw new Error("google not configured");
+      if (!g) return driveBlockedResponse({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", status: 410 });
       await g.files.update({ fileId: f.google_file_id, supportsAllDrives: true, media: { mimeType: f.mime ?? "text/plain", body: Readable.from(bytes) } });
     } else {
       return Response.json({ error: "no writable copy yet" }, { status: 404 });

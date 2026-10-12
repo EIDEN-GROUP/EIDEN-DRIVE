@@ -5,7 +5,7 @@ import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { storageAlert } from "@/lib/alerts";
 import { getAboutQuota } from "@/lib/google-drive";
-import { getAccounts, quotaFor, rootKind, clientFor, type DriveAccount } from "@/lib/drive-accounts";
+import { getAccounts, quotaFor, rootKind, clientFor, type DriveAccount, activeDriveCheckEnabled } from "@/lib/drive-accounts";
 
 // Live: per-account Google quotas when connected, latest agent heartbeat, recent jobs.
 export async function GET() {
@@ -13,7 +13,9 @@ export async function GET() {
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
   const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
   const drives = [];
-  if (accounts.some((a) => a.status === "active")) {
+  // Quotas are computed per LIVE account, never as a global aggregate — and
+  // deleted/disabled drives contribute nothing (their rows list as-is below).
+  if (accounts.length) {
     for (const a of accounts) {
       if (a.status !== "active") {
         drives.push({ id: a.id, label: a.label, email: a.email, status: a.status, used: 0, total: 0 });
@@ -32,7 +34,10 @@ export async function GET() {
         drives.push({ id: a.id, label: a.label, email: a.email, status: "down", used: 0, total: 0 });
       }
     }
-  } else {
+  } else if (!(await activeDriveCheckEnabled())) {
+    // Pre-migration legacy display only: the check-off escape hatch keeps the
+    // old env-token "Primary" row. With the check on (default), zero rows
+    // means zero drives — never probe the env token for a deleted drive.
     const quota = await getAboutQuota().catch(() => null);
     drives.push(quota
       ? { id: "legacy", label: "Primary", email: null, status: "active", used: quota.usage, total: quota.limit, alert: storageAlert(quota.usage, quota.limit) }

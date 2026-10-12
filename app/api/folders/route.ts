@@ -10,7 +10,7 @@ import { parseJson, dbError } from "@/lib/http";
 import { usernamesFor } from "@/lib/people";
 import { trashDriveFile } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
-import { driveCtxFor } from "@/lib/drive-accounts";
+import { driveCtxFor, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
 
 export async function GET() {
   const me = await getProfile();
@@ -139,16 +139,27 @@ export async function DELETE(req: Request) {
   const live = files.filter((x) => !binned.has(x.id));
 
   // Bin each live file (DB first, then Google — same order as /api/drive/trash).
+  // Fail closed per file: a dead/legacy drive refuses with a coded error
+  // (rolling back that file's bin row) instead of env-token trashing.
   for (const x of live) {
     const { error } = await db.from("recovery_bin").upsert({ file_id: x.id, deleted_by: me.id });
     if (error) return dbError("Couldn't move the folder's files to the Recovery Bin.")(error);
     if (x.google_file_id) {
+      const block = await driveGoneReason(x.drive_account_id);
+      if (block) {
+        await db.from("recovery_bin").delete().eq("file_id", x.id);
+        return driveBlockedResponse(block);
+      }
       try {
         const ctx = await driveCtxFor(x.drive_account_id);
-        await trashDriveFile(x.google_file_id, ctx?.drive ?? undefined);
+        if (!ctx?.drive) {
+          await db.from("recovery_bin").delete().eq("file_id", x.id);
+          return driveBlockedResponse({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", status: 410 });
+        }
+        await trashDriveFile(x.google_file_id, ctx.drive);
       } catch (e) {
         await db.from("recovery_bin").delete().eq("file_id", x.id);
-        return Response.json({ error: `${googleErrorMessage(e instanceof Error ? e.message : "google trash failed")} — nothing was deleted, safe to retry` }, { status: 502 });
+        return Response.json({ error: `${googleErrorMessage(e instanceof Error ? e.message : "google trash failed")} — nothing was deleted, safe to retry`, code: "google_failed" }, { status: 502 });
       }
     }
   }

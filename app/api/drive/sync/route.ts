@@ -6,7 +6,7 @@ import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { listDrivePage } from "@/lib/google-drive";
 import { withTimeout, googleErrorMessage } from "@/lib/errors";
-import { getAccounts, clientFor, type DriveAccount } from "@/lib/drive-accounts";
+import { getAccounts, clientFor, type DriveAccount, activeDriveCheckEnabled, hasAnyAccountRows, driveBlockedResponse, requireActiveAccount } from "@/lib/drive-accounts";
 import { inScopeGoogleIds, bustScopeCache } from "@/lib/visibility";
 
 // Manager+: incremental Google → file_index sync (upsert by google_file_id).
@@ -26,14 +26,31 @@ export async function POST(req: Request) {
   const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
   const live = accounts.filter((a) => a.status === "active");
   // Legacy fallback: no account rows yet but env token exists (pre-migration).
+  // Dead unless active_drive_check is explicitly off: with the check on, zero
+  // live accounts means every drive is deleted or disabled — fail closed with
+  // the reason (404 vs 410) instead of syncing the env token's drive.
   if (!live.length) {
+    if (await activeDriveCheckEnabled()) {
+      if (await hasAnyAccountRows()) {
+        return driveBlockedResponse({ error: "every connected drive is disabled — re-enable one in Storage to sync", code: "drive_disabled", status: 410 });
+      }
+      return driveBlockedResponse({ error: "no Google drive connected — connect one in Storage first", code: "drive_deleted", status: 404 });
+    }
     if (!process.env.GOOGLE_REFRESH_TOKEN) {
       return Response.json({ error: "GOOGLE_REFRESH_TOKEN not set — run the /api/auth/google flow first (docs/10)." }, { status: 503 });
     }
     return legacySync(me.id, me.username, req, undefined, v.data.pageToken ?? undefined);
   }
-  const acct = v.data.accountId ? live.find((a) => a.id === v.data.accountId) : live[0];
-  if (!acct) return Response.json({ error: "drive account not found" }, { status: 404 });
+  // Explicit pin: fresh fail-closed gate (404 deleted vs 410 disabled) —
+  // never resolve a dead drive from the stale list cache.
+  let acct: DriveAccount & { refresh_token: string };
+  if (v.data.accountId) {
+    const gate = await requireActiveAccount(v.data.accountId);
+    if ("error" in gate) return driveBlockedResponse(gate);
+    acct = gate.account;
+  } else {
+    acct = live[0];
+  }
 
   let page;
   try {

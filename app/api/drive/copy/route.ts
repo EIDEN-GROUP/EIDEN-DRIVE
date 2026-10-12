@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { bucketFor } from "@/lib/storage";
-import { driveCtxFor, getAccounts, requireActiveAccount } from "@/lib/drive-accounts";
+import { driveCtxFor, getAccounts, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
 import { canTouch, folderUsable, googleInScope, bustScopeCache, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
@@ -48,12 +48,13 @@ export async function POST(req: Request) {
   }
   // Trashed sources can't be cloned back to life — restore first.
   if (await isBinned(db, p.data.file_id)) return binnedResponse();
-  // A copy writes through the source's drive account: if that drive is gone
-  // or disabled, refuse BEFORE duplicating Storage bytes (which would orphan
-  // when the Google leg then fails). Fresh check, not cache.
-  if (srcRow.google_file_id && srcRow.drive_account_id) {
-    const gate = await requireActiveAccount(srcRow.drive_account_id);
-    if ("error" in gate) return Response.json({ error: gate.error }, { status: gate.status });
+  // A copy writes through the source's drive account: if that drive is gone,
+  // disabled, or legacy-unpinned, refuse BEFORE duplicating any bytes.
+  // Fresh check, not cache — and it covers null pins (pending_relink), not
+  // just pinned ones.
+  if (srcRow.google_file_id) {
+    const block = await driveGoneReason(srcRow.drive_account_id);
+    if (block) return driveBlockedResponse(block);
   }
   const copyName = `Copy of ${src.name}`;
   const srcFull = src as { storage_bucket?: string | null; drive_account_id?: string | null; google_parent_id?: string | null };
@@ -73,24 +74,55 @@ export async function POST(req: Request) {
   let google_file_id: string | null = null;
   let google_parent_id: string | null = null;
   const backends: string[] = [];
-  try {
-    if (src.storage_path) {
-      storage_path = `${me.id}/${Date.now()}-copy-${src.storage_path.split("/").pop()}`;
-      const { error } = await db.storage.from(bucketFor(src)).copy(src.storage_path, storage_path);
-      if (error) throw new Error(error.message);
-      backends.push("local");
+  // Order: Google FIRST, then Storage. A Storage-first order orphans the
+  // staged object when the Google leg fails (nothing references it, nothing
+  // deletes it). If the Storage leg fails after Google succeeded, the fresh
+  // Google copy is removed again — no half-copies on either side.
+  const dropStagedStorage = async () => {
+    if (storage_path) {
+      try { await db.storage.from(bucketFor(src)).remove([storage_path]); } catch { /* ignore */ }
+      storage_path = null;
     }
+  };
+  const dropStagedGoogle = async () => {
+    if (google_file_id) {
+      try {
+        const rctx = await driveCtxFor((src as { drive_account_id?: string | null }).drive_account_id);
+        if (rctx?.drive) await rctx.drive.files.delete({ fileId: google_file_id, supportsAllDrives: true });
+      } catch { /* ignore */ }
+      google_file_id = null;
+    }
+  };
+  try {
     if (src.google_file_id) {
       const ctx = await driveCtxFor((src as { drive_account_id?: string | null }).drive_account_id);
       const g = ctx?.drive;
       if (!g) throw new Error("google not configured");
+      // drive.files.copy mints a SEPARATE Drive file id — never a second
+      // reference to the source bytes. Verified below (google_file_id set
+      // only from the copy response, and must differ from the source).
       const cp = await g.files.copy({ fileId: src.google_file_id, supportsAllDrives: true, fields: "id",
         ...(driveParent ? { requestBody: { parents: [driveParent] } } : {}) });
       google_file_id = cp.data.id ?? null;
-      if (google_file_id) { backends.push("google"); google_parent_id = driveParent; }
+      if (!google_file_id || google_file_id === src.google_file_id) {
+        google_file_id = null;
+        throw new Error("Google didn't return a separate copy — nothing was duplicated");
+      }
+      backends.push("google");
+      google_parent_id = driveParent;
+    }
+    if (src.storage_path) {
+      storage_path = `${me.id}/${Date.now()}-copy-${src.storage_path.split("/").pop()}`;
+      const { error } = await db.storage.from(bucketFor(src)).copy(src.storage_path, storage_path);
+      if (error) {
+        await dropStagedGoogle();
+        throw new Error(error.message);
+      }
+      backends.push("local");
     }
   } catch (e) {
-    return Response.json({ error: e instanceof Error ? e.message : "copy failed" }, { status: 500 });
+    await dropStagedStorage();
+    return Response.json({ error: e instanceof Error ? e.message : "copy failed", code: "google_failed" }, { status: 500 });
   }
   const { data, error } = await db.from("file_index").insert({
     name: copyName, mime: src.mime, size: src.size, hash: src.hash,

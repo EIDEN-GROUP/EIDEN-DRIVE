@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
-import { getAccounts, type DriveAccount } from "@/lib/drive-accounts";
+import { getAccounts, type DriveAccount, requireActiveAccount, driveBlockedResponse } from "@/lib/drive-accounts";
 import { inScopeGoogleIds, allBinnedIds, accessContext, isManager } from "@/lib/visibility";
 import { parseQuery } from "@/lib/http";
 
@@ -19,8 +19,11 @@ export async function GET(req: Request) {
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
   const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
-  const acct = accounts.find((a) => a.id === p.data.accountId);
-  if (!acct || acct.status !== "active") return Response.json({ error: "drive not available" }, { status: 404 });
+  // Fresh fail-closed gate: unknown/deleted → 404, disabled → 410. Never
+  // serve one drive's tree for another id, never serve a dead drive.
+  const gate = await requireActiveAccount(p.data.accountId);
+  if ("error" in gate) return driveBlockedResponse(gate);
+  const acct: DriveAccount = gate.account;
   const db = adminClient();
   const { data, error } = await db.from("file_index")
     .select("id,name,mime,size,google_file_id,google_parent_id,backends,owner")

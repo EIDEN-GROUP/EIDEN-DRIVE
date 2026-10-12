@@ -54,6 +54,51 @@ interface Drive {
   used: number; total: number; alert?: string | null;
 }
 
+// Drive safety: the active_drive_check gate (on = deleted/disabled drives
+// fail closed everywhere, no env-token fallbacks) plus the pending_relink
+// queue (legacy rows with a Google pin but no drive).
+function DriveSafetyPanel() {
+  const [flag, setFlag] = useState<boolean | null>(null);
+  const [pending, setPending] = useState<{ total: number; pure_orphans: number; hybrids: number; review_by: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    fetch("/api/drive/settings").then((r) => r.json().catch(() => ({}))).then((d) => {
+      if (typeof d.active_drive_check === "boolean") setFlag(d.active_drive_check);
+    }).catch(() => {});
+    fetch("/api/drive/relink").then((r) => r.json().catch(() => ({}))).then((d) => {
+      if (r_ok(d)) setPending({ total: d.counts.total, pure_orphans: d.counts.pure_orphans, hybrids: d.counts.hybrids, review_by: d.review_by });
+    }).catch(() => {});
+    function r_ok(d: Record<string, unknown>) { return d && typeof d === "object" && d.ok === true && d.counts; }
+  }, []);
+  async function flip(next: boolean) {
+    setBusy(true);
+    const r = await fetch("/api/drive/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: next }) });
+    const d = await r.json().catch(() => ({}));
+    setBusy(false);
+    if (!r.ok) { toast({ text: d.error ?? "Couldn't save the setting.", tone: "err" }); return; }
+    setFlag(next);
+    toast({ text: next ? "Drive safety on — dead drives fail closed." : "Drive safety OFF — legacy env fallbacks restored. Only for unmigrated setups.", tone: next ? "ok" : "err" });
+  }
+  return (
+    <Panel title="Drive safety" subtitle="Fail-closed gate for deleted and disabled drives">
+      {flag === null ? <div className="skel h-12 w-full" role="status" aria-label="Reading drive safety" /> : (
+        <div className="flex flex-wrap items-center gap-3">
+          <StatusPill tone={flag ? "good" : "bad"}>{flag ? "On — dead drives refuse" : "OFF — legacy fallbacks"}</StatusPill>
+          <button onClick={() => flip(!flag)} disabled={busy}
+            className="min-h-[40px] px-3.5 rounded-lg border border-line text-[13px] hover:bg-tint disabled:opacity-50 transition-colors">
+            {busy ? "Saving…" : flag ? "Turn off (not recommended)" : "Turn on"}
+          </button>
+        </div>
+      )}
+      <p className="mt-3 text-[12.5px] text-muted">
+        {pending === null ? "Reading legacy rows…"
+          : pending.total === 0 ? "No legacy drive rows — nothing needs relinking."
+          : `${pending.total} legacy row${pending.total === 1 ? "" : "s"} need${pending.total === 1 ? "s" : ""} a decision by ${pending.review_by.slice(0, 10)} (${pending.pure_orphans} orphan${pending.pure_orphans === 1 ? "" : "s"}, ${pending.hybrids} with Storage cop${pending.hybrids === 1 ? "y" : "ies"}) — relink, unpin or delete via GET /api/drive/relink.`}
+      </p>
+    </Panel>
+  );
+}
+
 // Per-drive label editor: the short name shown everywhere (Explorer drive
 // list, upload picker, Location column "Google (label)").
 function LabelEditor({ drive, onSaved }: { drive: Drive; onSaved: () => void }) {
@@ -192,7 +237,7 @@ export default function StoragePage() {
     const j = await r.json().catch(() => ({}));
     setConfirmDel(null);
     if (!r.ok) { toast({ text: j.error ?? "Couldn't remove drive.", tone: "err" }); return; }
-    toast({ text: "Drive disconnected — its files stay indexed.", tone: "ok" });
+    toast({ text: `Drive disconnected — ${j.deleted ?? 0} mirror${(j.deleted ?? 0) === 1 ? "" : "s"} removed, ${j.unpinned ?? 0} Storage cop${(j.unpinned ?? 0) === 1 ? "y kept" : "ies kept"} (Google untouched).`, tone: "ok" });
     load();
   }
   async function resyncClean(d: Drive) {
@@ -312,6 +357,8 @@ export default function StoragePage() {
             <SlackCard />
           </Panel>
         )}
+
+        {data?.canManage && <DriveSafetyPanel />}
       </div>
 
       {confirmDel && (
@@ -319,7 +366,7 @@ export default function StoragePage() {
           <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={() => setConfirmDel(null)} />
           <div className="pop-in relative w-full max-w-sm rounded-2xl bg-surface border border-line shadow-pop p-6">
             <p className="text-[17px] font-medium">Disconnect “{confirmDel.label}”?</p>
-            <p className="mt-2 text-[13.5px] text-muted">Eiden Drive forgets its token. Indexed files stay (readable); Google copies are untouched. Reconnect anytime from “Connect another drive”.</p>
+            <p className="mt-2 text-[13.5px] text-muted">Eiden Drive forgets its token and drops that drive&apos;s mirrors (Storage copies are kept, Google copies untouched). Afterwards nothing reads or writes through this drive until you reconnect it.</p>
             <div className="mt-5 flex justify-end gap-2">
               <button onClick={() => setConfirmDel(null)} className="min-h-[44px] px-4 rounded-lg border border-line text-sm hover:bg-tint">Cancel</button>
               <button onClick={delDrive} className="min-h-[44px] px-4 rounded-lg bg-danger text-white text-sm font-medium">Disconnect</button>

@@ -22,7 +22,17 @@ vi.mock("@/lib/audit", () => ({ logAudit: async () => { ops.push("audit"); } }))
 vi.mock("@/lib/supabase-admin", () => ({
   adminClient: () => ({ from: table, storage: { from: () => ({ remove: async () => { ops.push("storage:remove"); return { error: state.storageErr ? { message: state.storageErr } : null }; } }) } })
 }));
-vi.mock("@/lib/drive-accounts", () => ({ driveCtxFor: async () => (state.ctx ? { drive: {}, rootId: "", label: "Main" } : null), getAccounts: async () => [] }));
+vi.mock("@/lib/drive-accounts", async () => {
+  const real = await vi.importActual<typeof import("@/lib/drive-accounts")>("@/lib/drive-accounts");
+  return {
+    ...real,
+    driveCtxFor: async () => (state.ctx ? { drive: {}, rootId: "", label: "Main" } : null),
+    getAccounts: async () => [],
+    // Dead-drive simulation: the route must fail closed with a coded error
+    // before touching anything (never env-fallback, never stub-success).
+    driveGoneReason: async () => (state.ctx ? null : { error: "chosen drive is disabled", code: "drive_disabled", status: 410 }),
+  };
+});
 vi.mock("@/lib/visibility", () => ({ googleDescendants: async () => state.kidIds ?? [], bustScopeCache: () => {}, googleInScope: async () => state.scoped }));
 vi.mock("@/lib/google-drive", () => ({ deleteDriveFile: async () => { ops.push("google:delete"); if (state.googleErr) throw state.googleErr; return {}; } }));
 
@@ -63,8 +73,12 @@ describe("POST /api/drive/purge (permanent delete)", () => {
   it("a Google 'not found' (already gone) still completes", async () => {
     state.googleErr = new Error("File not found: g1"); expect((await call()).status).toBe(200);
   });
-  it("an unreachable Google account aborts safely", async () => {
-    state.ctx = false; expect((await call()).status).toBe(502); expect(ops).toEqual([]); // refused before deleting anything
+  it("an unreachable Google account aborts safely with a coded error", async () => {
+    state.ctx = false;
+    const r = await call();
+    expect(r.status).toBe(410); // fail-closed: 410 drive_disabled, not a vague 502
+    expect(await r.json()).toMatchObject({ code: "drive_disabled" });
+    expect(ops).toEqual([]); // refused before deleting anything
   });
   it("purging a Google folder purges its indexed subtree too", async () => {
     state.file = { id: FILE_ID, name: "Big", mime: "application/vnd.google-apps.folder", size: 0, storage_path: null, google_file_id: "gf", drive_account_id: "acc" };

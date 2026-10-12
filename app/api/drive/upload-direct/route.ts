@@ -6,7 +6,7 @@ import { logAudit } from "@/lib/audit";
 import { getProfile } from "@/lib/roles";
 import { rootFor, deleteDriveFile } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
-import { pickUploadAccount, clientFor, getAccounts, requireActiveAccount } from "@/lib/drive-accounts";
+import { pickUploadAccount, clientFor, getAccounts, requireActiveAccount, driveBlockedResponse } from "@/lib/drive-accounts";
 import { notifyUpload } from "@/lib/upload-notify";
 import { folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
 
@@ -60,7 +60,7 @@ export async function POST(req: Request) {
   // before quota probes burn live Google calls. Unknown → 404, disabled → 410.
   if (want !== "auto") {
     const chk = await requireActiveAccount(want);
-    if ("error" in chk) return Response.json({ error: chk.error }, { status: chk.status });
+    if ("error" in chk) return driveBlockedResponse(chk);
   }
   const pick = await pickUploadAccount(blob.size, want === "auto" ? null : want);
   if (!pick.account) {

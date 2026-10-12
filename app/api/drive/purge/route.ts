@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { deleteDriveFile } from "@/lib/google-drive";
-import { driveCtxFor } from "@/lib/drive-accounts";
+import { driveCtxFor, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
 import { bucketFor } from "@/lib/storage";
 import { googleDescendants, bustScopeCache, googleInScope } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
@@ -47,9 +47,13 @@ export async function POST(req: Request) {
   const allIds = [file_id, ...extraIds.filter((id) => id !== file_id)];
 
   // 1) Google first (the step most likely to fail) — and refuse up front if its account can't be reached.
+  // Coded fail-closed (404 deleted / 410 disabled / 409 legacy-unpinned),
+  // never a silent skip that would leave Drive bytes behind the deleted rows.
   if (f.google_file_id) {
+    const block = await driveGoneReason((f as { drive_account_id?: string | null }).drive_account_id);
+    if (block) return driveBlockedResponse(block);
     const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
-    if (!ctx?.drive) return Response.json({ error: "Can't reach the Google account that holds this file — reconnect it, then try again (nothing was deleted)." }, { status: 502 });
+    if (!ctx?.drive) return driveBlockedResponse({ error: "Can't reach the Google account that holds this file — reconnect it, then try again (nothing was deleted).", code: "drive_disabled", status: 410 });
     try { await deleteDriveFile(String(f.google_file_id), ctx.drive); }
     catch (e) {
       const m = e instanceof Error ? e.message : "unknown";

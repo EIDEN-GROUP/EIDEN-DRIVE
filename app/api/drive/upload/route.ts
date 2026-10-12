@@ -9,7 +9,7 @@ import { UPLOAD_BUCKET, PFP_BUCKET } from "@/lib/storage";
 import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { queueUsbUpload } from "@/lib/usb";
-import { pickUploadAccount, clientFor, getAccounts, requireActiveAccount } from "@/lib/drive-accounts";
+import { pickUploadAccount, clientFor, getAccounts, requireActiveAccount, driveBlockedResponse } from "@/lib/drive-accounts";
 import { notifyUpload } from "@/lib/upload-notify";
 import { folderUsable, googleInScope, bustScopeCache } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
@@ -98,7 +98,7 @@ export async function POST(req: Request) {
           await db.storage.from(body.storage_bucket ?? UPLOAD_BUCKET).remove([body.storage_path]);
         } catch { /* cleanup is best-effort; the row was never created */ }
       }
-      return Response.json({ error: chk.error }, { status: chk.status });
+      return driveBlockedResponse(chk);
     }
   }
   const { data, error } = await db.from("file_index").insert({

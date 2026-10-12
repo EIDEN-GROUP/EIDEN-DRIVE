@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { getProfile } from "@/lib/roles";
 import { signedUploadUrl, MAX_UPLOAD_BYTES, UPLOAD_BUCKET, PFP_BUCKET } from "@/lib/storage";
-import { requireActiveAccount } from "@/lib/drive-accounts";
+import { requireActiveAccount, driveBlockedResponse } from "@/lib/drive-accounts";
 import { rateLimited } from "@/lib/rate";
 import { parseJson } from "@/lib/http";
 
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
   // while the register step re-checks (status may flip mid-upload).
   if (body.drive_account) {
     const chk = await requireActiveAccount(body.drive_account);
-    if ("error" in chk) return Response.json({ error: chk.error }, { status: chk.status });
+    if ("error" in chk) return driveBlockedResponse(chk);
   }
   const safe = body.name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const path = `${me.id}/${Date.now()}-${safe}`;

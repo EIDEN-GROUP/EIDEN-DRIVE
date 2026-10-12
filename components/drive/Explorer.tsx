@@ -110,7 +110,7 @@ export default function Explorer() {
   const [clip, setClip] = useState<{ id: string; name: string; cut?: boolean } | null>(null);
   const [viewFile, setViewFile] = useState<ViewFile | null>(null);
   const [editFile, setEditFile] = useState<ViewFile | null>(null);
-  const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; usage?: number | null; limit?: number | null; status: string }[]>([]);
+  const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; usage?: number | null; limit?: number | null; status: string; rootKind?: string | null }[]>([]);
   const [driveSel, setDriveSel] = useState(""); // "" = Auto (roomiest drive)
   // Office-USB mirror toggle (persisted): uploads also queue an async agent job.
   const [usbTarget, setUsbTarget] = useState(false);
@@ -1007,6 +1007,17 @@ export default function Explorer() {
         return;
       }
     }
+    // Direct-to-Google path: same pre-check for the explicit picker choice
+    // (the server re-validates fresh at init anyway — this fails the batch
+    // before any hashing/transfer when the drive died after page load).
+    if (supaOff && !inDriveView && driveSel) {
+      const tgt = accounts.find((a) => a.id === driveSel);
+      if (!tgt || tgt.status !== "active") {
+        toast({ text: `The chosen drive${tgt?.label ? ` (“${tgt.label}”)` : ""} isn't available — pick another drive or use Auto.`, tone: "err" });
+        if (fileRef.current) fileRef.current.value = "";
+        return;
+      }
+    }
     const batch = files.map((f) => ({
       key: ++upSeq.current, name: f.name, size: f.size, mime: f.type || "application/octet-stream",
       status: "hashing" as UploadStatus, pct: null as number | null, dest,
@@ -1056,14 +1067,35 @@ export default function Explorer() {
             throw new Error("cancelled");
           }
           setItem(key, { status: "uploading", pct: 0 });
+          // Pin the resolved drive on the panel item: Auto resolves
+          // server-side, so show the actual destination, not "Drive".
+          if (typeof sess.accountLabel === "string" && sess.accountLabel) {
+            setItem(key, { dest: sess.accountLabel as string });
+          }
           const ctl = new AbortController();
           upAbort.current = ctl;
           upSessionUri.current = sess.sessionUri as string;
+          const sessionStartedAt = new Date().toISOString();
           let driveFileId: string;
           try {
             const resource = await uploadResumable(sess.sessionUri as string, file, {
               signal: ctl.signal,
               onProgress: (confirmed, total) => setItem(key, { pct: (confirmed / total) * 100 }),
+              // Finalize-unknown recovery: Google's completion answer isn't
+              // CORS-readable, so a landed file looks like a failure. Verify
+              // server-side before reporting anything.
+              onReconcile: async () => {
+                const rc = await fetch("/api/drive/resumable/reconcile", {
+                  method: "POST", headers: { "content-type": "application/json" },
+                  body: JSON.stringify({
+                    accountId: sess.accountId as string, name: file.name, size: file.size,
+                    parentUsed: (sess.parentUsed as string | null) ?? null, startedAfter: sessionStartedAt,
+                  }),
+                });
+                const rj = await rc.json().catch(() => ({}));
+                if (!rc.ok) throw new Error(rj.error ?? "couldn't verify the upload");
+                return (rj.found as { id: string } | null) ?? null;
+              },
             });
             driveFileId = resource.id;
           } finally {
@@ -1186,7 +1218,10 @@ export default function Explorer() {
       // Per account: chain that account's pages, then move to the next account
       // the server names (nextAccountId). One page per request per account —
       // no request ever walks a whole drive (HTTP 502-proof).
-      const accts = accounts.length ? accounts : [{ id: "", label: "Primary" }];
+      // No phantom "Primary": with no connected drives there is nothing to
+      // sync — the server fails closed too (404), so say so up front.
+      const accts = accounts;
+      if (!accts.length) { toast({ text: "No Google drive connected — ask an admin to connect one in Storage.", tone: "err" }); return; }
       let ins = 0, upd = 0, pages = 0, swept = 0;
       const labels: string[] = [];
       for (const a of accts) {
@@ -1542,10 +1577,20 @@ export default function Explorer() {
                   ...(!mirrorOff ? [
                     { label: `Auto · most free space${(() => { const r = [...accounts].filter((a) => a.status === "active").sort((x, y) => (y.free ?? -1) - (x.free ?? -1))[0]; return r ? ` (${r.label})` : ""; })()}`,
                       icon: driveSel === "" ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive("") },
-                    ...accounts.filter((a) => a.status === "active").map((a) => ({
-                      label: `${a.label} · ${a.free !== null ? `${formatBytes(a.free)} free` : "quota unknown"}`,
-                      icon: driveSel === a.id ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive(a.id)
-                    }))
+                    // Unfiltered: every known drive is listed (active or not)
+                    // with its state — a disabled/unreachable drive can't be
+                    // picked (the server would refuse it), but it must be
+                    // VISIBLE so nothing silently reroutes elsewhere.
+                    ...accounts.map((a) => {
+                      const usable = a.status === "active";
+                      const state = usable ? "" : a.status === "disabled" ? " · Disabled" : ` · ${a.status === "down" ? "Unreachable" : a.status}`;
+                      return {
+                        label: `${a.label}${state} · ${a.free !== null && a.free !== undefined ? `${formatBytes(a.free)} free` : "quota unknown"}`,
+                        hint: usable ? (a.rootKind && a.rootKind !== "mydrive" ? `Scope: ${a.rootKind}` : undefined) : a.status === "disabled" ? "Re-enable in Storage to use it" : "Unreachable — retry later",
+                        disabled: !usable,
+                        icon: driveSel === a.id ? <Check size={14} /> : undefined, onSelect: () => chooseUploadDrive(a.id)
+                      };
+                    })
                   ] : []),
                   "sep",
                   { label: "Also copy to office USB", hint: supaOff ? "Needs Supabase on — USB copies pull from Storage" : "Queued — agent copies when online", icon: usbTarget ? <Check size={14} /> : undefined, disabled: supaOff, onSelect: toggleUsb }

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { clientFor, getAccounts, requireActiveAccount } from "@/lib/drive-accounts";
+import { clientFor, getAccounts, requireActiveAccount, driveBlockedResponse, quotaFor } from "@/lib/drive-accounts";
 import { deleteDriveFile, rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { notifyUpload } from "@/lib/upload-notify";
@@ -36,9 +36,16 @@ export async function POST(req: Request) {
   // Fresh gate: the drive may have been disabled during the (possibly long)
   // chunk transfer. Refuse to index content on a dead drive.
   const gate = await requireActiveAccount(body.accountId);
-  if ("error" in gate) return Response.json({ error: gate.error }, { status: gate.status });
+  if ("error" in gate) return driveBlockedResponse(gate);
   const d = clientFor(gate.account);
   if (!d) return Response.json({ error: "google not configured" }, { status: 502 });
+  // Idempotency first: a retried complete (double-click, reconcile-then-
+  // complete race) must return the existing row, never a duplicate index row
+  // for the same Drive file. Checked BEFORE any Drive read.
+  {
+    const { data: dup } = await db.from("file_index").select("id").eq("google_file_id", body.driveFileId).eq("drive_account_id", body.accountId).maybeSingle();
+    if (dup) return Response.json({ ok: true, id: (dup as { id: string }).id, deduped: true });
+  }
   // Best-effort removal of a Drive file we refuse to index, so failures can't
   // leave invisible orphans. Never fails the request itself.
   const dropStray = async (id: string) => {
@@ -99,7 +106,14 @@ export async function POST(req: Request) {
   }
   await db.from("versions").insert({ file_id: data.id, v: 1, hash: body.hash ?? "", actor: me.id });
   bustScopeCache(body.accountId);
-  await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: data.id, req, detail: { backends: ["google"], resumable: true } });
+  // Per-drive audit: account + scope root + post-upload quota, so Storage
+  // audits answer "which drive, how full" without aggregates.
+  let quotaAfter: { usage: number | null; limit: number | null; free: number | null } | null = null;
+  try {
+    const q = await quotaFor(gate.account);
+    quotaAfter = { usage: q.usage, limit: q.limit, free: q.free };
+  } catch { /* quota is advisory; the upload already landed */ }
+  await logAudit({ actor: me.id, actor_name: me.username, action: "add", file_id: data.id, req, detail: { backends: ["google"], resumable: true, account: body.accountId, scope_root_id: gate.account.root_id ?? null, quota_after: quotaAfter, size } });
   await notifyUpload(db, req, { fileId: data.id, name: g.name ?? "?", size, folderId: body.folder, userId: me.id, username: me.username });
   return Response.json({ ok: true, id: data.id });
 }

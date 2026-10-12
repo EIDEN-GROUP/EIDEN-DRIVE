@@ -6,7 +6,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { signedDownloadUrl, bucketFor } from "@/lib/storage";
-import { driveCtxFor, accountAccessToken, getAccounts } from "@/lib/drive-accounts";
+import { driveCtxFor, accountAccessToken, getAccounts, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
 import { canTouch, googleInScope, liveInScope, isBinned, binnedResponse } from "@/lib/visibility";
 import { rateLimited } from "@/lib/rate";
 import { parseQuery } from "@/lib/http";
@@ -113,7 +113,12 @@ export async function GET(req: Request) {
     try {
       const liveId = parseLiveId(file_id);
       if (liveId) {
+        // Dead/legacy drives refuse the thumbnail (fail closed) — never fall
+        // through to the env token for another account's file.
+        const lbl = await driveGoneReason(liveId.accountId);
+        if (lbl) throw new Error(lbl.error);
         const lctx = liveId.accountId ? await driveCtxFor(liveId.accountId) : null;
+        if (liveId.accountId && !lctx) throw new Error("chosen drive is disabled — re-enable it in Storage or pick another drive");
         if (lctx && !(await liveInScope(lctx.drive, lctx.rootId || null, liveId.googleId))) {
           return Response.json({ error: "outside this drive's shared scope" }, { status: 403 });
         }
@@ -142,10 +147,14 @@ export async function GET(req: Request) {
   }
   const live = parseLiveId(file_id);
   if (live && p.data.raw) {
+    // Fail closed before streaming: dead/legacy pins refuse with a coded
+    // reason instead of falling back to the env token.
+    const lbl = await driveGoneReason(live.accountId);
+    if (lbl) return driveBlockedResponse(lbl);
     try {
       const ctx = await driveCtxFor(live.accountId);
       const g = ctx?.drive;
-      if (!g) throw new Error("google not configured");
+      if (!g) return driveBlockedResponse({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", status: 410 });
       // Caller-supplied live ids: prove the file sits inside the account's
       // scope before streaming a single byte (ids outlive listings).
       if (!(await liveInScope(g, ctx?.rootId || null, live.googleId))) {
@@ -218,9 +227,11 @@ export async function GET(req: Request) {
         return ranged(req, Buffer.from(await blob.arrayBuffer()), f.mime ?? "application/octet-stream", f.name);
       }
       if (f.google_file_id) {
+        const rbl = await driveGoneReason((f as { drive_account_id?: string | null }).drive_account_id);
+        if (rbl) return driveBlockedResponse(rbl);
         const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
         const g = ctx?.drive;
-        if (!g) throw new Error("google not configured");
+        if (!g) return driveBlockedResponse({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", status: 410 });
         const meta = await g.files.get({ fileId: f.google_file_id, fields: "size,mimeType", supportsAllDrives: true });
         if (Number(meta.data.size ?? 0) > RAW_MAX) {
           return Response.json({ error: "file too large to preview — use Download", too_large: true }, { status: 400 });

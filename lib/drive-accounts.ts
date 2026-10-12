@@ -13,18 +13,89 @@ export interface DriveAccount {
 // (Google needs working room; uploads shouldn't be the thing that fills it).
 export const SAFETY_MARGIN = 500 * 1024 * 1024;
 
+// ── active_drive_check ──────────────────────────────────────────────
+// Single gate for every legacy env fallback + deleted/disabled handling.
+// Default ON. When ON: no auto-recreate of "Primary" from the env token, no
+// env-token fallbacks in driveCtxFor/refreshTokenFor, sync never runs the
+// legacy path, and every drive-touching op fails closed with a coded error.
+// When OFF (storage admin explicitly disables it): pre-migration legacy
+// behavior is restored verbatim. Server-enforced — the client never decides.
+//
+// Persistence: app_settings.active_drive_check (admin toggle in Storage).
+// The table may not exist on older deployments — every settings access is
+// try/catch with fallback to ACTIVE_DRIVE_CHECK env (default "1"/on).
+
+let settingsCache: { at: number; value: boolean | null } | null = null;
+const SETTINGS_MS = 60_000;
+
+async function readStoredFlag(): Promise<boolean | null> {
+  if (!hasAdminClient()) return null;
+  try {
+    const db = adminClient();
+    const { data, error } = await db.from("app_settings").select("value").eq("key", "active_drive_check").maybeSingle();
+    if (error || !data) return null;
+    const v = (data as { value?: unknown }).value;
+    if (v === false || v === "0" || v === "false" || v === "off") return false;
+    if (v === true || v === "1" || v === "true" || v === "on") return true;
+    return null;
+  } catch {
+    return null; // table missing (pre-migration) — fall through to env
+  }
+}
+
+export async function activeDriveCheckEnabled(): Promise<boolean> {
+  if (settingsCache && Date.now() - settingsCache.at < SETTINGS_MS) {
+    if (settingsCache.value !== null) return settingsCache.value;
+  }
+  const stored = await readStoredFlag();
+  if (stored !== null) {
+    settingsCache = { at: Date.now(), value: stored };
+    return stored;
+  }
+  const env = (process.env.ACTIVE_DRIVE_CHECK ?? "1").trim().toLowerCase();
+  const value = !(env === "0" || env === "false" || env === "off" || env === "no");
+  settingsCache = { at: Date.now(), value: null }; // env-backed: don't pin, re-read cheaply
+  return value;
+}
+
+export function bustSettingsCache() { settingsCache = null; }
+
+/** Admin toggle for the flag. Upserts app_settings (migration 0019). */
+export async function setActiveDriveCheck(on: boolean): Promise<void> {
+  const db = adminClient();
+  await db.from("app_settings").upsert({ key: "active_drive_check", value: on ? "1" : "0" }, { onConflict: "key" });
+  bustSettingsCache();
+}
+
+// ── machine-readable drive block codes (ascii, stable) ──────────────
+// Every blocked/deleted/disabled/consistency failure carries one of these
+// alongside the human sentence, so clients can branch without parsing text:
+//   drive_deleted   (404) the account row is gone — pick another drive
+//   drive_disabled  (410) the account row exists but isn't active — re-enable or pick another
+//   pending_relink  (409) google-pinned row with a null/legacy account — relink or clear in Storage
+//   no_destination  (400) no drive chosen at all
+export type DriveBlockCode = "drive_deleted" | "drive_disabled" | "pending_relink" | "no_destination";
+
+export interface DriveBlock { error: string; code: DriveBlockCode; status: 400 | 404 | 409 | 410 }
+
+export function driveBlockedResponse(block: DriveBlock): Response {
+  return Response.json({ error: block.error, code: block.code }, { status: block.status });
+}
+
 let cache: { at: number; accounts: DriveAccount[] } | null = null;
 const CACHE_MS = 60_000;
 
 // All connected Google accounts. First call auto-imports the legacy
-// GOOGLE_REFRESH_TOKEN env var as "Primary" so nothing breaks on upgrade.
+// GOOGLE_REFRESH_TOKEN env var as "Primary" so nothing breaks on upgrade —
+// UNLESS active_drive_check is on (the default): then a deleted drive must
+// never silently resurrect, so no auto-insert happens, ever.
 export async function getAccounts(): Promise<DriveAccount[]> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.accounts;
   if (!hasAdminClient()) return [];
   const db = adminClient();
   const { data } = await db.from("drive_accounts").select("id,label,email,refresh_token,root_id,status,priority").order("priority", { ascending: false });
   let accounts = ((data ?? []) as (DriveAccount & { refresh_token: string })[]);
-  if (accounts.length === 0 && process.env.GOOGLE_REFRESH_TOKEN) {
+  if (accounts.length === 0 && process.env.GOOGLE_REFRESH_TOKEN && !(await activeDriveCheckEnabled())) {
     const { data: created } = await db.from("drive_accounts").insert({
       label: "Primary", refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
       root_id: process.env.GOOGLE_SHARED_DRIVE_ID ?? null, status: "active", priority: 0
@@ -35,6 +106,19 @@ export async function getAccounts(): Promise<DriveAccount[]> {
   return accounts;
 }
 export function bustAccountCache() { cache = null; }
+
+// Uncached existence probe: does ANY drive_accounts row exist (any status)?
+// Lets empty-table (deleted) vs all-disabled callers answer 404 vs 410.
+export async function hasAnyAccountRows(): Promise<boolean> {
+  if (!hasAdminClient()) return false;
+  try {
+    const db = adminClient();
+    const { data } = await db.from("drive_accounts").select("id").limit(1);
+    return !!data?.length;
+  } catch {
+    return false;
+  }
+}
 
 // Fresh (UNCACHED) single-account read for write-path validation. Uploads must
 // never trust the 60 s list cache: a drive disabled or deleted seconds ago
@@ -54,30 +138,53 @@ export async function getAccountFresh(accountId: string): Promise<(DriveAccount 
 // an explicit pin — the user chose this one; rerouting would be a surprise.
 export async function requireActiveAccount(
   accountId: string
-): Promise<{ account: DriveAccount & { refresh_token: string } } | { error: string; status: 404 | 410 }> {
+): Promise<{ account: DriveAccount & { refresh_token: string } } | (DriveBlock & { status: 404 | 410 })> {
   let row: (DriveAccount & { refresh_token: string }) | null = null;
   try {
     row = await getAccountFresh(accountId);
   } catch {
-    return { error: "couldn't verify the drive — retry", status: 410 };
+    return { error: "couldn't verify the drive — retry", code: "drive_disabled", status: 410 };
   }
-  if (!row) return { error: "chosen drive not found — it may have been disconnected; pick another drive", status: 404 };
+  if (!row) return { error: "chosen drive not found — it may have been disconnected; pick another drive", code: "drive_deleted", status: 404 };
   if (row.status !== "active") {
     const label = row.label ? ` (“${row.label}”)` : "";
-    return { error: `chosen drive${label} is disabled — re-enable it in Storage or pick another drive`, status: 410 };
+    return { error: `chosen drive${label} is disabled — re-enable it in Storage or pick another drive`, code: "drive_disabled", status: 410 };
   }
   return { account: row };
 }
 
+// Fail-closed pre-op check for ANY drive-touching path (reads included).
+// Fresh, uncached, single call: null/legacy pins → pending_relink (409),
+// unknown ids → drive_deleted (404), non-active rows → drive_disabled (410).
+// Returns null when the operation may proceed. When active_drive_check is
+// off, null pins fall through (legacy env behavior) and only unknown/
+// inactive ids block.
+export async function driveGoneReason(accountId?: string | null): Promise<DriveBlock | null> {
+  if (!accountId) {
+    if (await activeDriveCheckEnabled()) {
+      return {
+        error: "this file's drive link needs relinking — open Storage → Relink to attach it to a drive, or clear it",
+        code: "pending_relink", status: 409,
+      };
+    }
+    return null;
+  }
+  const gate = await requireActiveAccount(accountId);
+  if ("error" in gate) return { error: gate.error, code: gate.code, status: gate.status };
+  return null;
+}
+
 // Refresh token for an account id (service-side only — never leaves the server).
-// Null accountId = legacy env connection. Unknown/deleted ids resolve to null
-// (callers treat that as "unavailable", never as another drive).
+// Null accountId = legacy env connection (only when active_drive_check is off).
+// Unknown/deleted ids resolve to null (callers treat that as "unavailable",
+// never as another drive).
 export async function refreshTokenFor(accountId?: string | null): Promise<string | null> {
   if (accountId) {
     const accounts = await getAccounts() as (DriveAccount & { refresh_token: string })[];
     const a = accounts.find((x) => x.id === accountId && x.status === "active");
     return a?.refresh_token ?? null;
   }
+  if (await activeDriveCheckEnabled()) return null;
   return process.env.GOOGLE_REFRESH_TOKEN ?? null;
 }
 
@@ -93,7 +200,8 @@ export function clientFor(acct: DriveAccount & { refresh_token: string }): Drive
 }
 
 // Resolve the working {drive, rootId} for a file operation: the file's pinned
-// account when set, else the legacy single env connection. Null = unconfigured.
+// account when set, else the legacy single env connection (only when
+// active_drive_check is off). Null = unconfigured / must fail closed.
 // A pinned-but-unknown account (deleted drive) resolves to null — NEVER silently
 // to another drive, which would run operations against the wrong account.
 export async function driveCtxFor(accountId?: string | null): Promise<{ drive: DriveLike; rootId: string; label: string } | null> {
@@ -103,7 +211,7 @@ export async function driveCtxFor(accountId?: string | null): Promise<{ drive: D
     if (a) return { drive: clientFor(a), rootId: a.root_id ?? "", label: a.label };
     return null;
   }
-  if (process.env.GOOGLE_REFRESH_TOKEN) {
+  if (!(await activeDriveCheckEnabled()) && process.env.GOOGLE_REFRESH_TOKEN) {
     return { drive: driveClient(), rootId: process.env.GOOGLE_SHARED_DRIVE_ID ?? "", label: "Primary" };
   }
   return null;

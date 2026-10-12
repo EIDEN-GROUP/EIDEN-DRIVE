@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { driveCtxFor, getAccounts } from "@/lib/drive-accounts";
+import { driveCtxFor, getAccounts, driveGoneReason, driveBlockedResponse, requireActiveAccount } from "@/lib/drive-accounts";
 import { canTouch, folderUsable, googleInScope, bustScopeCache, isBinned, binnedResponse } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
@@ -81,11 +81,23 @@ export async function POST(req: Request) {
   }
   // Drive-side move first (most likely to fail): remove every current parent,
   // add the new one. Drive refuses to orphan, so old parents resolve live.
+  // The source account is revalidated fresh here (not from the cached list
+  // above): disabled/deleted mid-flight refuses instead of moving bytes on a
+  // dead drive. The destination folder was proven indexed under this same
+  // account above — cross-drive moves are impossible by construction.
   if (row.google_file_id && p.data.google_parent !== undefined) {
+    const block = await driveGoneReason(row.drive_account_id);
+    if (block) return driveBlockedResponse(block);
+    // Null pins fall through only when the check is off (legacy env mode);
+    // pinned accounts are revalidated fresh regardless of the list cache.
+    if (row.drive_account_id) {
+      const fresh = await requireActiveAccount(row.drive_account_id);
+      if ("error" in fresh) return driveBlockedResponse(fresh);
+    }
     try {
       const ctx = await driveCtxFor(row.drive_account_id);
       const g = ctx?.drive;
-      if (!g) throw new Error("google not configured");
+      if (!g) return driveBlockedResponse({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", status: 410 });
       const meta = await g.files.get({ fileId: row.google_file_id, fields: "parents", supportsAllDrives: true });
       const oldParents = ((meta.data.parents ?? []) as string[]).join(",");
       await g.files.update({

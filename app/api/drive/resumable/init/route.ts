@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
-import { accountAccessToken, clientFor, getAccounts, pickUploadAccount, requireActiveAccount } from "@/lib/drive-accounts";
+import { accountAccessToken, clientFor, getAccounts, pickUploadAccount, requireActiveAccount, driveBlockedResponse, quotaFor } from "@/lib/drive-accounts";
 import { rootFor } from "@/lib/google-drive";
 import { googleErrorMessage } from "@/lib/errors";
 import { folderUsable, googleInScope } from "@/lib/visibility";
@@ -50,7 +50,7 @@ export async function POST(req: Request) {
   // burn live Google calls.
   if (want !== "auto") {
     const chk = await requireActiveAccount(want);
-    if ("error" in chk) return Response.json({ error: chk.error }, { status: chk.status });
+    if ("error" in chk) return driveBlockedResponse(chk);
   }
   const pick = await pickUploadAccount(body.size, want === "auto" ? null : want);
   if (!pick.account) {
@@ -59,7 +59,7 @@ export async function POST(req: Request) {
   // The picked drive may have been disabled between the pin check and the
   // quota probe — re-verify fresh right before minting the session.
   const fresh = await requireActiveAccount(pick.account.id);
-  if ("error" in fresh) return Response.json({ error: fresh.error }, { status: fresh.status });
+  if ("error" in fresh) return driveBlockedResponse(fresh);
   // A caller-supplied parent must sit inside the target's scope (or be the
   // scope root itself) — never smuggle bytes elsewhere.
   const scopeRoot = pick.account.root_id ?? null;
@@ -78,9 +78,17 @@ export async function POST(req: Request) {
       name: body.name, mime: body.mime ?? "application/octet-stream", size: body.size, parents,
     });
     const parentUsed = parents?.[0] ?? null;
+    // Quota snapshot for the upload panel (display only — complete re-reads
+    // quota server-side for the audit; the client value is never trusted).
+    let quotaBefore: { usage: number | null; limit: number | null; free: number | null } | null = null;
+    try {
+      const q = await quotaFor(pick.account);
+      quotaBefore = { usage: q.usage, limit: q.limit, free: q.free };
+    } catch { /* advisory only */ }
     return Response.json({
       ok: true, sessionUri, accountId: pick.account.id,
       accountLabel: pick.account.label, parentUsed, size: body.size,
+      scopeRootId: pick.account.root_id ?? null, quotaBefore,
     });
   } catch (e) {
     return Response.json({ error: googleErrorMessage(e instanceof Error ? e.message : "google upload failed") }, { status: 502 });

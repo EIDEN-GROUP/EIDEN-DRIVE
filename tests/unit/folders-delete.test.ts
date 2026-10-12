@@ -10,6 +10,7 @@ const state = {
   files: [] as { id: string; folder: string | null; google_file_id: string | null; drive_account_id: string | null }[],
   bin: [] as { file_id: string; deleted_by: string }[],
   googleErr: null as null | Error,
+  deadDrive: false,
 };
 const ops: string[] = [];
 
@@ -86,7 +87,16 @@ vi.mock("@/lib/supabase-admin", () => ({
   hasAdminClient: () => true,
   adminClient: () => ({ from: table }),
 }));
-vi.mock("@/lib/drive-accounts", () => ({ driveCtxFor: async () => ({ drive: {}, rootId: "", label: "D" }) }));
+vi.mock("@/lib/drive-accounts", async () => {
+  const real = await vi.importActual<typeof import("@/lib/drive-accounts")>("@/lib/drive-accounts");
+  return {
+    ...real,
+    driveCtxFor: async () => ({ drive: {}, rootId: "", label: "D" }),
+    driveGoneReason: async () => (state.deadDrive
+      ? { error: "chosen drive is disabled", code: "drive_disabled", status: 410 }
+      : null),
+  };
+});
 vi.mock("@/lib/google-drive", () => ({
   rootFor: async () => ({ kind: "mydrive", id: "root" }),
   googleErrorMessage: (m: string) => m,
@@ -107,7 +117,7 @@ describe("DELETE /api/folders (bin contents)", () => {
   beforeEach(() => {
     ops.length = 0;
     Object.assign(state, {
-      role: "manager", googleErr: null,
+      role: "manager", googleErr: null, deadDrive: false,
       folders: [
         { id: FOLDER, name: "A", parent: null },
         { id: "b", name: "B", parent: FOLDER },
@@ -152,6 +162,16 @@ describe("DELETE /api/folders (bin contents)", () => {
     // file2's bin row was rolled back; file1 (local, done earlier) stays binned.
     expect(state.bin.some((b) => b.file_id === "file2")).toBe(false);
     // Folders untouched — safe to retry.
+    expect(state.folders).toHaveLength(4);
+  });
+
+  it("refuses with a coded error on a dead drive (bin row rolled back, folders untouched)", async () => {
+    state.deadDrive = true;
+    const r = await call();
+    expect(r.status).toBe(410);
+    expect(await r.json()).toMatchObject({ code: "drive_disabled" });
+    // file2's bin row was rolled back; file1 (local, done earlier) stays binned.
+    expect(state.bin.some((b) => b.file_id === "file2")).toBe(false);
     expect(state.folders).toHaveLength(4);
   });
 

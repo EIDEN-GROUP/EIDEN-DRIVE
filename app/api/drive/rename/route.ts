@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { renameDriveFile } from "@/lib/google-drive";
-import { driveCtxFor } from "@/lib/drive-accounts";
+import { driveCtxFor, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
 import { canTouch, isBinned, binnedResponse, googleInScope } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
@@ -35,11 +35,18 @@ export async function PATCH(req: Request) {
     }
   }
   if (f.google_file_id) {
+    // Fail closed before touching Google: no env-token rename, no stub
+    // fake-success (the index update below must match Drive reality).
+    const block = await driveGoneReason((f as { drive_account_id?: string | null }).drive_account_id);
+    if (block) return driveBlockedResponse(block);
     try {
       const ctx = await driveCtxFor((f as { drive_account_id?: string | null }).drive_account_id);
-      await renameDriveFile(String(f.google_file_id), p.data.name, ctx?.drive ?? undefined);
+      if (!ctx?.drive) {
+        return driveBlockedResponse({ error: "chosen drive is disabled — re-enable it in Storage or pick another drive", code: "drive_disabled", status: 410 });
+      }
+      await renameDriveFile(String(f.google_file_id), p.data.name, ctx.drive);
     }
-    catch { return Response.json({ error: "Google rename failed — nothing changed" }, { status: 502 }); }
+    catch { return Response.json({ error: "Google rename failed — nothing changed", code: "google_failed" }, { status: 502 }); }
   }
   const { error } = await db.from("file_index").update({ name: p.data.name }).eq("id", p.data.file_id);
   if (error) return Response.json({ error: error.message }, { status: 500 });

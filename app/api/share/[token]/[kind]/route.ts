@@ -1,7 +1,7 @@
 import { adminClient } from "@/lib/supabase-admin";
 import { bucketFor } from "@/lib/storage";
 import { isBinned, googleInScope } from "@/lib/visibility";
-import { driveCtxFor, accountAccessToken, getAccounts } from "@/lib/drive-accounts";
+import { driveCtxFor, accountAccessToken, getAccounts, driveGoneReason } from "@/lib/drive-accounts";
 import { resolveShare, throttled } from "@/lib/share";
 
 export const dynamic = "force-dynamic";
@@ -10,8 +10,17 @@ export const dynamic = "force-dynamic";
 // in-app preview; anything bigger must open the Drive page signed in.
 const RAW_MAX = 25 * 1024 * 1024;
 
-function denied() {
-  return Response.json({ error: "this link is invalid, expired or revoked" }, { status: 404 });
+function denied(code?: string) {
+  // Public route: always 404 (no account oracle), but the code tells the app
+  // UI why — dead drives refuse instead of serving via a fallback token.
+  return Response.json({ error: "this link is invalid, expired or revoked", ...(code ? { code } : {}) }, { status: 404 });
+}
+
+// Fail-closed drive pre-check for public bytes: deleted/disabled/legacy pins
+// deny. The 404 shape is deliberate (no oracle); the code names the reason.
+async function driveUsable(accountId?: string | null): Promise<string | null> {
+  const block = await driveGoneReason(accountId);
+  return block ? block.code : null;
 }
 
 // Served from the app's own origin with the uploader's MIME — treat as
@@ -63,6 +72,8 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
   // (the share page falls back to its generic tile — never a broken image).
   if (kind === "thumb") {
     if (!file.google_file_id) return denied();
+    const thumbBlock = await driveUsable(file.drive_account_id);
+    if (thumbBlock) return denied(thumbBlock);
     try {
       const access = await accountAccessToken(file.drive_account_id);
       const meta = await fetch(
@@ -100,9 +111,11 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
         return Response.json({ error: "too large for link preview — open it signed in" }, { status: 400 });
       }
     } else if (file.google_file_id) {
+      const rawBlock = await driveUsable(file.drive_account_id);
+      if (rawBlock) return denied(rawBlock);
       const ctx = await driveCtxFor(file.drive_account_id);
       const g = ctx?.drive;
-      if (!g) return denied();
+      if (!g) return denied("drive_disabled");
       const dl = await g.files.get({ fileId: file.google_file_id, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" });
       buf = Buffer.from(dl.data as ArrayBuffer);
     } else {
