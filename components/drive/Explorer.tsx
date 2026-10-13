@@ -108,6 +108,9 @@ export default function Explorer() {
   const selSet = useMemo(() => new Set([selKey, ...multi].filter(Boolean) as string[]), [selKey, multi]);
   function clearSel() { setSelKey(null); setMulti([]); anchorRef.current = -1; }
   const [infoOpen, setInfoOpen] = useState(false);
+  // "Modified by" attribution cache (row key → server-resolved event). One
+  // lazy request per opened Info item — never a request per listing row.
+  const [infoMeta, setInfoMeta] = useState<Record<string, { at: string | null; by: string | null }>>({});
   const [pane, setPane] = useState<boolean | null>(null); // null = decide after mount (responsive default)
   const [favOpen, setFavOpen] = useState(true);
   const [tagsOpen, setTagsOpen] = useState(true);
@@ -507,6 +510,22 @@ export default function Explorer() {
 
   // Details-panel facts. Folders get folder facts (where, what's inside, who
   // made it); files get file facts. "--" only when the data truly doesn't exist.
+  // /api/drive/info query for one row (null = unresolvable client-side:
+  // Google-only tree nodes with no index row — those render "Not recorded").
+  function infoParams(r: Row): string | null {
+    if (r.kind === "file" && r.file && !r.id.startsWith("g:")) return `file_id=${encodeURIComponent(r.file.id)}`;
+    if (r.folder) return `folder_id=${encodeURIComponent(r.folder.id)}`;
+    // Indexed Google folders render as folders but their audit trail lives on
+    // the index (file) row — renames/trashes mirror to Drive through it.
+    const indexRowId = r.file?.id ?? r.indexId;
+    if (indexRowId && !String(indexRowId).startsWith("g:")) return `file_id=${encodeURIComponent(indexRowId)}`;
+    return null;
+  }
+  function infoBy(r: Row): string {
+    const m = infoMeta[r.key];
+    if (m) return m.by ?? "Not recorded";
+    return infoParams(r) ? "…" : "Not recorded";
+  }
   function detailRows(r: Row): [string, string][] {
     const gid = r.kind === "folder"
       ? (r.googleFolder ?? (r.id.startsWith("gdrive:") ? r.id.slice("gdrive:".length) : null))
@@ -534,10 +553,12 @@ export default function Explorer() {
       const createdBy = r.folder ? r.folder.created_by_name : indexRow?.owner_name;
       const createdAt = r.folder ? r.folder.created_at : indexRow?.created_at;
       const count = `${subFolders} folder${subFolders === 1 ? "" : "s"} · ${subFiles} file${subFiles === 1 ? "" : "s"}`;
+      const fmeta = infoMeta[r.key];
       return [
         ["Created by", createdBy ?? "--"],
         ["Created", fmtDate(createdAt)],
-        ["Modified", fmtDate(latest || indexRow?.updated_at || indexRow?.updated)],
+        ["Modified", fmeta?.at ? fmtDate(fmeta.at) : fmtDate(latest || indexRow?.updated_at || indexRow?.updated)],
+        ["Modified by", infoBy(r)],
         ["Location", where],
         ["Contains", count],
         ["Size", folderSize(r)],
@@ -545,10 +566,12 @@ export default function Explorer() {
       ];
     }
     const f = r.file;
+    const fmeta = infoMeta[r.key];
     return [
       ["Created by", f?.owner_name ?? "--"],
       ["Created", fmtDate(f?.created_at)],
-      ["Modified", f ? fmtDate(f.updated_at ?? f.updated) : "--"],
+      ["Modified", fmeta?.at ? fmtDate(fmeta.at) : (f ? fmtDate(f.updated_at ?? f.updated) : "--")],
+      ["Modified by", infoBy(r)],
       ["Location", locText(r)],
       ...(f?.accountLabel ? [["Drive", f.accountLabel] as [string, string]] : []),
       ["SHA-256", f?.hash ? `${f.hash.slice(0, 12)}…` : "--"]
@@ -1528,6 +1551,24 @@ export default function Explorer() {
   const fileRows = rows.filter((r) => r.kind === "file");
   const totalSize = fileRows.reduce((s, r) => s + (r.file?.size ?? 0), 0);
   const showInfo = !!sel && (view === "grid" || infoOpen || nav.kind === "bin");
+
+  // "Modified by" attribution: one lazy request per opened Info item (cached
+  // by row key) — never a request per listing row. The server rechecks access
+  // before returning audit metadata; failures keep the static fallbacks.
+  useEffect(() => {
+    if (!showInfo || !sel) return;
+    const params = infoParams(sel);
+    if (!params || infoMeta[sel.key]) return;
+    const key = sel.key;
+    fetch(`/api/drive/info?${params}`).then((r) => r.json().catch(() => null)).then((d) => {
+      if (d && typeof d === "object" && ("modified_at" in d || "modified_by" in d)) {
+        setInfoMeta((m) => (m[key] ? m : { ...m, [key]: { at: d.modified_at ?? null, by: d.modified_by ?? null } }));
+      }
+    }).catch(() => {});
+    // infoMeta intentionally excluded — the functional update + cached-key
+    // guard make re-runs no-ops; listing it would refetch on every resolve.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showInfo, sel?.key]);
 
   function sortBy(key: SortKey) { setSort((s) => (s.key === key ? { key, dir: (s.dir * -1) as 1 | -1 } : { key, dir: 1 })); }
   const arrow = (key: SortKey) => sort.key === key ? (sort.dir === 1 ? <ChevronUp size={13} /> : <ChevronDown size={13} />) : null;

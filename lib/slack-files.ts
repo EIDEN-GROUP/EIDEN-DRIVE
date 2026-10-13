@@ -31,19 +31,26 @@ export async function botIdentity(eidenUserId: string): Promise<Me | null> {
 }
 
 async function filterVisible(db: ReturnType<typeof adminClient>, me: Me, rows: BotFile[]): Promise<BotFile[]> {
-  const out: BotFile[] = [];
-  for (const r of rows) {
-    if (r.google_file_id && r.drive_account_id) {
-      // Scope first (cheap, no Drive calls): out-of-scope rows hide.
-      const { googleInScope } = await import("@/lib/visibility");
-      const { getAccounts } = await import("@/lib/drive-accounts");
-      if (!(await googleInScope(db, await getAccounts(), r.drive_account_id, r.google_file_id))) continue;
+  // Read-only checks run concurrently (order-preserving): the sequential
+  // version stacked 2+ round trips per row and blew Slack's 3s deadline on
+  // checkbox-heavy modals. googleInScope's cache is a benign read-through
+  // (last-write-wins identical values), so concurrent use is safe.
+  const { googleInScope } = await import("@/lib/visibility");
+  const { getAccounts } = await import("@/lib/drive-accounts");
+  const accounts = await getAccounts();
+  const flags = await Promise.all(rows.map(async (r) => {
+    try {
+      if (r.google_file_id && r.drive_account_id) {
+        if (!(await googleInScope(db, accounts, r.drive_account_id, r.google_file_id))) return false;
+      }
+      const gate = await canTouch(db, me,
+        { id: r.id, owner: r.owner ?? "", folder: r.folder }, googlePinOf(r));
+      return gate.ok;
+    } catch {
+      return false; // fail closed on transient errors
     }
-    const gate = await canTouch(db, me,
-      { id: r.id, owner: r.owner ?? "", folder: r.folder }, googlePinOf(r));
-    if (gate.ok) out.push(r);
-  }
-  return out;
+  }));
+  return rows.filter((_, i) => flags[i]);
 }
 
 /** Name search within the linked user's visible files (bounded page). */

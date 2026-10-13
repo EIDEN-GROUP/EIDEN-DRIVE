@@ -62,6 +62,12 @@ export async function recordDismissal(workspaceId: string, slackUserId: string):
 
 const PAIRING_TTL_MS = 15 * 60_000;
 
+/** Connect-landing URL for a fresh pairing token (origin may be ""). */
+export function pairingUrl(origin: string, workspaceId: string, slackUserId: string, token: string | null): string {
+  if (!token || !origin) return origin;
+  return `${origin}/slack/connect?token=${token}&workspace=${encodeURIComponent(workspaceId)}&user=${encodeURIComponent(slackUserId)}`;
+}
+
 /** Mint a single-use pairing token bound to one workspace + Slack user. */
 export async function mintPairingToken(workspaceId: string, slackUserId: string): Promise<string | null> {
   if (!hasAdminClient()) return null;

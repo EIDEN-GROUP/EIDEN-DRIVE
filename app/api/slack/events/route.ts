@@ -1,13 +1,10 @@
 export const dynamic = "force-dynamic";
 
-import { verifySlackRequest, chatUnfurl, chatPostEphemeral, appOrigin, parseDriveLink } from "@/lib/slack";
-import { linkedEidenUser, mintPairingToken, promptDismissed, recordDismissal } from "@/lib/slack-links";
-import { botIdentity, botGetFile, hasLiveShareLink } from "@/lib/slack-files";
-import { genericLinkCard, connectPromptBlocks, fileKindLabel, formatBytes } from "@/lib/slack-modal";
-import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
+import { verifySlackRequest, logSlackVerify, appOrigin, parseDriveLink } from "@/lib/slack";
+import { enqueueSlackEvent, type SlackJob, type LinkSharedJobPayload, type AppHomeJobPayload } from "@/lib/slack-queue";
+import { runLinkShared, runAppHome, JobFail } from "@/lib/slack-process";
 import { rateLimited, clientIp } from "@/lib/rate";
 
-interface LinkSharedLink { url: string }
 interface LinkSharedEvent {
   type: string;
   user?: string;
@@ -15,8 +12,9 @@ interface LinkSharedEvent {
   message_ts?: string;
   bot_id?: string;
   subtype?: string;
-  links?: LinkSharedLink[];
+  links?: { url: string }[];
   unfurl_id?: string;
+  source?: string;
 }
 interface EventsPayload {
   type: string;
@@ -26,16 +24,19 @@ interface EventsPayload {
   event?: LinkSharedEvent;
 }
 
-// POST /api/slack/events — Events API (url_verification + link_shared).
-// Verified first (raw body, signing secret, 5-min tolerance). Deliveries are
-// retried by Slack: event_ids are recorded (PK) and replays skipped.
+// POST /api/slack/events — Events API (url_verification + link_shared +
+// app_home_opened). Verified first (raw body, signing secret, 5-min
+// tolerance), then ACKED FAST: the route only enqueues durable work for the
+// cron processor (/api/slack/process) and returns 200 well inside Slack's
+// ~3s deadline. No DB fan-out or Slack API call happens before the ack.
+//
 // link_shared fires only for USER-authored messages — Slack never sends it
 // for bot/app messages, so our own share cards can't self-unfurl (and we
 // additionally ignore any event carrying a bot_id).
 export async function POST(req: Request) {
   const raw = await req.text();
   const v = await verifySlackRequest(req, raw);
-  if (!v.ok) return new Response(null, { status: 401 });
+  if (!v.ok) { logSlackVerify("events", v.error); return new Response(null, { status: 401 }); }
   let payload: EventsPayload;
   try {
     payload = JSON.parse(raw) as EventsPayload;
@@ -50,109 +51,81 @@ export async function POST(req: Request) {
 
   const eventId = payload.event_id ?? "";
   const teamId = payload.team_id ?? "";
-  if (eventId && hasAdminClient()) {
-    // Idempotency first: replayed deliveries hit the PK and stop here.
-    try {
-      const { error } = await adminClient().from("slack_event_log").insert({ event_id: eventId });
-      if (error) {
-        if (/duplicate|unique/i.test(error.message)) return new Response(null, { status: 200 });
-        console.warn(`[slack-events] event-log write failed: ${error.message}`);
-      }
-      // Opportunistic prune (best-effort).
-      try {
-        await adminClient().from("slack_event_log").delete().lt("created_at", new Date(Date.now() - 7 * 86400_000).toISOString());
-      } catch { /* ignore */ }
-    } catch (e) {
-      console.warn(`[slack-events] event-log check failed: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
+  if (!eventId || !teamId) return new Response(null, { status: 200 });
   const ev = payload.event;
-  // App Home: link status + connect/disconnect, no file data.
-  if (ev.type === "app_home_opened") {
-    const homeUser = ev.user ?? "";
-    const homeTeam = teamId;
-    if (homeUser && homeTeam) {
-      const link = await linkedEidenUser(homeTeam, homeUser).catch(() => null);
-      let eidenUsername: string | null = null;
-      if (link && hasAdminClient()) {
-        try {
-          const { data } = await adminClient().from("profiles").select("username").eq("id", link.id).maybeSingle();
-          eidenUsername = ((data ?? {}) as { username?: string }).username ?? null;
-        } catch { /* ignore */ }
-      }
-      const token = link ? null : await mintPairingToken(homeTeam, homeUser).catch(() => null);
-      const origin = appOrigin(req);
-      const connectUrl = token && origin
-        ? `${origin}/slack/connect?token=${token}&workspace=${encodeURIComponent(homeTeam)}&user=${encodeURIComponent(homeUser)}`
-        : origin;
-      const { homeView } = await import("@/lib/slack-modal");
-      const pub = await (await import("@/lib/slack")).slackApi("views.publish", {
-        user_id: homeUser, view: homeView({ linked: !!link, eidenUsername, connectUrl }),
-      });
-      if (!pub.ok) console.warn(`[slack-events] home publish failed: ${pub.error}`);
-    }
-    return new Response(null, { status: 200 });
-  }
-  if (ev.type !== "link_shared" || ev.bot_id || ev.subtype === "bot_message") {
-    return new Response(null, { status: 200 });
-  }
-  const channel = ev.channel ?? "";
-  const userId = ev.user ?? "";
-  const messageTs = ev.message_ts ?? "";
-  if (!channel || !userId || !teamId) return new Response(null, { status: 200 });
-  // Composer previews (no posted message yet) carry no message_ts — nothing
-  // to unfurl against; the posted-message event follows if they send it.
-  if (!messageTs) return new Response(null, { status: 200 });
+  if (ev.bot_id || ev.subtype === "bot_message") return new Response(null, { status: 200 });
 
   const origin = appOrigin(req);
-  const driveLinks = (ev.links ?? [])
-    .map((l) => ({ url: l.url, file: parseDriveLink(l.url, origin) }))
-    .filter((l): l is { url: string; file: { fileId: string } } => !!l.file);
-  if (!driveLinks.length) return new Response(null, { status: 200 });
 
-  const link = await linkedEidenUser(teamId, userId);
-  if (!link) {
-    // Unlinked sharer: private connect prompt (never file details), unless
-    // dismissed. Recorded dismissals are respected across restarts (DB).
-    if (await promptDismissed(teamId, userId)) return new Response(null, { status: 200 });
-    const token = await mintPairingToken(teamId, userId);
-    const connectUrl = token && origin ? `${origin}/slack/connect?token=${token}&workspace=${encodeURIComponent(teamId)}&user=${encodeURIComponent(userId)}` : origin;
-    const posted = await chatPostEphemeral({
-      channel, user: userId,
-      text: "This looks like an EIDEN-DRIVE link. Connect to preview files.",
-      blocks: connectPromptBlocks(connectUrl),
-    });
-    if (!posted.ok) console.warn(`[slack-events] connect prompt failed: ${posted.error}`);
+  if (ev.type === "app_home_opened") {
+    const user = ev.user ?? "";
+    if (!user) return new Response(null, { status: 200 });
+    await dispatch({ event_id: eventId, team_id: teamId, kind: "app_home", payload: { user, origin } });
     return new Response(null, { status: 200 });
   }
 
-  const me = await botIdentity(link.id);
-  if (!me) return new Response(null, { status: 200 });
+  if (ev.type !== "link_shared") return new Response(null, { status: 200 });
 
-  // Per-link unfurls. Privacy rule: the preview is conversation-visible, so
-  // full details appear ONLY for files with a live public share link
-  // (intentionally public). Everything else gets the generic card — no
-  // filenames, sizes, owners, or paths leak to the channel.
-  const unfurls: Record<string, unknown> = {};
-  for (const l of driveLinks.slice(0, 5)) {
-    const f = await botGetFile(me, l.file.fileId).catch(() => null);
-    if (f && (await hasLiveShareLink(f.id).catch(() => false))) {
-      const url = `${origin}/drive/${f.id}`;
-      unfurls[l.url] = {
-        title: f.name.slice(0, 120),
-        title_link: url,
-        text: `${fileKindLabel(f.mime)} · ${formatBytes(f.size)}`,
-        footer: "EIDEN-DRIVE",
-        actions: [{ type: "button", text: "Open in Eiden Drive", url }],
-      };
-    } else {
-      unfurls[l.url] = genericLinkCard(origin, l.file.fileId);
-    }
+  // Composer vs posted (per current Events API docs): composer previews
+  // carry channel "COMPOSER", a synthetic message_ts, unfurl_id, and
+  // source "composer". Enterprise workspaces may omit source/unfurl_id —
+  // the channel sentinel is the fallback signal.
+  const isComposer = ev.source === "composer" || (!ev.source && ev.channel === "COMPOSER");
+  const userId = ev.user ?? "";
+  if (!userId) return new Response(null, { status: 200 });
+  if (isComposer && !ev.unfurl_id) return new Response(null, { status: 200 });
+  if (!isComposer && (!ev.channel || !ev.message_ts || ev.channel === "COMPOSER")) {
+    return new Response(null, { status: 200 });
   }
-  if (Object.keys(unfurls).length) {
-    const r = await chatUnfurl({ channel, ts: messageTs, unfurls });
-    if (!r.ok) console.warn(`[slack-events] unfurl failed: ${r.error}`);
-  }
+  // Foreign-domain links never reach the queue (parsed against the canonical
+  // origin — never hard-coded, so staging and production match only theirs).
+  const urls = (ev.links ?? []).map((l) => l.url).filter((u) => parseDriveLink(u, origin));
+  if (!urls.length) return new Response(null, { status: 200 });
+
+  const jobPayload: LinkSharedJobPayload = {
+    user: userId,
+    channel: isComposer ? "COMPOSER" : (ev.channel ?? ""),
+    message_ts: ev.message_ts ?? "",
+    links: urls.slice(0, 5),
+    unfurl_id: ev.unfurl_id ?? null,
+    source: isComposer ? "composer" : "posted",
+    is_refresh: (ev as { is_unfurl_refresh?: boolean }).is_unfurl_refresh === true,
+    origin,
+  };
+  await dispatch({ event_id: eventId, team_id: teamId, kind: "link_shared", payload: jobPayload });
   return new Response(null, { status: 200 });
+}
+
+// Enqueue for the cron worker; pre-migration (0022 schema only) the queue
+// degrades to the legacy bare-event insert + synchronous processing here —
+// today's behavior, unchanged.
+async function dispatch(job: { event_id: string; team_id: string; kind: "link_shared"; payload: LinkSharedJobPayload } | { event_id: string; team_id: string; kind: "app_home"; payload: AppHomeJobPayload }) {
+  const verdict = await enqueueSlackEvent(job);
+  if (verdict === "dropped") {
+    // Transient DB failure: 200 with no work (Slack's own redelivery
+    // re-attempts the enqueue). Loud in logs so an outage is visible.
+    console.warn(`[slack-events] ${job.kind} ${job.event_id} dropped (database unavailable)`);
+    return;
+  }
+  if (verdict !== "inline") return;
+  const full: SlackJob = {
+    event_id: job.event_id, team_id: job.team_id, kind: job.kind,
+    attempts: 0, payload: job.payload, prompt_sent: false, unfurled: false,
+  };
+  try {
+    if (job.kind === "link_shared") await runLinkShared({ ...full, payload: job.payload });
+    else await runAppHome({ ...full, payload: job.payload });
+  } catch (e) {
+    const code = e instanceof JobFail ? e.code : "unknown";
+    console.warn(`[slack-events] inline ${job.kind} failed (${code})`);
+  }
+  // Legacy-schema prune (0022 rows have no status columns, so the worker's
+  // status-scoped prune can't see them). Fire-and-forget — never delays the
+  // ack; the worker owns pruning once 0023 is applied.
+  try {
+    const { adminClient } = await import("@/lib/supabase-admin");
+    adminClient().from("slack_event_log").delete()
+      .lt("created_at", new Date(Date.now() - 7 * 86400_000).toISOString())
+      .then(() => {}, () => {});
+  } catch { /* ignore */ }
 }

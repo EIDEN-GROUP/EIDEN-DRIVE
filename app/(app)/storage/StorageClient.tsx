@@ -15,13 +15,24 @@ function usbJobError(j: Job): string | null {
   return j.status === "failed" ? (j.payload?.error ?? "agent reported failure") : null;
 }
 
+interface SlackCheck { ok: boolean; detail: string }
+interface SlackStatus {
+  configured: boolean;
+  checks?: {
+    webhook: SlackCheck; bot_token: SlackCheck;
+    bot_identity: { user: string; team: string } | null;
+    signing_secret: SlackCheck; app_url: SlackCheck; database: SlackCheck;
+    scopes_note: string;
+  };
+}
+
 function SlackCard() {
-  const [st, setSt] = useState<{ configured: boolean } | null>(null);
+  const [st, setSt] = useState<SlackStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   useEffect(() => {
     fetch("/api/integrations/slack").then((r) => r.json().catch(() => ({}))).then((d) => {
-      if (typeof d.configured === "boolean") setSt({ configured: d.configured });
+      if (typeof d.configured === "boolean") setSt(d);
     }).catch(() => {});
   }, []);
   async function test() {
@@ -37,15 +48,33 @@ function SlackCard() {
     <div>
       <p className="text-[13.5px]">
         {st.configured
-          ? "Connected — new uploads post automatically."
-          : <>Not connected. Add an Incoming Webhook URL as <code>SLACK_WEBHOOK_URL</code> in Vercel env, then redeploy.</>}
+          ? "Upload webhook connected — new uploads post automatically."
+          : <>Upload webhook not connected. Add an Incoming Webhook URL as <code>SLACK_WEBHOOK_URL</code> in Vercel env, then redeploy.</>}
       </p>
+      {/* Webhook ≠ whole bot: each integration leg reports separately. */}
+      {st.checks && (
+        <dl className="mt-3 space-y-1.5 text-[12.5px]">
+          {([
+            ["Bot token", st.checks.bot_token],
+            ["Signing secret", st.checks.signing_secret],
+            ["App URL", st.checks.app_url],
+            ["Database", st.checks.database],
+          ] as [string, SlackCheck][]).map(([label, c]) => (
+            <div key={label} className="flex items-start gap-2">
+              <span aria-hidden="true" className={c.ok ? "text-emerald-600" : "text-muted"}>{c.ok ? "●" : "○"}</span>
+              <div>
+                <dt className="inline font-medium">{label} — </dt>
+                <dd className="inline text-muted">{c.detail}</dd>
+              </div>
+            </div>
+          ))}
+        </dl>
+      )}
       <p className="mt-2 text-[12.5px] text-muted">
-        Uploader names: link each account to its Slack user ID on the Users page (admins only) and add a{" "}
-        <code>SLACK_BOT_TOKEN</code> (bot token with the <code>users:read</code> scope only) so upload posts show{" "}
-        <code>@display_name</code> next to the Eiden username. After adding the scope, reinstall the Slack app to the
-        workspace (or reauthorize it) or lookups fail with <code>missing_scope</code> and names fall back silently.
+        Uploader names: link each account to its Slack user ID on the Users page (admins only) and set a{" "}
+        <code>SLACK_BOT_TOKEN</code> so upload posts show <code>@display_name</code> next to the Eiden username.
         Without the token, posts use the Eiden username alone — uploads never fail over this.
+        Full bot setup (slash command, unfurls, required scopes, reinstall steps): <code>docs/slack-bot.md</code>.
       </p>
       {st.configured && (
         <button onClick={test} disabled={busy} className="mt-3 min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint disabled:opacity-50">

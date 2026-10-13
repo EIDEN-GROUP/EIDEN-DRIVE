@@ -39,7 +39,10 @@ describe("verifySlackRequest", () => {
   it("rejects tampered bodies and wrong signatures", async () => {
     const ts = String(Math.floor(Date.now() / 1000));
     const good = sign(SECRET, ts, body);
-    expect((await verifySlackRequest(reqOf(body, ts, good.slice(0, -1) + "0"), body)).ok).toBe(false);
+    // Flip the last nibble to a GUARANTEED-different value (blindly forcing
+    // "0" is a no-op 1/16 of the time and flakes).
+    const badSig = good.slice(0, -1) + (good.endsWith("0") ? "1" : "0");
+    expect((await verifySlackRequest(reqOf(body, ts, badSig), body)).ok).toBe(false);
     expect((await verifySlackRequest(reqOf(body + "&evil=1", ts, good), body + "&evil=1")).ok).toBe(false);
     expect((await verifySlackRequest(reqOf(body, ts, sign("other-secret", ts, body)), body)).ok).toBe(false);
   });

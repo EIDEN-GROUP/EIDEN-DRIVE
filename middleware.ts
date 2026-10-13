@@ -15,6 +15,13 @@ const PUBLIC = [
   "/api/auth/link",            // public sign-in link sender (throttled, generic replies)
   "/api/agent",                // bearer AGENT_TOKEN (POST); GET self-gates with session
   "/api/drive/webhook",        // x-goog-channel-token
+  // Slack callbacks: NO browser session exists — each route verifies Slack's
+  // HMAC signature itself (raw body, timestamp tolerance, SLACK_SIGNING_SECRET)
+  // and fails closed without it. Exact paths only: /api/slack/connect stays
+  // session-protected (account linking binds the SIGNED-IN Eiden account).
+  "/api/slack/events",
+  "/api/slack/commands",
+  "/api/slack/interactions",
   "/s",                        // public share pages — the unguessable token IS the auth
   "/api/share",                // manage API self-gates with session; /api/share/<token>/* is token-authed + throttled
   "/manifest.json",

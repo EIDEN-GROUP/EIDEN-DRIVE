@@ -55,6 +55,22 @@ export async function verifySlackRequest(req: Request, rawBody: string): Promise
   return { ok: true };
 }
 
+// Safe failure category for callback logs: fixed strings only — never the
+// token, the secret, the request body, or anything derived from them.
+export type SlackVerifyCategory = "missing-secret" | "missing-signature" | "stale-timestamp" | "bad-signature";
+
+export function slackVerifyCategory(error: string): SlackVerifyCategory {
+  if (error === "slack not configured") return "missing-secret";
+  if (error === "missing signature") return "missing-signature";
+  if (error === "stale request") return "stale-timestamp";
+  return "bad-signature";
+}
+
+/** One-line rejection diagnostic for Slack callback routes (category only). */
+export function logSlackVerify(route: "events" | "commands" | "interactions", error: string): void {
+  console.warn(`[slack-${route}] request rejected (${slackVerifyCategory(error)})`);
+}
+
 // ── Authenticated Web API client (bot token) ────────────────────────
 // Server-only: SLACK_BOT_TOKEN must never reach the browser. Every call is
 // bounded (10s) and returns a typed {ok} — callers decide fallback, and
@@ -109,9 +125,29 @@ export async function viewsUpdate(args: { view_id: string; view: unknown; hash?:
   return r.ok ? { ok: true } : { ok: false, error: r.error };
 }
 
-/** Unfurl one or more links (app unfurl domains must be registered first). */
-export async function chatUnfurl(args: { channel: string; ts: string; unfurls: Record<string, unknown> }): Promise<{ ok: boolean; error?: string }> {
-  const r = await slackApi("chat.unfurl", args);
+/**
+ * Unfurl one or more links (app unfurl domains must be registered first).
+ * Posted messages use channel+ts; composer previews use unfurl_id+source
+ * (channel "COMPOSER" + synthetic ts must NEVER go to other API methods —
+ * those calls fail). user_auth_* renders Slack's native connect prompt
+ * instead of preview content (unfurls omitted in that flow).
+ */
+export async function chatUnfurl(args: {
+  channel?: string; ts?: string;
+  unfurl_id?: string; source?: "composer" | "conversations_history";
+  unfurls?: Record<string, unknown>;
+  user_auth_required?: boolean; user_auth_message?: string; user_auth_url?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const body: Record<string, unknown> = {};
+  if (args.unfurl_id && args.source) { body.unfurl_id = args.unfurl_id; body.source = args.source; }
+  else { body.channel = args.channel; body.ts = args.ts; }
+  if (args.unfurls) body.unfurls = args.unfurls;
+  if (args.user_auth_required) {
+    body.user_auth_required = true;
+    if (args.user_auth_message) body.user_auth_message = args.user_auth_message;
+    if (args.user_auth_url) body.user_auth_url = args.user_auth_url;
+  }
+  const r = await slackApi("chat.unfurl", body);
   return r.ok ? { ok: true } : { ok: false, error: r.error };
 }
 

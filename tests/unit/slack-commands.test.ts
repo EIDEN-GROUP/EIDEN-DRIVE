@@ -31,6 +31,8 @@ vi.mock("@/lib/slack-links", () => ({
   mintPairingToken: async () => "eiden_testtoken",
   promptDismissed: async () => state.dismissed,
   recordDismissal: async () => { calls.push({ fn: "dismiss", args: {} }); },
+  pairingUrl: (origin: string, _w: string, _u: string, t: string | null) =>
+    (t && origin ? `${origin}/slack/connect?token=${t}` : origin),
 }));
 vi.mock("@/lib/slack-files", () => ({
   botIdentity: async () => (state.linked ? { id: "e1", role: "member", department_tag: null } : null),
@@ -79,11 +81,13 @@ describe("POST /api/slack/commands", () => {
     expect(calls.some((c) => c.fn === "views.open")).toBe(false);
   });
 
-  it("dismissed users get quiet text (no re-prompt)", async () => {
+  it("dismissed users who run the command get the way back in (button, no unsolicited prompt)", async () => {
     state.dismissed = true;
     const r = await POST(signedForm({}));
     const j = await r.json();
     expect(j.response_type).toBe("ephemeral");
+    // Explicit invocation → connect button offered; no chat.postEphemeral API call.
+    expect(JSON.stringify(j.blocks)).toMatch(/slack\/connect\?token=eiden_testtoken/);
     expect(calls.some((c) => c.fn === "ephemeral")).toBe(false);
   });
 

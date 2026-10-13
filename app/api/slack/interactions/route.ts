@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 
-import { verifySlackRequest, viewsUpdate, chatPostMessage } from "@/lib/slack";
+import { verifySlackRequest, logSlackVerify, viewsUpdate, chatPostMessage } from "@/lib/slack";
 import { linkedEidenUser, recordDismissal } from "@/lib/slack-links";
 import { botIdentity, botSearchFiles, botRecentFiles, botListFolders, botListFolderFiles, botGetFile, type BotFile } from "@/lib/slack-files";
 import { buildShareModal, decodeModalState, mergeSelections, shareMessageBlocks, type ShareModalState } from "@/lib/slack-modal";
@@ -36,7 +36,7 @@ interface SlackPayload {
 export async function POST(req: Request) {
   const raw = await req.text();
   const v = await verifySlackRequest(req, raw);
-  if (!v.ok) return new Response(null, { status: 401 });
+  if (!v.ok) { logSlackVerify("interactions", v.error); return new Response(null, { status: 401 }); }
   const form = new URLSearchParams(raw);
   let payload: SlackPayload;
   try {
@@ -210,14 +210,15 @@ async function handleSubmit(payload: { team?: { id?: string }; user?: { id?: str
     return Response.json({ response_action: "errors", errors: { msg_block: "Lost track of the conversation — reopen the picker with /eiden-drive." } });
   }
   // Re-authorize every id fresh (tampered state can only name ids, never
-  // bypass this): missing/invisible rows are skipped and counted.
+  // bypass this): missing/invisible rows are skipped and counted. Lookups
+  // run concurrently — view_submission must answer inside ~3s.
+  const got = await Promise.all(ids.map((id) => botGetFile(me, id).catch(() => null)));
   const files: { id: string; name: string; mime: string; size: number | null; where: string }[] = [];
   let denied = 0;
   // Folder names for the location label (one bounded query, no per-file fan-out).
   const folderIds = new Set<string>();
   const pending: { id: string; name: string; mime: string; size: number | null; folder: string | null }[] = [];
-  for (const id of ids) {
-    const f = await botGetFile(me, id).catch(() => null);
+  for (const f of got) {
     if (!f) { denied++; continue; }
     pending.push({ id: f.id, name: f.name, mime: f.mime, size: f.size, folder: f.folder });
     if (f.folder) folderIds.add(f.folder);
