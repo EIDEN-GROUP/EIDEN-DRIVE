@@ -1,13 +1,1 @@
-{
-  // Hobby plan: cron jobs may run at most once per day. This daily run is a
-  // SAFETY SWEEP only (retries leftovers + prunes finished rows) — every
-  // event is also processed inline right after enqueue (see
-  // app/api/slack/events/route.ts), so unfurls stay interactive. On Pro,
-  // tighten this to "*/5 * * * *" and drop the inline run.
-  "crons": [
-    {
-      "path": "/api/slack/process",
-      "schedule": "0 3 * * *"
-    }
-  ]
-}
+{"crons": [{"path": "/api/slack/process", "schedule": "0 3 * * *"}]}
