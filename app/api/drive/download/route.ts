@@ -7,7 +7,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { signedDownloadUrl, bucketFor } from "@/lib/storage";
 import { driveCtxFor, accountAccessToken, getAccounts, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
-import { canTouch, googleInScope, liveInScope, isBinned, binnedResponse } from "@/lib/visibility";
+import { canTouch, googleInScope, liveInScope, isBinned, binnedResponse, googlePinOf } from "@/lib/visibility";
 import { rateLimited } from "@/lib/rate";
 import { parseQuery } from "@/lib/http";
 
@@ -125,13 +125,13 @@ export async function GET(req: Request) {
         return await googleThumb(liveId.googleId, liveId.accountId);
       }
       const supa = createClient();
-      const { data: tf } = await supa.from("file_index").select("id,owner,folder,google_file_id,drive_account_id").eq("id", file_id).maybeSingle();
+      const { data: tf } = await supa.from("file_index").select("id,owner,folder,google_file_id,google_parent_id,drive_account_id").eq("id", file_id).maybeSingle();
       const gid = (tf as { google_file_id?: string | null } | null)?.google_file_id;
       if (!gid) throw new Error("this file lives in Supabase, not Google — no Drive thumbnail exists");
       // Covers are not exempt from confinement: ownership + bin + scope.
-      const tfr = tf as { id: string; owner: string; folder: string | null; drive_account_id?: string | null } | null;
+      const tfr = tf as { id: string; owner: string; folder: string | null; google_parent_id?: string | null; drive_account_id?: string | null } | null;
       if (tfr) {
-        const gate = await canTouch(adminClient(), me, { id: tfr.id, owner: tfr.owner, folder: tfr.folder });
+        const gate = await canTouch(adminClient(), me, { id: tfr.id, owner: tfr.owner, folder: tfr.folder }, googlePinOf(tfr));
         if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
         if (await isBinned(adminClient(), tfr.id)) return binnedResponse();
       }
@@ -190,11 +190,11 @@ export async function GET(req: Request) {
     return Response.json({ error: "open this file in the viewer (preview) — direct download needs a synced copy", live: true }, { status: 400 });
   }
   const supa = createClient();
-  const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,storage_bucket,google_file_id,drive_account_id,owner,folder").eq("id", file_id).maybeSingle();
+  const { data: f } = await supa.from("file_index").select("id,name,mime,size,storage_path,storage_bucket,google_file_id,google_parent_id,drive_account_id,owner,folder").eq("id", file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
   // Bytes obey the same confinement as the listing: own / dept / tag match.
   // (Live g: rows above stay open — shared drives are company-wide by scope.)
-  const gate = await canTouch(adminClient(), me, f as { id: string; owner: string; folder: string | null });
+  const gate = await canTouch(adminClient(), me, f as { id: string; owner: string; folder: string | null }, googlePinOf(f));
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   // ...and the same scope as the listing: a UUID kept from before a re-scope
   // must not stream bytes the workspace no longer shows.

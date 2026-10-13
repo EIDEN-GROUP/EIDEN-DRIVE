@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { z } from "zod";
 import { createClient } from "@/lib/supabase-server";
-import { getProfile } from "@/lib/roles";
+import { getProfile, can } from "@/lib/roles";
 import { parseQuery } from "@/lib/http";
 
 const Q = z.object({
@@ -14,11 +14,13 @@ const Q = z.object({
   limit: z.coerce.number().int().min(1).max(300).default(120)
 });
 
-// Audit trail feed. Authenticated users; Supabase RLS decides which rows each
-// role may see (same rule as the old server-rendered page).
+// Audit trail feed. Admin-only (names people + IPs): the Activity page and
+// the admin user-detail panel are the only callers. RLS still applies below
+// as defense in depth.
 export async function GET(req: Request) {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
+  if (!can(me.role, "admin-only")) return Response.json({ error: "admins only", code: "forbidden" }, { status: 403 });
   const p = parseQuery(req, Q);
   if (p.error) return p.error;
   const { q, action, actor, from, to, limit } = p.data;

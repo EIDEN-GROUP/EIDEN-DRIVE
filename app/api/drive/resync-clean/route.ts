@@ -9,14 +9,14 @@ import { parseJson } from "@/lib/http";
 
 const Body = z.object({ accountId: z.string().uuid() });
 
-// Managers+: "resync clean" for one drive. Drops that account's Google-mirrored
+// Admins: "resync clean" for one drive. Drops that account's Google-mirrored
 // index rows (pure mirrors are deleted; rows that ALSO have a Storage copy keep
 // the copy and lose the Google pin), so the next Sync rebuilds the tree from
 // the drive's current truth — no ghosts, no stale folders.
 // Use after re-scoping a root, or whenever the index disagrees with Drive.
 export async function POST(req: Request) {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  if (!me || !can(me.role, "admin-only")) return Response.json({ error: "admins only", code: "forbidden" }, { status: 403 });
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });

@@ -13,11 +13,17 @@ export interface Profile {
 export const ROLE_RANK: Record<Role, number> = { member: 1, manager: 2, admin: 3 };
 
 export function can(_actor: Role, action: string): boolean {
-  // Members: view/add/edit/move + trash-only. Permanent/restore/users/tags = manager+.
-  if (action === "perm-delete" || action === "restore" || action === "manage-users" || action === "assign-tag" || action === "create-vault")
+  // Admin-only surfaces (Activity / Security / Storage pages + their APIs):
+  // managers must not reach them unless promoted to admin.
+  if (action === "admin-only") return _actor === "admin";
+  // Members: view/add/edit/move + trash + restore-eligible. Permanent delete,
+  // user/tag/vault management = manager+. Restoration is per-item authorized
+  // on the server (ownership / department / scope) — the role gate alone is
+  // not the boundary, so members are allowed to attempt it.
+  if (action === "perm-delete" || action === "manage-users" || action === "assign-tag" || action === "create-vault")
     return _actor === "admin" || _actor === "manager";
   if (action === "approve") return _actor === "admin" || _actor === "manager";
-  return true; // view/add/edit/move/trash-request
+  return true; // view/add/edit/move/trash-request/restore
 }
 
 export function needsApproval(classification: string, action: string): boolean {

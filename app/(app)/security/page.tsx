@@ -9,16 +9,16 @@ import { actionMeta } from "@/components/dash/actions";
 
 export const dynamic = "force-dynamic";
 
-// Security Center — every number below is queried live. Managers and admins only:
-// it names people (MFA gaps, lockouts, failed logins), which members must not see.
+// Security Center — every number below is queried live. Admins only: it names
+// people (MFA gaps, lockouts, failed logins) and drives admin actions.
 export default async function SecurityPage() {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) {
+  if (!me || !can(me.role, "admin-only")) {
     return (
       <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
         <h1 className="page-title mb-4">Security Center</h1>
         <Card label="Restricted">
-          <p className="text-sm text-muted">The Security Center names people and is visible to managers and admins only.</p>
+          <p className="text-sm text-muted">The Security Center names people and is visible to admins only.</p>
         </Card>
       </section>
     );

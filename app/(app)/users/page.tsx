@@ -20,8 +20,19 @@ async function withAvatars<T extends { avatar_path?: string | null }>(rows: T[])
 export default async function UsersPage() {
   const me = await getProfile();
   const supa = createClient();
-  const { data } = await supa.from("profiles").select("id,username,role,department_tag,avatar_path").order("username").limit(200);
-  const base = await withAvatars(((data ?? []) as { id: string; username: string; role: string; department_tag: string | null; avatar_path: string | null }[]));
+  // slack_user_id rides along when migration 0021 is applied; pre-migration
+  // the directory still loads (everyone reads "not linked").
+  let rows0: { id: string; username: string; role: string; department_tag: string | null; avatar_path: string | null; slack_user_id?: string | null }[] = [];
+  {
+    const full = await supa.from("profiles").select("id,username,role,department_tag,avatar_path,slack_user_id").order("username").limit(200);
+    if (!full.error) {
+      rows0 = (full.data ?? []) as typeof rows0;
+    } else {
+      const { data } = await supa.from("profiles").select("id,username,role,department_tag,avatar_path").order("username").limit(200);
+      rows0 = ((data ?? []) as typeof rows0).map((r) => ({ ...r, slack_user_id: null }));
+    }
+  }
+  const base = await withAvatars(rows0);
   const depts = Array.from(new Set(base.map((r) => r.department_tag).filter(Boolean) as string[])).sort();
 
   // Managers/admins additionally see emails + join/last-active (service role, server-side only).

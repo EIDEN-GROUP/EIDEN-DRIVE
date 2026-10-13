@@ -72,10 +72,10 @@ export async function GET() {
   });
 }
 
-// Managers+: trigger an on-demand backup verification job (agent picks it up).
+// Admins: trigger an on-demand backup verification job (agent picks it up).
 export async function POST(req: Request) {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  if (!me || !can(me.role, "admin-only")) return Response.json({ error: "admins only", code: "forbidden" }, { status: 403 });
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
   const db = adminClient();
   const { data, error } = await db.from("jobs").insert({ kind: "backup-verify", status: "pending", payload: { by: me.username } }).select("id").single();

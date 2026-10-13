@@ -7,7 +7,7 @@ import { trashDriveFile } from "@/lib/google-drive";
 import { driveCtxFor, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
 import { logAudit } from "@/lib/audit";
 import { getProfile, needsApproval } from "@/lib/roles";
-import { canTouch, googleInScope, googleDescendants, bustScopeCache } from "@/lib/visibility";
+import { canTouch, googleInScope, googleDescendants, bustScopeCache, googlePinOf } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
 import { notify } from "@/lib/alerts";
 import { parseJson } from "@/lib/http";
@@ -24,11 +24,11 @@ export async function POST(req: Request) {
   const { file_id } = p.data;
 
   const supa = createClient();
-  const { data: f, error: fe } = await supa.from("file_index").select("id,name,mime,google_file_id,folder,drive_account_id,owner").eq("id", file_id).maybeSingle();
+  const { data: f, error: fe } = await supa.from("file_index").select("id,name,mime,google_file_id,google_parent_id,folder,drive_account_id,owner").eq("id", file_id).maybeSingle();
   if (fe) return Response.json({ error: fe.message }, { status: 500 });
   if (!f) return Response.json({ error: "file not found" }, { status: 404 });
   // Confinement: members trash only own / department-tagged items.
-  const gate = await canTouch(adminClient(), me, f as { id: string; owner: string; folder: string | null });
+  const gate = await canTouch(adminClient(), me, f as { id: string; owner: string; folder: string | null }, googlePinOf(f));
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   // Scope: trashing also deletes the Google bytes — never reach into a tree
   // the workspace hides.

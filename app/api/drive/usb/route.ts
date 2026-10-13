@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { queueUsbUpload } from "@/lib/usb";
-import { canTouch, googleInScope, isBinned, binnedResponse } from "@/lib/visibility";
+import { canTouch, googleInScope, isBinned, binnedResponse, googlePinOf } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
@@ -20,11 +20,11 @@ export async function POST(req: Request) {
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   const db = adminClient();
-  const { data: f } = await db.from("file_index").select("id,name,size,storage_path,storage_bucket,google_file_id,drive_account_id,owner,folder").eq("id", p.data.file_id).maybeSingle();
-  const file = f as { id: string; name: string; size: number; storage_path: string | null; storage_bucket: string | null; owner: string; folder: string | null } | null;
+  const { data: f } = await db.from("file_index").select("id,name,size,storage_path,storage_bucket,google_file_id,google_parent_id,drive_account_id,owner,folder").eq("id", p.data.file_id).maybeSingle();
+  const file = f as { id: string; name: string; size: number; storage_path: string | null; storage_bucket: string | null; owner: string; folder: string | null; google_file_id?: string | null; google_parent_id?: string | null; drive_account_id?: string | null } | null;
   if (!file) return Response.json({ error: "file not found" }, { status: 404 });
   if (!file.storage_path) return Response.json({ error: "only Supabase-hosted files can be copied to USB" }, { status: 400 });
-  const gate = await canTouch(db, me, file);
+  const gate = await canTouch(db, me, file, googlePinOf(file));
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   // Scope: a USB stick is exfiltration — never copy bytes from a hidden tree.
   const usbRow = file as { google_file_id?: string | null; drive_account_id?: string | null };

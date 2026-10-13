@@ -16,12 +16,12 @@ const Patch = z.object({ value: z.boolean() });
 export async function GET() {
   const me = await getProfile();
   if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
-  return Response.json({ ok: true, active_drive_check: await activeDriveCheckEnabled(), canManage: can(me.role, "manage-users") });
+  return Response.json({ ok: true, active_drive_check: await activeDriveCheckEnabled(), canManage: can(me.role, "admin-only") });
 }
 
 export async function PATCH(req: Request) {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  if (!me || !can(me.role, "admin-only")) return Response.json({ error: "admins only", code: "forbidden" }, { status: 403 });
   const p = await parseJson(req, Patch);
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });

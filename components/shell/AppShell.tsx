@@ -16,11 +16,11 @@ export interface ShellUser { username: string; role: string; dept: string | null
 
 const NAV = [
   { href: "/drive", label: "File Management", short: "Drive", icon: FolderClosed },
-  { href: "/activity", label: "Activity", short: "Activity", icon: Activity },
-  { href: "/security", label: "Security Center", short: "Security", icon: ShieldCheck },
+  { href: "/activity", label: "Activity", short: "Activity", icon: Activity, adminOnly: true },
+  { href: "/security", label: "Security Center", short: "Security", icon: ShieldCheck, adminOnly: true },
   { href: "/vault", label: "Vault", short: "Vault", icon: KeyRound },
   { href: "/users", label: "Users & Departments", short: "Users", icon: Users },
-  { href: "/storage", label: "Storage & Backups", short: "Storage", icon: HardDrive }
+  { href: "/storage", label: "Storage & Backups", short: "Storage", icon: HardDrive, adminOnly: true }
 ];
 
 export default function AppShell({ user, children }: { user: ShellUser | null; children: ReactNode }) {
@@ -114,6 +114,10 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
   }
 
   const current = NAV.find((n) => path === n.href || path.startsWith(n.href + "/"));
+  // Admin-only entries never render for other roles (defense in depth — the
+  // pages and APIs enforce this server-side; the nav just doesn't advertise).
+  const isAdmin = user?.role === "admin";
+  const visibleNav = NAV.filter((n) => !("adminOnly" in n && n.adminOnly) || isAdmin);
   const title = current?.label ?? "Eiden Drive";
   const initial = (user?.username ?? "?").slice(0, 1).toLowerCase();
 
@@ -136,7 +140,7 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
         </div>
         <div className="sb-divider mx-4 border-t border-line" />
         <nav className="sb-nav mt-2 px-4 flex flex-col gap-1 overflow-y-auto overflow-x-hidden" aria-label="Sections">
-          {NAV.map((n) => {
+          {visibleNav.map((n) => {
             const on = current?.href === n.href;
             const Icon = n.icon;
             return (
@@ -174,7 +178,7 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
               })() : <p className="mt-1.5 text-[11px] text-muted">{health.drives} drive{health.drives === 1 ? "" : "s"} connected</p>}
               <div className="mt-1.5 flex justify-between text-[13px]">
                 <button className="text-muted hover:text-ink px-2 min-h-[44px]" onClick={() => { setPromo(false); try { localStorage.setItem("eiden-promo", "0"); } catch { /* ignore */ } }}>Hide</button>
-                <Link href="/storage" className="text-brand font-medium px-2 min-h-[44px] inline-flex items-center">Details</Link>
+                {isAdmin && <Link href="/storage" className="text-brand font-medium px-2 min-h-[44px] inline-flex items-center">Details</Link>}
               </div>
             </div>
           )}
@@ -254,7 +258,9 @@ export default function AppShell({ user, children }: { user: ShellUser | null; c
                   </span>
                 )}
               </button>
-              <Link href="/security" aria-label="Security approvals" className="size-11 grid place-items-center rounded-md hover:bg-tint text-brand"><CircleCheck size={20} strokeWidth={1.7} /></Link>
+              {isAdmin && (
+                <Link href="/security" aria-label="Security approvals" className="size-11 grid place-items-center rounded-md hover:bg-tint text-brand"><CircleCheck size={20} strokeWidth={1.7} /></Link>
+              )}
             </aside>
           )}
         </div>

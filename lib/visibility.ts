@@ -32,10 +32,26 @@ export interface FolderBits { id: string; dept: string | null; classification: s
 export function visibleFolderIds(folders: FolderBits[], me: Me, extraIds?: Set<string>, strict = false): Set<string> | null {
   if (isManager(me.role)) return null; // null = all visible
   const mine = normDept(me.department_tag);
+  // Effective department inherits up the tree: a folder nested under a
+  // department folder IS that department's content (otherwise an untagged
+  // child would leak another department's subtree through the commons leg).
+  // Truly unscoped trees (no dept on any ancestor) stay commons.
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  const effDept = (f: FolderBits): string => {
+    let cur: FolderBits | undefined = f;
+    const seen = new Set<string>();
+    for (let i = 0; i <= folders.length && cur && !seen.has(cur.id); i++) {
+      seen.add(cur.id);
+      const d = normDept(cur.dept);
+      if (d) return d;
+      cur = cur.parent ? byId.get(cur.parent) : undefined;
+    }
+    return "";
+  };
   const out = new Set<string>();
   for (const f of folders) {
     if ((f.classification ?? "Internal") === "Confidential") continue;
-    const d = normDept(f.dept);
+    const d = effDept(f);
     // Strict department-tag mode: commons folders (no dept) hide — only the
     // member's department folders and tag-matched folders (extraIds) show.
     // Fallback keeps commons visible.
@@ -107,7 +123,7 @@ async function tagUsage(db: SupabaseClient, tagId: string): Promise<number> {
   return (fc ?? 0) + (oc ?? 0);
 }
 
-export async function accessContext(db: SupabaseClient, me: Me): Promise<AccessContext> {
+export async function accessContext(db: SupabaseClient, me: Me, opts?: { includeBinned?: boolean }): Promise<AccessContext> {
   if (isManager(me.role)) return { folders: null, taggedFiles: new Set(), deptTagId: null, strict: false };
   const mine = normDept(me.department_tag);
   let deptTagId: string | null = null;
@@ -139,12 +155,14 @@ export async function accessContext(db: SupabaseClient, me: Me): Promise<AccessC
   }
   const all = await loadFolders(db);
   const folders = visibleFolderIds(all, me, tagMatchedFolders, strict);
-  if (strict && folders) {
-    // Tagged/department folders open their whole subtree: navigating into a
-    // tagged folder must show its (untagged) children, or the folder is a
-    // dead end. Confidential folders stay excluded (visibleFolderIds above
-    // already dropped them — expansion only grows from visible roots and
-    // never re-adds a Confidential node).
+  if (folders) {
+    // Visible folders open their whole subtree at every depth: navigating
+    // into a department/tagged folder must show its (untagged) children, or
+    // the folder is a dead end — and every mutation gate below keys off this
+    // same set, so inheritance is consistent between listing and acting.
+    // Applies in fallback mode too (a dept folder's nested children are
+    // department content, not commons). Confidential folders stay excluded
+    // (expansion only grows from visible roots and never re-adds one).
     const byParent = new Map<string, string[]>();
     const clsOf = new Map(all.map((f) => [f.id, f.classification ?? "Internal"]));
     for (const f of all) {
@@ -162,6 +180,30 @@ export async function accessContext(db: SupabaseClient, me: Me): Promise<AccessC
         if (!folders.has(c) && clsOf.get(c) !== "Confidential") { folders.add(c); stack.push(c); }
       }
     }
+    // A binned folder grants nothing (its subtree restores as a unit, and
+    // folderUsable independently refuses binned destinations) — unless the
+    // caller is proving pre-bin membership (folder restore), in which case
+    // the subtraction is skipped to answer "could they see it before it
+    // was binned?". Subtracted LAST so expansion can't re-add binned nodes,
+    // and a binned folder takes its whole subtree (children of a binned
+    // folder aren't listed as binned themselves, but grant nothing either).
+    if (!opts?.includeBinned) {
+      const dead = await binnedFolderIds(db, [...folders]);
+      if (dead.size) {
+        const parentOf = new Map(all.map((f) => [f.id, f.parent ?? null]));
+        const underDead = (id: string): boolean => {
+          let cur: string | null = id;
+          const seen = new Set<string>();
+          while (cur && !seen.has(cur)) {
+            if (dead.has(cur)) return true;
+            seen.add(cur);
+            cur = parentOf.get(cur) ?? null;
+          }
+          return false;
+        };
+        for (const id of [...folders]) if (underDead(id)) folders.delete(id);
+      }
+    }
   }
   return { folders, taggedFiles, deptTagId, strict };
 }
@@ -170,14 +212,22 @@ export async function accessContext(db: SupabaseClient, me: Me): Promise<AccessC
 // owners always; otherwise the file's folder must be visible AND the file must
 // not sit in a hidden tagged state (tag grants access, confidentiality denies).
 // In strict department-tag mode the Workspace commons leg is gone: folderless
-// files show only when owned or directly tagged.
+// files show only when owned, directly tagged, or Drive-anchored under an
+// owned/tagged Drive ancestor (mirrors the drive-tree growth rule).
+// `google` carries the row's Drive pin when the caller has it — without it a
+// strict-mode Drive file can only pass via ownership or a direct tag.
 export async function canTouch(
   db: SupabaseClient, me: Me,
-  file: { id: string; owner: string; folder: string | null }
+  file: { id: string; owner: string; folder: string | null },
+  google?: { file_id?: string | null; parent_id?: string | null; account_id?: string | null } | null,
+  opts?: { includeBinned?: boolean }
 ): Promise<{ ok: boolean; reason?: string }> {
   if (isManager(me.role)) return { ok: true };
   if (file.owner === me.id) return { ok: true };
-  const ctx = await accessContext(db, me);
+  // includeBinned proves PRE-bin membership for restore paths (the containing
+  // folder is binned — that is why we're here — so the default subtraction
+  // would deny everything). Never used by live mutation paths.
+  const ctx = await accessContext(db, me, opts?.includeBinned ? { includeBinned: true } : undefined);
   // Direct tag grant on the file itself.
   if (ctx.taggedFiles.has(file.id)) return { ok: true };
   // A file carrying only OTHER departments' tags is hidden even inside a
@@ -191,6 +241,12 @@ export async function canTouch(
     return { ok: false, reason: "this file belongs to another department" };
   }
   if (!file.folder) {
+    // Drive-anchored rows (folderless by construction): inherit through live
+    // Drive ancestry — a file nested under an owned/tagged Drive folder is
+    // department content at every depth, not just for its owner.
+    if (google?.file_id && (await googleAncestryGranted(db, me, ctx.taggedFiles, google))) {
+      return { ok: true };
+    }
     if (ctx.strict) return { ok: false, reason: "this file is outside your department" };
     // Workspace commons: visible unless tagged for another department. Any tag
     // at all means it belongs somewhere — without our tag, hands off.
@@ -204,16 +260,82 @@ export async function canTouch(
   return { ok: true };
 }
 
+// Drive-ancestry grant for folderless Google rows: walk the file's indexed
+// Drive parents (≤12 hops, same account) and grant when any ancestor row is
+// owned by `me` or carries the member's department tag. Unindexed ancestors
+// (unsynced/out-of-scope) grant nothing — fail closed, never fail open.
+export async function googleAncestryGranted(
+  db: SupabaseClient, me: Me, taggedFiles: Set<string>,
+  google: { file_id?: string | null; parent_id?: string | null; account_id?: string | null }
+): Promise<boolean> {
+  let cur: string | null = google.parent_id ?? null;
+  const seen = new Set<string>();
+  for (let i = 0; i < 12 && cur && !seen.has(cur); i++) {
+    seen.add(cur);
+    let q = db.from("file_index").select("id,owner,google_parent_id").eq("google_file_id", cur);
+    if (google.account_id) q = q.eq("drive_account_id", google.account_id);
+    const { data } = await q.maybeSingle();
+    const row = (data ?? null) as { id: string; owner: string | null; google_parent_id: string | null } | null;
+    if (!row) return false;
+    if (row.owner === me.id || taggedFiles.has(row.id)) return true;
+    cur = row.google_parent_id;
+  }
+  return false;
+}
+
+// Pick the Drive pin out of an index row for canTouch()'s ancestry grant.
+// Null when the row has no Google pin — plain local-file rules then apply.
+export function googlePinOf(r: {
+  google_file_id?: string | null; google_parent_id?: string | null; drive_account_id?: string | null;
+}): { file_id: string; parent_id: string | null; account_id: string | null } | null {
+  if (!r.google_file_id) return null;
+  return { file_id: r.google_file_id, parent_id: r.google_parent_id ?? null, account_id: r.drive_account_id ?? null };
+}
+
 // May `me` place new items into `folderId` (upload target, copy destination,
 // new subfolder parent)? Commons always; otherwise the folder must be visible.
-export async function folderUsable(db: SupabaseClient, me: Me, folderId: string | null): Promise<{ ok: boolean; reason?: string }> {
+// Binned folders refuse (restore them first) unless allowBinned — the
+// folder_bin table may predate the deployment (migration 0020): a missing
+// table reads as "not binned", never as a failure.
+export async function folderUsable(db: SupabaseClient, me: Me, folderId: string | null, opts?: { allowBinned?: boolean }): Promise<{ ok: boolean; reason?: string }> {
   if (isManager(me.role)) return { ok: true };
   if (!folderId) return { ok: true };
-  const ctx = await accessContext(db, me);
+  // allowBinned proves PRE-bin membership ("could they see it before it was
+  // binned?") — used by restore paths. The binned-state refusal below still
+  // applies unless explicitly allowed.
+  const ctx = await accessContext(db, me, opts?.allowBinned ? { includeBinned: true } : undefined);
   if (ctx.folders !== null && !ctx.folders.has(folderId)) {
     return { ok: false, reason: "you can't add to a folder outside your department" };
   }
+  if (!opts?.allowBinned && (await isFolderBinned(db, folderId))) {
+    return { ok: false, reason: "that folder is in the Recovery Bin — restore it first" };
+  }
   return { ok: true };
+}
+
+// Folder-aware Recovery Bin membership (migration 0020). Tolerant reader:
+// false when the table doesn't exist yet.
+export async function isFolderBinned(db: SupabaseClient, folderId: string): Promise<boolean> {
+  try {
+    const { data, error } = await db.from("folder_bin").select("folder_id").eq("folder_id", folderId).maybeSingle();
+    if (error) return false;
+    return !!data;
+  } catch {
+    return false;
+  }
+}
+
+export async function binnedFolderIds(db: SupabaseClient, ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!ids.length) return out;
+  try {
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await db.from("folder_bin").select("folder_id").in("folder_id", ids.slice(i, i + 200));
+      if (error) return out;
+      for (const r of (data ?? []) as { folder_id: string }[]) out.add(r.folder_id);
+    }
+  } catch { /* pre-migration: no folder is binned */ }
+  return out;
 }
 
 // In-scope google ids for one account: BFS from the configured root over the

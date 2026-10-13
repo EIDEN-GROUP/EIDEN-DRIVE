@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase-server";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { visibleFolderIds, isManager, accessContext, folderUsable } from "@/lib/visibility";
+import { visibleFolderIds, isManager, accessContext, folderUsable, binnedFolderIds } from "@/lib/visibility";
 import { parseJson, dbError } from "@/lib/http";
 import { usernamesFor } from "@/lib/people";
 import { trashDriveFile } from "@/lib/google-drive";
@@ -31,6 +31,11 @@ export async function GET() {
     const ctx = await accessContext(adminClient(), me);
     const vis = ctx.folders ?? visibleFolderIds(rows, me) ?? new Set<string>();
     rows = rows.filter((f) => vis.has(f.id));
+  }
+  // Binned folders never list (they restore as a unit from the Recovery Bin).
+  if (rows.length) {
+    const binned = await binnedFolderIds(adminClient(), rows.map((f) => f.id));
+    if (binned.size) rows = rows.filter((f) => !binned.has(f.id));
   }
   const names = await usernamesFor(rows.map((r) => r.created_by));
   return Response.json({ results: rows.map((r) => ({ ...r, created_by_name: r.created_by ? names.get(r.created_by) ?? null : null })) });
@@ -91,18 +96,26 @@ export async function PATCH(req: Request) {
   return Response.json({ ok: true });
 }
 
-const Remove = z.object({ folder_id: z.string().uuid() });
+const Remove = z.object({ folder_id: z.string().uuid(), purge: z.boolean().optional() });
 
-// Managers+: delete a folder with everything inside it, the way Drive does.
-// Files are never destroyed here — every live file in the subtree goes to the
-// Recovery Bin (90 days) and is re-homed to the deleted folder's parent so a
-// restore lands somewhere that still exists. Then the folders are removed,
-// deepest first (folders.parent / file_index.folder have no cascade).
+// Trash a folder with everything inside it, the way Drive does (any
+// authenticated user with write access to the whole subtree; managers bypass
+// per-folder checks). Files AND folders are never destroyed here — folder
+// rows are kept with folder_bin markers and every live file goes to the
+// Recovery Bin (90 days), so the subtree restores as a unit with hierarchy,
+// parents, and metadata intact. Nothing is re-homed.
+//
+// purge:true (managers/admins only, folder must already be binned) destroys:
+// every binned file via the file purge path, then the folder rows deepest
+// first. Two-step like files: trash first, purge second.
 export async function DELETE(req: Request) {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  if (!me) return Response.json({ error: "unauthorized" }, { status: 401 });
   const p = await parseJson(req, Remove);
   if (p.error) return p.error;
+  if (p.data.purge && !can(me.role, "perm-delete")) {
+    return Response.json({ error: "managers and admins only", code: "forbidden" }, { status: 403 });
+  }
   const db = adminClient();
   const { data: f } = await db.from("folders").select("id,name,parent").eq("id", p.data.folder_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
@@ -125,6 +138,32 @@ export async function DELETE(req: Request) {
     order.push(...frontier);
   }
 
+  // Trash-vs-purge routing. Purge destroys a BINNED subtree (two-step, like
+  // files); trashing an already-binned folder — or purging a live one — is a
+  // 409 with guidance, never a silent no-op. (Missing folder_bin table =
+  // migration 0020 not applied: folder trash/purge refuse loudly.)
+  const { data: alreadyBinned, error: binErr } = await db.from("folder_bin").select("folder_id").eq("folder_id", f.id).maybeSingle();
+  if (binErr && /does not exist|could not find|schema cache/i.test(binErr.message)) {
+    return Response.json({ error: "folder trash isn't set up yet — apply migration 0020", code: "migration_missing" }, { status: 500 });
+  }
+  if (p.data.purge) {
+    if (!alreadyBinned) {
+      return Response.json({ error: "trash the folder first — purge only destroys binned folders", code: "not_binned" }, { status: 409 });
+    }
+    return purgeFolderTree(req, me.id, me.username, f as { id: string; name: string }, order);
+  }
+  if (alreadyBinned) {
+    return Response.json({ error: "folder is already in the Recovery Bin", code: "already_binned" }, { status: 409 });
+  }
+
+  // Trash-path authorization: EVERY folder in the subtree must be writable —
+  // trashing a tree that nests another department's folder is refused up
+  // front, before a single bin row is written. (Managers bypass per-folder.)
+  for (const id of order) {
+    const dst = await folderUsable(db, me, id);
+    if (!dst.ok) return Response.json({ error: dst.reason ?? "not allowed", code: "forbidden" }, { status: 403 });
+  }
+
   const files: { id: string; google_file_id: string | null; drive_account_id: string | null }[] = [];
   for (let i = 0; i < order.length; i += 200) {
     const { data, error } = await db.from("file_index").select("id,google_file_id,drive_account_id").in("folder", order.slice(i, i + 200));
@@ -138,9 +177,18 @@ export async function DELETE(req: Request) {
   }
   const live = files.filter((x) => !binned.has(x.id));
 
+  // Folder markers FIRST (upsert = retry-safe): if anything below fails, a
+  // retry resumes instead of duplicating.
+  for (let i = 0; i < order.length; i += 200) {
+    const { error } = await db.from("folder_bin").upsert(order.slice(i, i + 200).map((folder_id) => ({ folder_id, deleted_by: me.id })));
+    if (error) return dbError("Couldn't move the folders to the Recovery Bin.")(error);
+  }
+
   // Bin each live file (DB first, then Google — same order as /api/drive/trash).
   // Fail closed per file: a dead/legacy drive refuses with a coded error
   // (rolling back that file's bin row) instead of env-token trashing.
+  // NOTE: folder_bin rows above stay on a per-file abort — the tree is still
+  // consistently "binned", and retry finishes the remaining files.
   for (const x of live) {
     const { error } = await db.from("recovery_bin").upsert({ file_id: x.id, deleted_by: me.id });
     if (error) return dbError("Couldn't move the folder's files to the Recovery Bin.")(error);
@@ -164,15 +212,64 @@ export async function DELETE(req: Request) {
     }
   }
 
-  // Re-home every file (binned or not) out of the doomed subtree.
-  for (let i = 0; i < files.length; i += 200) {
-    const { error } = await db.from("file_index").update({ folder: f.parent ?? null }).in("id", files.slice(i, i + 200).map((x) => x.id));
-    if (error) return dbError("Couldn't move the folder's files.")(error);
+  await logAudit({ actor: me.id, actor_name: me.username, action: "trash", req, detail: { folder: f.id, name: (f as { name: string }).name, subfolders: order.length - 1, binned: live.length } });
+  return Response.json({ ok: true, folders: order.length, binned: live.length });
+}
+
+// Permanent destroy of a BINNED folder subtree (managers/admins only).
+// Every still-binned file goes through the file purge path (Google bytes,
+// Storage bytes, history detach, row delete); files restored individually
+// since binning are skipped and counted, never force-purged. Folder rows go
+// last, deepest first. Any step failing aborts with what was/wasn't done.
+async function purgeFolderTree(
+  req: Request, meId: string, meName: string,
+  f: { id: string; name: string }, order: string[]
+) {
+  const db = adminClient();
+  const { deleteDriveFile } = await import("@/lib/google-drive");
+  const { bucketFor } = await import("@/lib/storage");
+  const gone = (m: string) => /not.?found|404|no such/i.test(m);
+  const files: { id: string; name: string; size: number; hash: string | null; storage_path: string | null; storage_bucket: string | null; google_file_id: string | null; drive_account_id: string | null }[] = [];
+  for (let i = 0; i < order.length; i += 200) {
+    const { data, error } = await db.from("file_index").select("id,name,size,hash,storage_path,storage_bucket,google_file_id,drive_account_id").in("folder", order.slice(i, i + 200));
+    if (error) return dbError("Couldn't read the folder contents.")(error);
+    files.push(...((data ?? []) as typeof files));
+  }
+  const { data: binnedRows } = await db.from("recovery_bin").select("file_id").in("file_id", files.map((x) => x.id));
+  const binned = new Set(((binnedRows ?? []) as { file_id: string }[]).map((b) => b.file_id));
+  let purged = 0, skippedLive = 0;
+  for (const x of files) {
+    if (!binned.has(x.id)) { skippedLive++; continue; }
+    if (x.google_file_id) {
+      const block = await driveGoneReason(x.drive_account_id);
+      if (block) return driveBlockedResponse(block);
+      const ctx = await driveCtxFor(x.drive_account_id);
+      if (!ctx?.drive) return driveBlockedResponse({ error: "Can't reach the Google account — reconnect it, then try again (nothing was deleted).", code: "drive_disabled", status: 410 });
+      try { await deleteDriveFile(String(x.google_file_id), ctx.drive); }
+      catch (e) {
+        const m = e instanceof Error ? e.message : "unknown";
+        if (!gone(m)) return Response.json({ error: `Google delete failed: ${m} (nothing else was deleted — safe to retry)`, code: "google_failed" }, { status: 502 });
+      }
+    }
+    if (x.storage_path) {
+      const { error } = await db.storage.from(bucketFor(x)).remove([x.storage_path]);
+      if (error && !gone(error.message)) return Response.json({ error: `Storage delete failed: ${error.message} (safe to retry)`, code: "storage_failed" }, { status: 502 });
+    }
+    await db.from("approvals").delete().eq("file_id", x.id);
+    await db.from("audit_logs").update({ file_id: null }).eq("file_id", x.id);
+    await db.from("recovery_bin").delete().eq("file_id", x.id);
+    const { error } = await db.from("file_index").delete().eq("id", x.id);
+    if (error) return Response.json({ error: `Bytes were erased but the index row could not be removed: ${error.message}`, code: "index_failed" }, { status: 500 });
+    purged++;
+  }
+  for (let i = 0; i < order.length; i += 200) {
+    const { error } = await db.from("folder_bin").delete().in("folder_id", order.slice(i, i + 200));
+    if (error) return dbError("Couldn't clear the folder markers.")(error);
   }
   for (const id of [...order].reverse()) {
     const { error } = await db.from("folders").delete().eq("id", id);
     if (error) return dbError("Couldn't remove the folders.")(error);
   }
-  await logAudit({ actor: me.id, actor_name: me.username, action: "perm-delete", req, detail: { folder: f.id, name: f.name, subfolders: order.length - 1, binned: live.length } });
-  return Response.json({ ok: true, folders: order.length, binned: live.length });
+  await logAudit({ actor: meId, actor_name: meName, action: "perm-delete", req, detail: { folder: f.id, name: f.name, subfolders: order.length - 1, purged, skipped_live: skippedLive } });
+  return Response.json({ ok: true, folders: order.length, purged, skipped_live: skippedLive });
 }

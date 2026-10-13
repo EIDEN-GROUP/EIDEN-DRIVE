@@ -5,7 +5,7 @@ import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { driveCtxFor, getAccounts, driveGoneReason, driveBlockedResponse, requireActiveAccount } from "@/lib/drive-accounts";
-import { canTouch, folderUsable, googleInScope, bustScopeCache, isBinned, binnedResponse } from "@/lib/visibility";
+import { canTouch, folderUsable, googleInScope, bustScopeCache, isBinned, binnedResponse, googlePinOf } from "@/lib/visibility";
 import { parseJson } from "@/lib/http";
 
 const Body = z.object({
@@ -30,10 +30,10 @@ export async function POST(req: Request) {
   }
   const db = adminClient();
   const { data: src } = await db.from("file_index")
-    .select("id,name,folder,owner,google_file_id,google_parent_id,drive_account_id").eq("id", p.data.file_id).maybeSingle();
+    .select("id,name,mime,folder,owner,google_file_id,google_parent_id,drive_account_id").eq("id", p.data.file_id).maybeSingle();
   if (!src) return Response.json({ error: "file not found" }, { status: 404 });
-  const row = src as { id: string; name: string; folder: string | null; owner: string; google_file_id: string | null; google_parent_id: string | null; drive_account_id: string | null };
-  const gate = await canTouch(db, me, row);
+  const row = src as { id: string; name: string; mime: string; folder: string | null; owner: string; google_file_id: string | null; google_parent_id: string | null; drive_account_id: string | null };
+  const gate = await canTouch(db, me, row, googlePinOf(row));
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   // Trashed rows move only via restore — never drag them back to life.
   if (await isBinned(db, p.data.file_id)) return binnedResponse();
@@ -62,6 +62,23 @@ export async function POST(req: Request) {
       // and already indexed (unindexed ids can't be scope-checked). Moving to
       // My Drive root (null) is refused: the row would go placeless-but-visible
       // while Drive keeps its old parents — index and reality would diverge.
+      // A folder is never its own destination (nor its descendant's): Drive
+      // would refuse the cycle, but the index must never get there first.
+      if (newParent === row.google_file_id) {
+        return Response.json({ error: "can't move a folder inside itself", code: "self_descendant" }, { status: 400 });
+      }
+      if (newParent && row.mime === "application/vnd.google-apps.folder") {
+        let cur: string | null = newParent;
+        const seen = new Set<string>();
+        for (let i = 0; i < 25 && cur && !seen.has(cur); i++) {
+          seen.add(cur);
+          const got = (await db.from("file_index").select("google_parent_id").eq("google_file_id", cur).eq("drive_account_id", row.drive_account_id).maybeSingle()) as unknown as { data: { google_parent_id?: string | null } | null };
+          cur = got.data?.google_parent_id ?? null;
+          if (cur === row.google_file_id) {
+            return Response.json({ error: "can't move a folder inside one of its own subfolders", code: "self_descendant" }, { status: 400 });
+          }
+        }
+      }
       if (newParent !== scopeRoot) {
         const { data: pf } = await db.from("file_index")
           .select("id,mime,drive_account_id").eq("google_file_id", newParent).eq("drive_account_id", row.drive_account_id).maybeSingle();

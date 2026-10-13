@@ -55,11 +55,11 @@ const Update = z.object({
   allowFullDrive: z.boolean().optional()
 }).refine((v) => v.label !== undefined || v.status !== undefined || v.root_id !== undefined, { message: "nothing to update" });
 
-// Managers+: rename a drive, disable it (sync/uploads skip disabled drives;
+// Admins: rename a drive, disable it (sync/uploads skip disabled drives;
 // files stay indexed and readable), or re-scope its root.
 export async function PATCH(req: Request) {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  if (!me || !can(me.role, "admin-only")) return Response.json({ error: "admins only", code: "forbidden" }, { status: 403 });
   const p = await parseJson(req, Update);
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
@@ -100,13 +100,13 @@ export async function PATCH(req: Request) {
 
 const Remove = z.object({ id: z.string().uuid() });
 
-// Managers+: disconnect a drive entirely. Its pure mirrors are purged (they'd
+// Admins: disconnect a drive entirely. Its pure mirrors are purged (they'd
 // be ghosts otherwise — the drive is gone so they can never re-sync); hybrid
 // rows keep their Storage bytes and lose the Google pin. Google copies are
 // untouched — this only removes FileOS's access (the token row).
 export async function DELETE(req: Request) {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  if (!me || !can(me.role, "admin-only")) return Response.json({ error: "admins only", code: "forbidden" }, { status: 403 });
   const p = await parseJson(req, Remove);
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });

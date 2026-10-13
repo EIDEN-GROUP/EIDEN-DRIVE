@@ -6,7 +6,7 @@ import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
 import { renameDriveFile } from "@/lib/google-drive";
 import { driveCtxFor, driveGoneReason, driveBlockedResponse } from "@/lib/drive-accounts";
-import { canTouch, isBinned, binnedResponse, googleInScope } from "@/lib/visibility";
+import { canTouch, isBinned, binnedResponse, googleInScope, googlePinOf } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
@@ -23,9 +23,9 @@ export async function PATCH(req: Request) {
   const p = await parseJson(req, Body);
   if (p.error) return p.error;
   const db = adminClient();
-  const { data: f } = await db.from("file_index").select("id,name,google_file_id,drive_account_id,owner,folder").eq("id", p.data.file_id).maybeSingle();
+  const { data: f } = await db.from("file_index").select("id,name,google_file_id,google_parent_id,drive_account_id,owner,folder").eq("id", p.data.file_id).maybeSingle();
   if (!f) return Response.json({ error: "not found" }, { status: 404 });
-  const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null });
+  const gate = await canTouch(db, me, f as { id: string; owner: string; folder: string | null }, googlePinOf(f));
   if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
   if (await isBinned(db, p.data.file_id)) return binnedResponse();
   const rf = f as { google_file_id?: string | null; drive_account_id?: string | null };

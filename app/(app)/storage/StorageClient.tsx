@@ -1,0 +1,464 @@
+"use client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { HardDrive, Plus, ShieldCheck } from "lucide-react";
+import { EmptyNote, IconBadge, Kpi, KpiRow, PageHead, Panel, StatusPill, relTime } from "@/components/dash/Dash";
+import { toast } from "@/components/ui/Toast";
+import { formatBytes } from "@/lib/files";
+
+interface Job { kind: string; status: string; created_at: string; payload?: { name?: string; error?: string } | null }
+
+function usbJobName(j: Job): string {
+  const n = j.payload?.name;
+  return n ? `USB copy · ${n}` : "USB copy";
+}
+function usbJobError(j: Job): string | null {
+  return j.status === "failed" ? (j.payload?.error ?? "agent reported failure") : null;
+}
+
+function SlackCard() {
+  const [st, setSt] = useState<{ configured: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    fetch("/api/integrations/slack").then((r) => r.json().catch(() => ({}))).then((d) => {
+      if (typeof d.configured === "boolean") setSt({ configured: d.configured });
+    }).catch(() => {});
+  }, []);
+  async function test() {
+    setBusy(true);
+    setMsg("");
+    const r = await fetch("/api/integrations/slack", { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    setBusy(false);
+    setMsg(r.ok ? "Test message sent — check the channel." : (d.error ?? "Couldn't send."));
+  }
+  if (!st) return <div className="skel h-12 w-full" role="status" aria-label="Reading Slack status" />;
+  return (
+    <div>
+      <p className="text-[13.5px]">
+        {st.configured
+          ? "Connected — new uploads post automatically."
+          : <>Not connected. Add an Incoming Webhook URL as <code>SLACK_WEBHOOK_URL</code> in Vercel env, then redeploy.</>}
+      </p>
+      <p className="mt-2 text-[12.5px] text-muted">
+        Uploader names: link each account to its Slack user ID on the Users page (admins only) and add a{" "}
+        <code>SLACK_BOT_TOKEN</code> (bot token with the <code>users:read</code> scope only) so upload posts show{" "}
+        <code>@display_name</code> next to the Eiden username. After adding the scope, reinstall the Slack app to the
+        workspace (or reauthorize it) or lookups fail with <code>missing_scope</code> and names fall back silently.
+        Without the token, posts use the Eiden username alone — uploads never fail over this.
+      </p>
+      {st.configured && (
+        <button onClick={test} disabled={busy} className="mt-3 min-h-[44px] px-4 rounded-md border border-line text-sm hover:bg-tint disabled:opacity-50">
+          {busy ? "Sending…" : "Send test message"}
+        </button>
+      )}
+      {msg && <p className="mt-2 text-[13px] text-muted" role="status">{msg}</p>}
+    </div>
+  );
+}
+interface Drive {
+  id: string; label: string; email: string | null; status: string; rootKind?: string; rootId?: string | null;
+  used: number; total: number; alert?: string | null;
+}
+
+interface BackupJob { id: string; kind: string; status: string | null; created_at: string }
+const BACKUP_PAGE = 10;
+
+// Backup history with genuine server-side pagination: 10 rows per request,
+// keyset cursor (no skips/dups when new jobs land), stable job-id keys, and
+// an IntersectionObserver sentinel for infinite scroll inside a bounded
+// scroll box (the page itself never grows awkwardly).
+function BackupHistory({ agentOnline }: { agentOnline: boolean | null }) {
+  const [items, setItems] = useState<BackupJob[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [started, setStarted] = useState(false);
+  const loadingRef = useRef(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  const loadMore = useCallback(async () => {
+    if (loadingRef.current) return; // never two page requests in flight
+    loadingRef.current = true;
+    setLoading(true);
+    setError(null);
+    try {
+      const qs = new URLSearchParams({ limit: String(BACKUP_PAGE) });
+      if (cursor) qs.set("cursor", cursor);
+      const r = await fetch(`/api/storage/jobs?${qs}`, { signal: AbortSignal.timeout(20_000) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error ?? "Couldn't load backup history.");
+      const fresh = ((d.jobs ?? []) as BackupJob[]).filter((j) => j && typeof j.id === "string");
+      setItems((prev) => {
+        const seen = new Set(prev.map((j) => j.id));
+        return [...prev, ...fresh.filter((j) => !seen.has(j.id))];
+      });
+      setCursor(typeof d.nextCursor === "string" ? d.nextCursor : null);
+      setHasMore(d.hasMore === true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't load backup history.");
+    } finally {
+      loadingRef.current = false;
+      setLoading(false);
+      setStarted(true);
+    }
+  }, [cursor]);
+
+  // Initial page, exactly once.
+  useEffect(() => { void loadMore(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Sentinel: next page when scrolled near the bottom of the scroll box.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !hasMore) return;
+    const io = new IntersectionObserver((es) => {
+      if (es.some((e) => e.isIntersecting)) void loadMore();
+    }, { rootMargin: "200px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hasMore, loadMore, items.length]);
+
+  const tone = (st: string | null): "good" | "warn" | "bad" | "neutral" =>
+    (st === "done" ? "good" : st === "pending" ? "warn" : st === "failed" || st === "error" ? "bad" : "neutral");
+
+  return (
+    <div>
+      <p className="text-[13.5px] text-muted -mt-1 mb-4">Queue a check and the agent picks it up on its next heartbeat{agentOnline === false ? " — it is offline right now, so the job will wait" : ""}.</p>
+      {!started ? (
+        <div className="space-y-2.5" role="status" aria-label="Reading backup history"><div className="skel h-10 w-full" /><div className="skel h-10 w-full" /></div>
+      ) : items.length === 0 && !error ? (
+        <EmptyNote>No backup checks yet — queue the first check.</EmptyNote>
+      ) : (
+        <div className="max-h-96 overflow-y-auto pr-1 overscroll-contain" aria-label="Backup history">
+          <ul className="divide-y divide-line/60 -my-1">
+            {items.map((j) => (
+              <li key={j.id} className="py-3 flex items-center gap-3">
+                <span className="min-w-0 flex-1"><span className="block text-[14px] capitalize truncate">{j.kind.replace(/-/g, " ")}</span><span className="block text-[12px] text-muted">{relTime(j.created_at)}</span></span>
+                <StatusPill tone={tone(j.status)}>{j.status ?? "—"}</StatusPill>
+              </li>
+            ))}
+          </ul>
+          {hasMore && <div ref={sentinelRef} aria-hidden="true" className="py-2">{loading && <div className="skel h-10 w-full" role="status" aria-label="Loading more history" />}</div>}
+          {!hasMore && items.length > 0 && <p className="py-3 text-[12px] text-muted text-center">You&apos;re caught up — end of backup history.</p>}
+        </div>
+      )}
+      {error && !loading && (
+        <p className="mt-3 text-[13px] text-danger" role="alert">{error}{" "}
+          <button onClick={() => loadMore()} className="font-medium text-brand hover:underline min-h-[36px]">Retry</button>
+        </p>
+      )}
+    </div>
+  );
+}
+// Drive safety: the active_drive_check gate (on = deleted/disabled drives
+// fail closed everywhere, no env-token fallbacks) plus the pending_relink
+// queue (legacy rows with a Google pin but no drive).
+function DriveSafetyPanel() {
+  const [flag, setFlag] = useState<boolean | null>(null);
+  const [pending, setPending] = useState<{ total: number; pure_orphans: number; hybrids: number; review_by: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    fetch("/api/drive/settings").then((r) => r.json().catch(() => ({}))).then((d) => {
+      if (typeof d.active_drive_check === "boolean") setFlag(d.active_drive_check);
+    }).catch(() => {});
+    fetch("/api/drive/relink").then((r) => r.json().catch(() => ({}))).then((d) => {
+      if (r_ok(d)) setPending({ total: d.counts.total, pure_orphans: d.counts.pure_orphans, hybrids: d.counts.hybrids, review_by: d.review_by });
+    }).catch(() => {});
+    function r_ok(d: Record<string, unknown>) { return d && typeof d === "object" && d.ok === true && d.counts; }
+  }, []);
+  async function flip(next: boolean) {
+    setBusy(true);
+    const r = await fetch("/api/drive/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: next }) });
+    const d = await r.json().catch(() => ({}));
+    setBusy(false);
+    if (!r.ok) { toast({ text: d.error ?? "Couldn't save the setting.", tone: "err" }); return; }
+    setFlag(next);
+    toast({ text: next ? "Drive safety on — dead drives fail closed." : "Drive safety OFF — legacy env fallbacks restored. Only for unmigrated setups.", tone: next ? "ok" : "err" });
+  }
+  return (
+    <Panel title="Drive safety" subtitle="Fail-closed gate for deleted and disabled drives">
+      {flag === null ? <div className="skel h-12 w-full" role="status" aria-label="Reading drive safety" /> : (
+        <div className="flex flex-wrap items-center gap-3">
+          <StatusPill tone={flag ? "good" : "bad"}>{flag ? "On — dead drives refuse" : "OFF — legacy fallbacks"}</StatusPill>
+          <button onClick={() => flip(!flag)} disabled={busy}
+            className="min-h-[40px] px-3.5 rounded-lg border border-line text-[13px] hover:bg-tint disabled:opacity-50 transition-colors">
+            {busy ? "Saving…" : flag ? "Turn off (not recommended)" : "Turn on"}
+          </button>
+        </div>
+      )}
+      <p className="mt-3 text-[12.5px] text-muted">
+        {pending === null ? "Reading legacy rows…"
+          : pending.total === 0 ? "No legacy drive rows — nothing needs relinking."
+          : `${pending.total} legacy row${pending.total === 1 ? "" : "s"} need${pending.total === 1 ? "s" : ""} a decision by ${pending.review_by.slice(0, 10)} (${pending.pure_orphans} orphan${pending.pure_orphans === 1 ? "" : "s"}, ${pending.hybrids} with Storage cop${pending.hybrids === 1 ? "y" : "ies"}) — relink, unpin or delete via GET /api/drive/relink.`}
+      </p>
+    </Panel>
+  );
+}
+
+// Per-drive label editor: the short name shown everywhere (Explorer drive
+// list, upload picker, Location column "Google (label)").
+function LabelEditor({ drive, onSaved }: { drive: Drive; onSaved: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [label, setLabel] = useState(drive.label);
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    const v = label.trim();
+    if (!v || v === drive.label || busy) { setEditing(false); setLabel(drive.label); return; }
+    setBusy(true);
+    const r = await fetch("/api/drive/accounts", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: drive.id, label: v })
+    });
+    const j = await r.json().catch(() => ({}));
+    setBusy(false);
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't rename drive.", tone: "err" }); return; }
+    toast({ text: `Drive renamed to “${v}”.`, tone: "ok" });
+    setEditing(false);
+    onSaved();
+  }
+
+  if (!editing) {
+    return (
+      <button onClick={() => { setLabel(drive.label); setEditing(true); }} aria-label={`Rename ${drive.label}`}
+        className="min-h-[40px] px-3.5 rounded-lg border border-line text-[13px] hover:bg-tint transition-colors">Edit</button>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={40} autoFocus
+        aria-label={`New name for ${drive.label}`} placeholder="Drive name"
+        onKeyDown={(e) => { if (e.key === "Enter") void save(); if (e.key === "Escape") { setEditing(false); setLabel(drive.label); } }}
+        className="min-h-[40px] w-36 rounded-lg border border-line bg-surface px-2.5 text-[13px] focus:border-brand focus:outline-none" />
+      <button onClick={save} disabled={!label.trim() || busy}
+        className="min-h-[40px] px-3.5 rounded-lg bg-brand text-white text-[13px] font-medium disabled:opacity-50">{busy ? "Saving…" : "Save"}</button>
+    </span>
+  );
+}
+
+// Per-drive scope editor: pin the account to one folder/drive ID (paste it from
+// the Drive URL), or resync-clean after re-scoping. Whole-My-Drive requires the
+// explicit checkbox — that scope is what floods indexes with system dirs.
+function RootEditor({ drive, onSaved, onResync }: { drive: Drive; onSaved: () => void; onResync: () => void }) {
+  const [rootId, setRootId] = useState(drive.rootId ?? "");
+  const [full, setFull] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const dirty = (rootId.trim() || "") !== (drive.rootId ?? "") || (full && !(drive.rootId ?? ""));
+
+  async function save() {
+    setBusy(true);
+    const r = await fetch("/api/drive/accounts", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: drive.id, root_id: rootId.trim(), allowFullDrive: full })
+    });
+    const j = await r.json().catch(() => ({}));
+    setBusy(false);
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't save root.", tone: "err" }); return; }
+    toast({ text: `“${drive.label}” re-scoped — resync-clean it, then Sync.`, tone: "ok" });
+    onSaved();
+  }
+
+  return (
+    <details className="mt-1.5 text-[12.5px]">
+      <summary className="cursor-pointer text-muted hover:text-ink min-h-[32px] inline-flex items-center">Scope & cleanup</summary>
+      <div className="mt-1.5 p-2.5 rounded-md border border-line bg-soft space-y-2">
+        <label className="block">
+          <span className="text-[11.5px] text-muted">Root folder / Shared Drive ID (from the Drive URL)</span>
+          <input value={rootId} onChange={(e) => { setRootId(e.target.value); setFull(false); }} placeholder="1gDx… (empty = whole My Drive)"
+            spellCheck={false} aria-label={`Root ID for ${drive.label}`}
+            className="mt-1 w-full min-h-[40px] rounded-md border border-line bg-surface px-2 font-mono text-[12px]" />
+        </label>
+        {!rootId.trim() && (
+          <label className="flex items-start gap-2 text-[12px] cursor-pointer">
+            <input type="checkbox" checked={full} onChange={(e) => setFull(e.target.checked)} className="mt-1 size-4 accent-brand" />
+            <span>Yes, index the <strong>entire</strong> My Drive (includes everything, e.g. app/system folders)</span>
+          </label>
+        )}
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={save} disabled={!dirty || busy || (!rootId.trim() && !full)}
+            className="min-h-[40px] px-3 rounded-md bg-brand text-white text-[12.5px] font-medium disabled:opacity-50">
+            {busy ? "Checking…" : "Save scope"}
+          </button>
+          <button onClick={onResync} title="Drop this drive's indexed rows so the next Sync rebuilds from truth"
+            className="min-h-[40px] px-3 rounded-md border border-line text-[12.5px] hover:bg-tint">
+            Resync clean
+          </button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+export default function StorageClient() {
+  const [data, setData] = useState<{ drives: Drive[]; canManage?: boolean; jobs: Job[]; agent: { heartbeat_min_ago: number | null; online: boolean } } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmDel, setConfirmDel] = useState<Drive | null>(null);
+
+  async function load() {
+    const r = await fetch("/api/storage");
+    if (r.ok) setData(await r.json());
+  }
+  useEffect(() => { load(); }, []);
+
+  async function checkNow() {
+    setBusy(true);
+    const r = await fetch("/api/storage", { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    setBusy(false);
+    if (r.ok) { toast({ text: "Backup check queued — the agent picks it up.", tone: "ok" }); load(); }
+    else toast({ text: d.error ?? "Couldn't queue check.", tone: "err" });
+  }
+
+  const backups = (data?.jobs ?? []).filter((j) => j.kind.startsWith("backup") || j.kind === "agent-heartbeat");
+  const lastBackup = backups.find((j) => j.kind.startsWith("backup"));
+  const usbJobs = (data?.jobs ?? []).filter((j) => j.kind === "usb-upload");
+  const usbPending = usbJobs.filter((j) => j.status === "pending").length;
+
+  async function setStatus(d: Drive, status: "active" | "disabled") {
+    const r = await fetch("/api/drive/accounts", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: d.id, status })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't update drive.", tone: "err" }); return; }
+    toast({ text: `"${d.label}" ${status === "active" ? "enabled" : "disabled"}.`, tone: "ok" });
+    load();
+  }
+  async function delDrive() {
+    if (!confirmDel) return;
+    const r = await fetch("/api/drive/accounts", {
+      method: "DELETE", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: confirmDel.id })
+    });
+    const j = await r.json().catch(() => ({}));
+    setConfirmDel(null);
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't remove drive.", tone: "err" }); return; }
+    toast({ text: `Drive disconnected — ${j.deleted ?? 0} mirror${(j.deleted ?? 0) === 1 ? "" : "s"} removed, ${j.unpinned ?? 0} Storage cop${(j.unpinned ?? 0) === 1 ? "y kept" : "ies kept"} (Google untouched).`, tone: "ok" });
+    load();
+  }
+  async function resyncClean(d: Drive) {
+    const r = await fetch("/api/drive/resync-clean", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId: d.id })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast({ text: j.error ?? "Couldn't clean index.", tone: "err" }); return; }
+    toast({ text: `Index cleaned (${j.deleted} removed, ${j.unpinned} unpinned) — run Sync from Google next.`, tone: "ok" });
+    load();
+  }
+  const active = (data?.drives ?? []).filter((d) => d.status === "active");
+  const totalUsed = active.reduce((a, d) => a + d.used, 0);
+  const totalCap = active.reduce((a, d) => a + d.total, 0);
+  const pct = totalCap > 0 ? Math.round((totalUsed / totalCap) * 100) : null;
+  const jobTone = (st: string): "good" | "warn" | "bad" | "neutral" => (st === "done" ? "good" : st === "pending" ? "warn" : st === "failed" || st === "error" ? "bad" : "neutral");
+
+  return (
+    <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
+      <PageHead title="Storage & Backups" subtitle="Your connected Google drives, capacity, and backup checks."
+        actions={<>
+          {data?.canManage && <button onClick={checkNow} disabled={busy} className="min-h-[44px] px-4 rounded-lg border border-line bg-surface text-[14px] flex items-center gap-2 hover:bg-tint disabled:opacity-50 transition-colors"><ShieldCheck size={16} /> {busy ? "Queuing…" : "Run backup check"}</button>}
+          <a href="/api/auth/google?label=drive" className="min-h-[44px] inline-flex items-center gap-2 px-4 rounded-lg bg-brand text-white text-[14px] font-medium hover:brightness-110 transition"><Plus size={16} /> Connect another drive</a>
+        </>} />
+
+      <KpiRow>
+        <Kpi label="Used" value={data ? formatBytes(totalUsed) : "…"} hint={totalCap > 0 ? `of ${formatBytes(totalCap)}` : "quota not reported"} />
+        <Kpi label="Capacity used" value={pct === null ? "—" : `${pct}%`} tone={pct !== null && pct >= 95 ? "bad" : pct !== null && pct >= 80 ? "warn" : "default"} hint={pct !== null && pct >= 80 ? "uploads route to other drives" : "all drives combined"} />
+        <Kpi label="Drives connected" value={data ? active.length : "…"} hint={data && data.drives.length > active.length ? `${data.drives.length - active.length} not active` : "all active"} />
+        <Kpi label="Local agent" value={!data ? "…" : data.agent.heartbeat_min_ago === null ? "Never" : data.agent.online ? "Online" : "Offline"} tone={data?.agent.online ? "good" : "warn"} hint={data?.agent.heartbeat_min_ago == null ? "no heartbeat yet" : `seen ${data.agent.heartbeat_min_ago}m ago`} />
+        <Kpi label="Backup jobs" value={data ? backups.filter((j) => j.kind.startsWith("backup")).length : "…"} hint={lastBackup ? `last ${relTime(lastBackup.created_at)}` : "none yet"} />
+        <Kpi label="Sync" value={data ? (data.jobs.find((j) => j.kind === "drive-sync") ? "Done" : "—") : "…"} tone="good" hint={(() => { const j = data?.jobs.find((x) => x.kind === "drive-sync"); return j ? relTime(j.created_at) : "not run yet"; })()} />
+      </KpiRow>
+
+      <div className="grid xl:grid-cols-[minmax(0,1fr)_400px] gap-4 sm:gap-5 items-start">
+        <Panel title="Google drives" subtitle={`${active.length} connected · uploads go to the drive with the most free space`}>
+          {!data ? <div className="space-y-3" role="status" aria-label="Reading storage"><div className="skel h-24 w-full" /><div className="skel h-24 w-full" /></div> : data.drives.length === 0 ? (
+            <EmptyNote>No drive connected yet. Use “Connect another drive” above.</EmptyNote>
+          ) : (
+            <ul className="space-y-3">
+              {data.drives.map((d) => {
+                const p = d.total > 0 ? Math.min(100, Math.round((d.used / d.total) * 100)) : null;
+                return (
+                  <li key={d.id} className={`rounded-xl border border-line p-4 ${d.status !== "active" ? "opacity-80" : ""}`}>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <IconBadge Icon={HardDrive} color="#533faf" />
+                      <div className="min-w-0 flex-1 basis-44">
+                        <p className="text-[16px] font-medium truncate">{d.label}</p>
+                        <p className="text-[12.5px] text-muted truncate">{d.email ?? "—"}</p>
+                      </div>
+                      {d.status !== "active" ? <StatusPill tone="bad">{d.status === "down" ? "Unreachable — reconnect it" : d.status}</StatusPill>
+                        : d.rootKind === "folder" ? <StatusPill tone="brand">Folder root</StatusPill>
+                        : d.rootKind === "drive" ? <StatusPill tone="good">Shared drive</StatusPill> : <StatusPill tone="neutral">My Drive</StatusPill>}
+                      {data.canManage && d.id !== "legacy" && (
+                        <span className="inline-flex gap-2 flex-wrap">
+                          <LabelEditor drive={d} onSaved={load} />
+                          <button onClick={() => setStatus(d, d.status === "active" ? "disabled" : "active")} aria-label={`${d.status === "active" ? "Disable" : "Enable"} ${d.label}`}
+                            className="min-h-[40px] px-3.5 rounded-lg border border-line text-[13px] hover:bg-tint transition-colors">{d.status === "active" ? "Disable" : "Enable"}</button>
+                          <button onClick={() => setConfirmDel(d)} aria-label={`Disconnect ${d.label}`}
+                            className="min-h-[40px] px-3.5 rounded-lg border border-danger/40 text-danger text-[13px] hover:bg-danger/5 transition-colors">Disconnect</button>
+                        </span>
+                      )}
+                    </div>
+                    {p !== null ? (
+                      <div className="mt-4">
+                        <div className="flex justify-between text-[12.5px] text-muted mb-1.5"><span className="tabular-nums">{formatBytes(d.used)} of {formatBytes(d.total)}</span><span className="tabular-nums">{p}%</span></div>
+                        <div className="h-2 rounded-full bg-tint overflow-hidden" role="img" aria-label={`${p}% used`}><div className={`h-full rounded-full ${p >= 95 ? "bg-danger" : p >= 80 ? "bg-warning" : "bg-brand"}`} style={{ width: `${p}%` }} /></div>
+                        {d.alert && <p className="mt-2 text-[12.5px] text-danger" role="alert">Above {d.alert === "storage-95" ? "95" : "80"}% — new uploads route to other drives automatically.</p>}
+                      </div>
+                    ) : d.status === "active" ? <p className="mt-3 text-[12.5px] text-muted">Quota not reported by Google (unlimited Workspace or hidden) — uploads allowed.</p>
+                      : <p className="mt-3 text-[12.5px] text-muted">Not connected right now.</p>}
+                    {data.canManage && d.id !== "legacy" && <RootEditor drive={d} onSaved={load} onResync={() => resyncClean(d)} />}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Panel>
+
+        <Panel title="Backups" subtitle="The local agent verifies backups when it runs">
+          <BackupHistory agentOnline={data ? data.agent.online : null} />
+        </Panel>
+
+        <Panel title="Office USB" subtitle={data?.agent.online ? `Agent online — copies run on each heartbeat${usbPending ? ` · ${usbPending} waiting` : ""}` : "Agent offline — copies queue up and run when it checks in"}>
+          {!data ? <div className="skel h-20 w-full" role="status" aria-label="Reading USB jobs" /> : usbJobs.length === 0 ? (
+            <EmptyNote>No USB copies yet. Right-click any file → “Copy to office USB”, or switch the upload toggle on.</EmptyNote>
+          ) : (
+            <ul className="divide-y divide-line/60 -my-1">
+              {usbJobs.slice(0, 8).map((j, i) => (
+                <li key={i} className="py-3 flex items-center gap-3">
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[14px] truncate">{usbJobName(j)}</span>
+                    <span className="block text-[12px] text-muted">{relTime(j.created_at)}{usbJobError(j) ? ` · ${usbJobError(j)}` : ""}</span>
+                  </span>
+                  <StatusPill tone={jobTone(j.status)}>{j.status}</StatusPill>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-3 text-[12px] text-muted">Needs the office PC agent (<code>node src/index.js poll</code> in local-agent) with the router USB mounted. Setup: local-agent README.</p>
+        </Panel>
+
+        {data?.canManage && (
+          <Panel title="Slack uploads" subtitle="Every upload posts who, what, where + link to the channel">
+            <SlackCard />
+          </Panel>
+        )}
+
+        {data?.canManage && <DriveSafetyPanel />}
+      </div>
+
+      {confirmDel && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={`Disconnect ${confirmDel.label}`}>
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={() => setConfirmDel(null)} />
+          <div className="pop-in relative w-full max-w-sm rounded-2xl bg-surface border border-line shadow-pop p-6">
+            <p className="text-[17px] font-medium">Disconnect “{confirmDel.label}”?</p>
+            <p className="mt-2 text-[13.5px] text-muted">Eiden Drive forgets its token and drops that drive&apos;s mirrors (Storage copies are kept, Google copies untouched). Afterwards nothing reads or writes through this drive until you reconnect it.</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button onClick={() => setConfirmDel(null)} className="min-h-[44px] px-4 rounded-lg border border-line text-sm hover:bg-tint">Cancel</button>
+              <button onClick={delDrive} className="min-h-[44px] px-4 rounded-lg bg-danger text-white text-sm font-medium">Disconnect</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}

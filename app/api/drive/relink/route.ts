@@ -14,7 +14,7 @@ import { parseJson } from "@/lib/http";
 // with active_drive_check on every drive-touching op refuses them with
 // code "pending_relink" (409) instead of guessing a drive.
 //
-// This route is the single cleanup flow (managers only):
+// This route is the single cleanup flow (admins only):
 //   GET  → list pending rows + counts + review deadline
 //   POST → one of three explicit actions per row:
 //     relink { file_id, accountId }  attach to a live drive (verified live
@@ -36,7 +36,7 @@ const Action = z.object({
 
 export async function GET() {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  if (!me || !can(me.role, "admin-only")) return Response.json({ error: "admins only", code: "forbidden" }, { status: 403 });
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });
   const db = adminClient();
   const { data, error } = await db.from("file_index")
@@ -59,7 +59,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   const me = await getProfile();
-  if (!me || !can(me.role, "manage-users")) return Response.json({ error: "managers only" }, { status: 403 });
+  if (!me || !can(me.role, "admin-only")) return Response.json({ error: "admins only", code: "forbidden" }, { status: 403 });
   const p = await parseJson(req, Action);
   if (p.error) return p.error;
   if (!hasAdminClient()) return Response.json({ error: "server not configured" }, { status: 503 });

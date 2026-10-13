@@ -33,6 +33,7 @@ export interface FileRow {
   created_at?: string | null; owner_name?: string | null;
 }
 interface BinRow { file_id: string; deleted_at: string; purge_at: string; file_index: { id: string; name: string; mime: string; size: number } | { id: string; name: string; mime: string; size: number }[] }
+interface BinFolderRow { folder_id: string; deleted_at: string; purge_at: string; folders: { id: string; name: string } | { id: string; name: string }[] | null }
 
 type View = "list" | "grid";
 type SortKey = "name" | "updated" | "size" | "kind";
@@ -69,6 +70,7 @@ export default function Explorer() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [files, setFiles] = useState<FileRow[]>([]);
   const [bin, setBin] = useState<BinRow[]>([]);
+  const [binFolders, setBinFolders] = useState<BinFolderRow[]>([]);
   const [canPurge, setCanPurge] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState<{ id: string; name: string } | null>(null);
   const [purging, setPurging] = useState(false);
@@ -107,7 +109,7 @@ export default function Explorer() {
   const [tagsOpen, setTagsOpen] = useState(true);
   const [ctx, setCtx] = useState<{ x: number; y: number; row: Row } | null>(null);
   const [canvasCtx, setCanvasCtx] = useState<{ x: number; y: number } | null>(null);
-  const [clip, setClip] = useState<{ id: string; name: string; cut?: boolean } | null>(null);
+  const [clip, setClip] = useState<{ id: string; name: string; cut?: boolean; kind: "file" | "folder"; accountId?: string | null } | null>(null);
   const [viewFile, setViewFile] = useState<ViewFile | null>(null);
   const [editFile, setEditFile] = useState<ViewFile | null>(null);
   const [accounts, setAccounts] = useState<{ id: string; label: string; email: string | null; free: number | null; usage?: number | null; limit?: number | null; status: string; rootKind?: string | null }[]>([]);
@@ -307,7 +309,7 @@ export default function Explorer() {
         setHasMore(typeof dr.hasMore === "boolean" ? dr.hasMore : ((dr.results ?? []).length >= limit));
       }
       if (!append) setOrphanCount(typeof dr.orphanCount === "number" ? dr.orphanCount : 0);
-      if (br) { setBin(br.results ?? []); setCanPurge(!!br.canPurge); }
+      if (br) { setBin(br.results ?? []); setBinFolders(br.folders ?? []); setCanPurge(!!br.canPurge); }
       if (dr.google_error && dr.google_error !== lastGoogleError.current) {
         lastGoogleError.current = dr.google_error;
         toast({ text: dr.google_error, tone: "err" });
@@ -399,7 +401,15 @@ export default function Explorer() {
   useEffect(() => {
     try {
       const raw = localStorage.getItem("eiden-clip");
-      if (raw) setClip(JSON.parse(raw));
+      if (raw) {
+        const c = JSON.parse(raw) as { id?: unknown; name?: unknown; cut?: unknown; kind?: unknown; accountId?: unknown } | null;
+        // Validate the persisted shape — a stale/foreign blob must not arm paste.
+        if (c && typeof c.id === "string" && typeof c.name === "string" && (c.kind === "file" || c.kind === "folder")) {
+          setClip({ id: c.id, name: c.name, cut: c.cut === true, kind: c.kind, accountId: typeof c.accountId === "string" ? c.accountId : null });
+        } else {
+          try { localStorage.removeItem("eiden-clip"); } catch { /* ignore */ }
+        }
+      }
     } catch { /* ignore */ }
     // Auto-refresh every 60s, silently: same call as manual Refresh but without
     // the skeleton flash (silent=true skips setLoading). Skipped once the user
@@ -861,13 +871,20 @@ export default function Explorer() {
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
       if (viewFile || editFile) return;
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === "c") {
+      if (mod && (e.key.toLowerCase() === "c" || e.key.toLowerCase() === "x")) {
+        const cut = e.key.toLowerCase() === "x";
         const f = selRows[0]?.file;
         // Single-item clipboard by design: with several selected, copy the
         // first and say so (previously it copied the first silently).
         if (f) {
-          e.preventDefault(); copyFile(f);
-          if (selRows.length > 1) toast({ text: `${selRows.length} selected — copied the first (“${f.name}”).`, tone: "info" });
+          e.preventDefault(); copyFile(f, cut);
+          if (selRows.length > 1) toast({ text: `${selRows.length} selected — ${cut ? "cut" : "copied"} the first (“${f.name}”).`, tone: "info" });
+        } else {
+          // Folders arm the folder clipboard (Cut/Copy mirror file wording).
+          const row = rows.find((r) => selSet.has(r.key) && r.kind === "folder" && (r.folder || (r.googleFolder && r.file)));
+          if (row) {
+            e.preventDefault(); copyFolder(row, cut);
+          }
         }
       } else if (mod && e.key.toLowerCase() === "v") {
         e.preventDefault(); pasteClip();
@@ -878,6 +895,7 @@ export default function Explorer() {
       } else if ((e.key === "Delete" || e.key === "Backspace") && selSet.size > 0 && nav.kind !== "bin") {
         e.preventDefault(); setConfirmBulk(true);
       } else if (e.key === "Escape") {
+        if (clip) clearClip(true);
         clearSel();
       }
     };
@@ -920,6 +938,20 @@ export default function Explorer() {
     } else { toast({ text: d.error ?? "Couldn't delete the file.", tone: "err" }); setConfirmPurge(null); }
   }
 
+  const [confirmPurgeFolder, setConfirmPurgeFolder] = useState<{ id: string; name: string } | null>(null);
+  async function purgeFolder() {
+    if (!confirmPurgeFolder || purging) return;
+    setPurging(true);
+    const r = await fetch("/api/folders", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ folder_id: confirmPurgeFolder.id, purge: true }) });
+    const d = await r.json().catch(() => ({}));
+    setPurging(false);
+    if (r.ok) {
+      toast({ text: `Folder "${confirmPurgeFolder.name}" deleted permanently (${d.purged ?? 0} file${(d.purged ?? 0) === 1 ? "" : "s"}).`, tone: "ok" });
+      setBinFolders((b) => b.filter((x) => x.folder_id !== confirmPurgeFolder.id));
+      setSelKey(null); setConfirmPurgeFolder(null); refreshAll();
+    } else { toast({ text: d.error ?? "Couldn't delete the folder.", tone: "err" }); setConfirmPurgeFolder(null); }
+  }
+
   // Orphan clear (manager card): confirmed, then deletes the pre-scope
   // leftovers and reloads so the counts — and the card itself — disappear.
   const [clearing, setClearing] = useState(false);
@@ -942,13 +974,18 @@ export default function Explorer() {
   }
 
   const [restoreBusy, setRestoreBusy] = useState<string | null>(null);
-  async function restore(id: string, name: string) {
+  async function restore(id: string, name: string, kind: "file" | "folder" = "file") {
     if (restoreBusy) return;
     setRestoreBusy(id);
-    const r = await fetch("/api/drive/restore", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id: id }) });
+    const r = await fetch("/api/drive/restore", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(kind === "folder" ? { folder_id: id } : { file_id: id }) });
     setRestoreBusy(null);
-    if (r.ok) { toast({ text: `"${name}" restored.`, tone: "ok" }); setSelKey(null); refreshAll(); }
-    else {
+    if (r.ok) {
+      const d = await r.json().catch(() => ({}));
+      const extra = kind === "folder" && typeof d.files === "number" ? ` (${d.files} file${d.files === 1 ? "" : "s"}${d.skipped ? `, ${d.skipped} skipped` : ""})` : "";
+      const note = typeof d.note === "string" ? ` ${d.note}` : "";
+      toast({ text: `"${name}" restored.${extra}${note}`, tone: "ok" });
+      setSelKey(null); refreshAll();
+    } else {
       const d = await r.json().catch(() => ({} as { error?: string }));
       toast({ text: (d as { error?: string }).error ?? "Restore failed.", tone: "err" });
     }
@@ -1210,7 +1247,7 @@ export default function Explorer() {
       const d = await r.json().catch(() => ({}));
       if (r.ok) {
         const n = d.binned ?? 0;
-        toast({ text: `Folder "${target.name}" deleted${n ? ` — ${n} file${n === 1 ? "" : "s"} moved to the Recovery Bin` : ""}.`, tone: "ok" });
+        toast({ text: `Folder "${target.name}" moved to the Recovery Bin${n ? ` — ${n} file${n === 1 ? "" : "s"} binned with it` : ""}.`, tone: "ok" });
         setSelKey(null);
         refreshAll();
       } else toast({ text: d.error ?? "Couldn't delete folder.", tone: "err" });
@@ -1329,10 +1366,39 @@ export default function Explorer() {
   }
 
   function copyFile(f: FileRow, cut = false) {
-    const c = { id: f.id, name: f.name, cut };
+    const c = { id: f.id, name: f.name, cut, kind: "file" as const };
     setClip(c);
     try { localStorage.setItem("eiden-clip", JSON.stringify(c)); } catch { /* ignore */ }
     toast({ text: cut ? `Cut "${f.name}" — right-click → Paste to move it.` : `Copied "${f.name}" — right-click → Paste to duplicate it.`, tone: "ok" });
+  }
+
+  // Folder clipboard (Cut/Copy mirror the file wording): workspace folders
+  // paste into Workspace folders, Drive folders paste inside the SAME drive
+  // view — the two never mix (the server enforces the same boundary).
+  function copyFolder(r: Row, cut = false) {
+    if (r.kind !== "folder") return;
+    const isDrive = !!r.googleFolder && !!r.file;
+    const c = isDrive
+      ? { id: r.file!.id, name: r.name, cut, kind: "folder" as const, accountId: r.file!.drive_account_id ?? null }
+      : { id: r.id, name: r.name, cut, kind: "folder" as const, accountId: null };
+    if (isDrive && !c.accountId) {
+      toast({ text: `"${r.name}" isn't synced to a drive account — sync it before moving it.`, tone: "err" });
+      return;
+    }
+    setClip(c);
+    try { localStorage.setItem("eiden-clip", JSON.stringify(c)); } catch { /* ignore */ }
+    toast({
+      text: cut
+        ? `Cut folder "${r.name}" — ${isDrive ? "open the destination in the same drive and Paste." : "right-click → Paste to move it."}`
+        : `Copied folder "${r.name}" — ${isDrive ? "open the destination in the same drive and Paste." : "right-click → Paste to duplicate it."}`,
+      tone: "ok",
+    });
+  }
+
+  function clearClip(silent = false) {
+    setClip(null);
+    try { localStorage.removeItem("eiden-clip"); } catch { /* ignore */ }
+    if (!silent) toast({ text: "Clipboard cleared.", tone: "info" });
   }
 
   async function copyToUsb(r: Row) {
@@ -1347,6 +1413,10 @@ export default function Explorer() {
 
   async function pasteClip() {
     if (!clip || clipBusy) return;
+    // Folder clipboard branches to the folder endpoints (workspace folders to
+    // Workspace, Drive folders inside the same drive view — never mixed; the
+    // server refuses cross-kind pastes with a plain message).
+    if (clip.kind === "folder") { await pasteFolderClip(); return; }
     setClipBusy(true);
     // Cut = move (relocate, nothing duplicated); copy = duplicate. Inside a
     // drive view both land in the open Google folder; otherwise the workspace
@@ -1370,6 +1440,45 @@ export default function Explorer() {
     if (cut) { setClip(null); try { localStorage.removeItem("eiden-clip"); } catch { /* ignore */ } }
     toast({ text: cut ? `Moved "${clip.name}".` : `Pasted as "${d.name}".`, tone: "ok" });
     if (inDriveView && driveView) await loadTree(driveView.accountId);
+    load(q);
+  }
+
+  async function pasteFolderClip() {
+    if (!clip || clip.kind !== "folder" || clipBusy) return;
+    const cut = clip.cut === true;
+    const isDriveClip = !!clip.accountId;
+    if (isDriveClip) {
+      // Drive folders paste only inside the SAME drive view (same account).
+      if (!inDriveView || !driveView || driveView.accountId !== clip.accountId) {
+        toast({ text: `Open "${clip.name}"'s drive and navigate to the destination folder, then Paste there.`, tone: "err" });
+        return;
+      }
+      setClipBusy(true);
+      const url = cut ? "/api/drive/move" : "/api/drive/copy";
+      const body = { file_id: clip.id, folder: null, ...(driveView.folderId ? { google_parent: driveView.folderId } : {}) };
+      const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      setClipBusy(false);
+      if (!r.ok) { toast({ text: d.error ?? (cut ? "Couldn't move folder." : "Couldn't paste folder."), tone: "err" }); return; }
+      if (cut) { setClip(null); try { localStorage.removeItem("eiden-clip"); } catch { /* ignore */ } }
+      toast({ text: cut ? `Moved folder "${clip.name}".` : `Pasted folder as "${d.name ?? clip.name}".`, tone: "ok" });
+      await loadTree(driveView.accountId);
+      load(q);
+      return;
+    }
+    // Workspace folders paste into the standing Workspace folder only.
+    if (inDriveView) {
+      toast({ text: "Workspace folders can't paste into a Google drive — leave the drive view first.", tone: "err" });
+      return;
+    }
+    setClipBusy(true);
+    const url = cut ? "/api/folders/move" : "/api/folders/copy";
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ folder_id: clip.id, parent: curFolder }) });
+    const d = await r.json().catch(() => ({}));
+    setClipBusy(false);
+    if (!r.ok) { toast({ text: d.error ?? (cut ? "Couldn't move folder." : "Couldn't paste folder."), tone: "err" }); return; }
+    if (cut) { setClip(null); try { localStorage.removeItem("eiden-clip"); } catch { /* ignore */ } }
+    toast({ text: cut ? `Moved folder "${clip.name}".` : `Pasted folder as "${d.name ?? clip.name}" (${d.files ?? 0} file${(d.files ?? 0) === 1 ? "" : "s"}).`, tone: "ok" });
     load(q);
   }
 
@@ -1727,10 +1836,32 @@ export default function Explorer() {
                   </div>
                 </div>
               ) : nav.kind === "bin" ? (
-                bin.length === 0
-                  ? <EmptyState title="Recovery Bin is empty" body="Deleted files rest here for 90 days. Members can never delete permanently." />
+                bin.length === 0 && binFolders.length === 0
+                  ? <EmptyState title="Recovery Bin is empty" body="Deleted files and folders rest here for 90 days. Members can restore but never delete permanently." />
                   : (
-                    <ul className="divide-y divide-line">
+                    <div>
+                      {binFolders.length > 0 && (
+                        <>
+                          <p className="px-4 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted">Folders</p>
+                          <ul className="divide-y divide-line border-b border-line">
+                            {binFolders.map((bf) => {
+                              const fo = Array.isArray(bf.folders) ? bf.folders[0] : bf.folders;
+                              const fname = fo?.name ?? "folder";
+                              return (
+                                <li key={bf.folder_id} className="px-4 min-h-[44px] flex items-center gap-3 text-[14px] cursor-default hover:bg-tint/50">
+                                  <FolderIcon size={24} className="shrink-0" />
+                                  <span className="flex-1 truncate">{fname}</span>
+                                  <span className="text-[11px] text-muted hidden sm:block">purges {fmtDate(bf.purge_at)}</span>
+                                  <button onClick={(e) => { e.stopPropagation(); restore(bf.folder_id, fname, "folder"); }} disabled={restoreBusy === bf.folder_id} className="min-h-[44px] px-2 text-[12px] text-brand flex items-center gap-1 hover:underline disabled:opacity-60">{restoreBusy === bf.folder_id ? <Ring className="size-3.5" /> : <Undo2 size={14} />} Restore</button>
+                                  {canPurge && <button onClick={(e) => { e.stopPropagation(); setConfirmPurgeFolder({ id: bf.folder_id, name: fname }); }} aria-label={`Delete ${fname} permanently`} title="Delete permanently" className="size-11 grid place-items-center rounded-md text-muted hover:text-danger hover:bg-danger/10 transition-colors"><Trash2 size={16} /></button>}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </>
+                      )}
+                      {bin.length > 0 && <p className="px-4 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted">Files</p>}
+                      <ul className="divide-y divide-line">
                       {binPg.pageItems.map((b) => {
                         const fi = Array.isArray(b.file_index) ? b.file_index[0] : b.file_index;
                         const id = fi?.id ?? b.file_id;
@@ -1745,7 +1876,8 @@ export default function Explorer() {
                           </li>
                         );
                       })}
-                    </ul>
+                      </ul>
+                    </div>
                   )
               ) : rows.length === 0 ? (
                 <EmptyState title={q ? "No matches" : "This folder is empty"} body={q ? "Clear the search or try a different name." : "Upload a file or create a folder to get started."}
@@ -1984,10 +2116,20 @@ export default function Explorer() {
                 on: r.file && indexed ? () => copyFile(r.file!) : undefined,
                 disabled: !(r.file && indexed), why: needSync,
                 show: r.kind === "file" },
+              { label: "Copy folder", icon: <Copy size={14} />,
+                on: r.kind === "folder" && (r.folder || (r.googleFolder && r.file)) ? () => copyFolder(r) : undefined,
+                disabled: !(r.kind === "folder" && (r.folder || (r.googleFolder && r.file))),
+                why: (r.kind === "folder" && r.googleFolder && !r.file) ? needSync : undefined,
+                show: r.kind === "folder" && nav.kind !== "bin" },
               { label: "Cut", icon: <Scissors size={14} />,
                 on: r.file && indexed ? () => copyFile(r.file!, true) : undefined,
                 disabled: !(r.file && indexed), why: needSync || "Cut, then Paste where it should live",
                 show: r.kind === "file" || !!r.googleFolder },
+              { label: "Cut folder", icon: <Scissors size={14} />,
+                on: r.kind === "folder" && (r.folder || (r.googleFolder && r.file)) ? () => copyFolder(r, true) : undefined,
+                disabled: !(r.kind === "folder" && (r.folder || (r.googleFolder && r.file))),
+                why: (r.kind === "folder" && r.googleFolder && !r.file) ? needSync : "Cut, then Paste where it should live",
+                show: r.kind === "folder" && nav.kind !== "bin" },
               { label: "Get Info", icon: <Info size={14} />, on: () => { setSelKey(r.key); setInfoOpen(true); }, show: true },
               // Tags live in EVERY file/folder menu (Workspace, Recent, Docs,
               // drive tree) — not just Workspace root. Unindexed live rows get
@@ -2020,13 +2162,13 @@ export default function Explorer() {
                 on: r.file && indexed ? () => setConfirmTrash(r.file!) : undefined,
                 disabled: !(r.file && indexed), why: needSync,
                 show: r.kind === "file" },
-              { label: "Delete folder", icon: <Trash2 size={14} />, danger: true,
+              { label: "Move folder to Bin", icon: <Trash2 size={14} />, danger: true,
                 on: r.folder ? () => setConfirmFolderDelete(r.folder!)
                   : (r.googleFolder && r.file ? () => setConfirmTrash(r.file!)
                   : (r.indexId ? () => setConfirmTrash({ id: r.indexId!, name: r.name, backends: ["google"] }) : undefined)),
                 disabled: !r.folder && !(r.googleFolder && r.file) && !r.indexId,
                 why: (isGFolder && !r.indexId) ? "Sync the drive first — this folder isn't indexed yet"
-                  : r.googleFolder ? "Trashed with everything inside it (90 days, recoverable)" : undefined,
+                  : r.googleFolder ? "Moves to the Recovery Bin with everything inside it (90 days, restorable)" : undefined,
                 show: r.kind === "folder" }
             ];
             return items.filter((i) => i.show !== false).map((i) => (
@@ -2061,7 +2203,7 @@ export default function Explorer() {
               <span>New folder</span><span className="text-muted"><FolderPlus size={14} /></span>
             </button>
           )}
-          <button role="menuitem" disabled={!clip || clipBusy} title={clipBusy ? "Pasting…" : clip ? `Paste "${clip.name}" here` : "Copy a file first"}
+          <button role="menuitem" disabled={!clip || clipBusy} title={clipBusy ? "Pasting…" : clip ? `Paste "${clip.name}" here${clip.kind === "folder" ? (clip.cut ? " (move folder)" : " (duplicate folder)") : ""}` : "Copy, cut, or pick a folder first"}
             onClick={() => { setCanvasCtx(null); pasteClip(); }}
             className="w-full flex items-center justify-between px-3.5 py-2 text-left hover:bg-tint disabled:opacity-40">
             <span>{clipBusy ? "Pasting…" : <>Paste{clip ? ` "${clip.name.length > 18 ? clip.name.slice(0, 17) + "…" : clip.name}"` : ""}</>}</span>
@@ -2120,9 +2262,13 @@ export default function Explorer() {
         </form>
       </Modal>
 
-      <ConfirmDialog open={!!confirmFolderDelete} title="Delete folder?"
-        body={`"${confirmFolderDelete?.name}" and its subfolders are removed. Files inside move to the Recovery Bin for 90 days and restore to the parent folder.`}
-        confirmLabel="Delete" onClose={() => setConfirmFolderDelete(null)} onConfirm={deleteFolder} />
+      <ConfirmDialog open={!!confirmPurgeFolder} title={`Delete folder “${confirmPurgeFolder?.name}” permanently?`}
+        body="This erases the folder, its subfolders and every file inside — from Eiden Drive and from Google Drive. It cannot be recovered afterwards."
+        confirmLabel="Delete forever" busy={purging} busyLabel="Deleting…" onClose={() => !purging && setConfirmPurgeFolder(null)} onConfirm={purgeFolder} />
+
+      <ConfirmDialog open={!!confirmFolderDelete} title="Move folder to Recovery Bin?"
+        body={`"${confirmFolderDelete?.name}" and its subfolders move to the Recovery Bin for 90 days with everything inside. Nothing is deleted — restore brings the whole folder back.`}
+        confirmLabel="Move to Bin" onClose={() => setConfirmFolderDelete(null)} onConfirm={deleteFolder} />
 
       <ConfirmDialog open={confirmClearOrphans} title={`Clear ${orphanCount} leftover${orphanCount === 1 ? "" : "s"}?`}
         body="This deletes the pre-scope orphan rows and detaches their audit history. Storage bytes are kept. Drive bytes are never touched. Run Sync from Google afterwards to rebuild the index."

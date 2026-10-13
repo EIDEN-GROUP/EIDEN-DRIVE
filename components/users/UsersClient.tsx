@@ -12,7 +12,7 @@ import { Kpi, KpiRow, PageHead } from "@/components/dash/Dash";
 export interface DirectoryUser {
   id: string; username: string; role: string; department_tag: string | null;
   email?: string | null; created_at?: string | null; last_sign_in_at?: string | null;
-  avatarUrl?: string | null;
+  avatarUrl?: string | null; slack_user_id?: string | null;
 }
 
 function Avatar({ u, size }: { u: { username: string; avatarUrl?: string | null }; size: string }) {
@@ -169,14 +169,18 @@ function UserRowActions({ u, me, isAdmin, canManage, depts, onOpen }: {
 }) {
   const router = useRouter();
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const canEdit = canManage && u.username !== me;
 
   async function remove() {
+    if (removing) return; // double-clicking Remove must not fire twice
+    setRemoving(true);
     const r = await fetch("/api/users", {
       method: "DELETE", headers: { "content-type": "application/json" },
       body: JSON.stringify({ user_id: u.id })
     });
     const d = await r.json().catch(() => ({}));
+    setRemoving(false);
     setConfirmRemove(false);
     if (!r.ok) { toast({ text: d.error ?? "Couldn't remove.", tone: "err" }); return; }
     toast({ text: `${u.username} removed.`, tone: "ok" });
@@ -197,7 +201,7 @@ function UserRowActions({ u, me, isAdmin, canManage, depts, onOpen }: {
       )}
       <ConfirmDialog open={confirmRemove} title={`Remove ${u.username}?`}
         body="They lose access immediately and their profile is deleted. Their files stay in the drive."
-        confirmLabel="Remove" onClose={() => setConfirmRemove(false)} onConfirm={remove} />
+        confirmLabel="Remove" busy={removing} busyLabel="Removing…" onClose={() => setConfirmRemove(false)} onConfirm={remove} />
     </span>
   );
 }
@@ -210,43 +214,59 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
   const [editing, setEditing] = useState(false);
   const [dept, setDept] = useState(u.department_tag ?? "");
   const [role, setRole] = useState(u.role);
+  const [uname, setUname] = useState(u.username);
+  const [slackId, setSlackId] = useState(u.slack_user_id ?? "");
   const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [events, setEvents] = useState<{ id: number; action: string; ts: string; detail: Record<string, unknown> | null }[] | null>(null);
   const canEdit = canManage && u.username !== me;
   const on = activeSince(u.last_sign_in_at);
 
   useEffect(() => {
-    if (tab !== "activity" || events !== null) return;
+    // Audit history is admin-only (same boundary as /activity + /api/activity):
+    // managers keep the overview tab; the feed never loads for them.
+    if (!isAdmin || tab !== "activity" || events !== null) return;
     let dead = false;
     fetch(`/api/activity?actor=${encodeURIComponent(u.username)}&limit=50`)
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })).catch(() => ({ ok: false, d: {} as { results?: [] } })))
       .then(({ ok, d }) => { if (!dead) setEvents(ok ? (d.results ?? []) : []); })
       .catch(() => { if (!dead) setEvents([]); });
     return () => { dead = true; };
-  }, [tab, events, u.username]);
+  }, [tab, events, u.username, isAdmin]);
 
   async function save() {
     setBusy(true);
+    const body: Record<string, unknown> = { user_id: u.id, department_tag: dept.trim() || null };
+    if (isAdmin && role !== u.role) body.role = role;
+    // Username + Slack link are admin-only (the server rejects them for
+    // anyone else with a 403 — never send what the user can't set).
+    if (isAdmin && uname.trim() !== u.username) body.username = uname.trim();
+    if (isAdmin && slackId.trim() !== (u.slack_user_id ?? "")) {
+      body.slack_user_id = slackId.trim() === "" ? null : slackId.trim();
+    }
     const r = await fetch("/api/users", {
       method: "PATCH", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ user_id: u.id, department_tag: dept.trim() || null, ...(isAdmin && role !== u.role ? { role } : {}) })
+      body: JSON.stringify(body)
     });
     const d = await r.json().catch(() => ({}));
     setBusy(false);
     if (!r.ok) { toast({ text: d.error ?? "Couldn't save.", tone: "err" }); return; }
-    toast({ text: `Saved ${u.username}.`, tone: "ok" });
+    toast({ text: `Saved ${d.username ?? u.username}.`, tone: "ok" });
     setEditing(false);
     router.refresh();
     onClose();
   }
 
   async function remove() {
+    if (removing) return;
+    setRemoving(true);
     const r = await fetch("/api/users", {
       method: "DELETE", headers: { "content-type": "application/json" },
       body: JSON.stringify({ user_id: u.id })
     });
     const d = await r.json().catch(() => ({}));
+    setRemoving(false);
     setConfirmRemove(false);
     if (!r.ok) { toast({ text: d.error ?? "Couldn't remove.", tone: "err" }); return; }
     toast({ text: `${u.username} removed.`, tone: "ok" });
@@ -280,7 +300,7 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
             <div><p className="text-[16px] font-semibold">{rel(u.last_sign_in_at)}</p><p className="text-[11px] text-muted">Last login</p></div>
           </div>
           <div role="tablist" aria-label="User sections" className="flex gap-4 mt-1">
-            {(["overview", "activity"] as const).map((t) => (
+            {(isAdmin ? (["overview", "activity"] as const) : (["overview"] as const)).map((t) => (
               <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)}
                 className={`min-h-[44px] text-[13.5px] capitalize border-b-2 -mb-px ${tab === t ? "border-brand text-brand font-medium" : "border-transparent text-muted hover:text-ink"}`}>
                 {t}
@@ -296,6 +316,22 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
                 <p className="text-[12px] font-medium text-muted mb-2">User Information</p>
                 <dl className="text-[13px] space-y-2">
                   <div className="flex justify-between gap-2"><dt className="text-muted">Email</dt><dd className="truncate">{u.email ?? "—"}</dd></div>
+                  <div className="flex justify-between gap-2 items-center"><dt className="text-muted">Username</dt>
+                    <dd>{editing && isAdmin ? (
+                      <input value={uname} onChange={(e) => setUname(e.target.value)} maxLength={60} spellCheck={false} autoComplete="off"
+                        aria-label="Username" className="min-h-[40px] w-36 rounded-md border border-line bg-surface px-2 text-[13px]" />
+                    ) : u.username}</dd>
+                  </div>
+                  {isAdmin && (
+                    <div className="flex justify-between gap-2 items-center"><dt className="text-muted">Slack</dt>
+                      <dd>{editing ? (
+                        <input value={slackId} onChange={(e) => setSlackId(e.target.value)} maxLength={32} spellCheck={false} autoComplete="off" placeholder="U012ABC34"
+                          aria-label="Slack user ID" className="min-h-[40px] w-36 rounded-md border border-line bg-surface px-2 text-[13px] font-mono" />
+                      ) : u.slack_user_id
+                        ? <span className="inline-flex items-center gap-1.5 text-[12px] text-green-700"><span className="size-1.5 rounded-full bg-green-600" />Linked · <span className="font-mono">{u.slack_user_id}</span></span>
+                        : <span className="text-muted">Not linked</span>}</dd>
+                    </div>
+                  )}
                   <div className="flex justify-between gap-2"><dt className="text-muted">User ID</dt><dd className="truncate font-mono text-[12px]" title={u.id}>{u.id.slice(0, 8)}…</dd></div>
                   <div className="flex justify-between gap-2"><dt className="text-muted">Created</dt><dd>{fullDate(u.created_at)}</dd></div>
                   <div className="flex justify-between gap-2"><dt className="text-muted">Last Login</dt><dd>{fullDate(u.last_sign_in_at)}</dd></div>
@@ -321,7 +357,7 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
               <div>
                 <p className="text-[12px] font-medium text-muted mb-2">Quick Actions</p>
                 {canEdit && !editing && (
-                  <button onClick={() => { setDept(u.department_tag ?? ""); setRole(u.role); setEditing(true); }}
+                  <button onClick={() => { setDept(u.department_tag ?? ""); setRole(u.role); setUname(u.username); setSlackId(u.slack_user_id ?? ""); setEditing(true); }}
                     className="w-full min-h-[44px] rounded-md bg-brand text-white text-[13px] font-medium flex items-center justify-center gap-1.5">
                     <Pencil size={14} /> Edit Profile
                   </button>
@@ -344,7 +380,7 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
               </div>
             </div>
           )}
-          {tab === "activity" && (
+          {tab === "activity" && isAdmin && (
             <div>
               {events === null ? (
                 <div className="space-y-2.5" aria-label="Loading user activity">
@@ -370,7 +406,7 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
       </div>
       <ConfirmDialog open={confirmRemove} title={`Remove ${u.username}?`}
         body="They lose access immediately and their profile is deleted. Their files stay in the drive."
-        confirmLabel="Remove" onClose={() => setConfirmRemove(false)} onConfirm={remove} />
+        confirmLabel="Remove" busy={removing} busyLabel="Removing…" onClose={() => setConfirmRemove(false)} onConfirm={remove} />
     </div>
   );
 }

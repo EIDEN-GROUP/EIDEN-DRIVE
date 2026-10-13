@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminClient } from "@/lib/supabase-admin";
 import { getProfile } from "@/lib/roles";
 import { logAudit } from "@/lib/audit";
-import { canTouch, folderUsable, googleInScope } from "@/lib/visibility";
+import { canTouch, folderUsable, googleInScope, googlePinOf } from "@/lib/visibility";
 import { getAccounts } from "@/lib/drive-accounts";
 import { parseJson } from "@/lib/http";
 
@@ -27,7 +27,7 @@ export async function POST(req: Request) {
   const [{ data: tag }, { data: item }] = await Promise.all([
     db.from("tags").select("id,name").eq("id", tag_id).maybeSingle(),
     (kind === "file"
-      ? db.from("file_index").select("id,name,owner,folder,google_file_id,drive_account_id").eq("id", id).maybeSingle()
+      ? db.from("file_index").select("id,name,owner,folder,google_file_id,google_parent_id,drive_account_id").eq("id", id).maybeSingle()
       : db.from("folders").select("id,name").eq("id", id).maybeSingle())
   ]);
   if (!tag) return Response.json({ error: "tag not found" }, { status: 404 });
@@ -37,7 +37,7 @@ export async function POST(req: Request) {
   // could tag any UUID with their own department and read it (escalation).
   if (kind === "file") {
     const it = item as unknown as { id: string; owner: string; folder: string | null; google_file_id?: string | null; drive_account_id?: string | null };
-    const gate = await canTouch(db, me, it);
+    const gate = await canTouch(db, me, it, googlePinOf(it));
     if (!gate.ok) return Response.json({ error: gate.reason ?? "not allowed" }, { status: 403 });
     if (it.google_file_id) {
       if (!(await googleInScope(db, await getAccounts(), it.drive_account_id, it.google_file_id))) {
