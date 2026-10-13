@@ -73,22 +73,22 @@ Never expose tokens/secrets/webhook URLs to browser code.
   + synchronous processing (today's behavior, unchanged). Uploads + directory
   keep working with none of these applied.
 
-## 4. How event processing works
+## 4. How event processing works (Hobby plan)
 
-- `POST /api/slack/events` verifies the signature, then **acks fast** (HTTP 200
-  well inside Slack's ~3s deadline) and enqueues the event. No DB fan-out or
-  Slack API call happens before the ack.
-- `POST /api/slack/process` (Vercel Cron every 5 min per `vercel.json`, or an
-  admin session for manual "process now") claims due jobs and runs them with
-  exponential-backoff retries (8 attempts max). Rows move
-  pending → processing → done; failures return to pending; exhausted jobs go
-  dead with a safe error code visible to admins. Retried jobs skip completed
-  side effects (no duplicate prompts/unfurls/posts).
-- Slack redeliveries of known events are deduped; redelivery of a *failed*
-  event requeues it sooner.
-- **Cron prerequisite**: sub-daily schedules need a paid Vercel plan. If cron
-  never fires, events pile up pending — the Storage → Slack health panel shows
-  the database state, and admins can trigger `/api/slack/process` manually.
+- `POST /api/slack/events` verifies the signature, records the event in the
+  durable queue (**dedup**: Slack redeliveries of known events do no rework),
+  then processes it inline and returns 200. Typical cost is a few bounded DB +
+  Slack calls (~1-2s, inside Slack's ~3s deadline in the normal case); a
+  breach just triggers a redelivery, which the queue dedups.
+- `POST /api/slack/process` (Vercel Cron **daily at 03:00**, the Hobby-plan
+  maximum — see `vercel.json` — or an admin session for manual "process now")
+  retries anything left pending/failed with exponential backoff (8 attempts
+  max) and prunes finished rows. Rows move pending → processing → done;
+  exhausted jobs go dead with a safe error code visible to admins. Retried
+  jobs skip completed side effects (no duplicate prompts/unfurls/posts).
+- **Upgrading to Pro**: tighten `vercel.json` to `"*/5 * * * *"` and change
+  `dispatch()` in `app/api/slack/events/route.ts` to return 200 right after
+  `enqueueSlackEvent` instead of running inline.
 
 ## 5. Behavior contract (for reviewers)
 

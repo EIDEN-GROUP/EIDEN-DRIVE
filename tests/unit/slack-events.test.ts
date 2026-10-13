@@ -14,6 +14,8 @@ const savedEnv: Record<string, string | undefined> = {};
 
 const enqueued: { event_id: string; team_id: string; kind: string; payload: Record<string, unknown> }[] = [];
 const ranInline: string[] = [];
+const finished: { id: string; patch: unknown }[] = [];
+const failed: { id: string; code: string }[] = [];
 let verdict: "queued" | "duplicate" | "inline" | "dropped" = "queued";
 
 vi.mock("@/lib/slack-queue", () => ({
@@ -21,6 +23,8 @@ vi.mock("@/lib/slack-queue", () => ({
     enqueued.push(j);
     return verdict;
   },
+  finishSlackEvent: async (id: string, patch: unknown) => { finished.push({ id, patch }); },
+  failSlackEvent: async (id: string, code: string) => { failed.push({ id, code }); },
 }));
 vi.mock("@/lib/slack-process", () => ({
   JobFail: class JobFail extends Error {
@@ -70,6 +74,8 @@ describe("POST /api/slack/events (enqueue)", () => {
   beforeEach(() => {
     enqueued.length = 0;
     ranInline.length = 0;
+    finished.length = 0;
+    failed.length = 0;
     verdict = "queued";
     if (!Object.keys(savedEnv).length) {
       for (const k of ["SLACK_SIGNING_SECRET", "NEXT_PUBLIC_APP_URL"] as const) savedEnv[k] = process.env[k];
@@ -95,7 +101,10 @@ describe("POST /api/slack/events (enqueue)", () => {
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0]).toMatchObject({ event_id: "ev-posted", team_id: "T", kind: "link_shared" });
     expect(enqueued[0].payload).toMatchObject({ source: "posted", channel: "C123", user: "U123" });
-    expect(ranInline).toHaveLength(0);
+    // Hobby plan: no frequent worker, so the route runs the job inline right
+    // after the dedup insert, then records completion for future retries.
+    expect(ranInline).toEqual(["link_shared"]);
+    expect(finished).toMatchObject([{ id: "ev-posted" }]);
   });
 
   it("enqueues real composer payloads as source composer (synthetic ts preserved)", async () => {
@@ -129,10 +138,19 @@ describe("POST /api/slack/events (enqueue)", () => {
     expect(enqueued).toMatchObject([{ kind: "app_home" }]);
   });
 
-  it("pre-migration inline verdicts run the worker synchronously", async () => {
+  it("pre-migration inline verdicts run the worker synchronously (no finish bookkeeping)", async () => {
     verdict = "inline";
     const r = await POST(signed(postedEvent(`${ORIGIN}/drive/${FILE_UUID}`)));
     expect(r.status).toBe(200);
     expect(ranInline).toEqual(["link_shared"]);
+    expect(finished).toHaveLength(0); // 0022 schema: bare-event insert already dedups
+  });
+
+  it("duplicate redeliveries do no work", async () => {
+    verdict = "duplicate";
+    const r = await POST(signed(postedEvent(`${ORIGIN}/drive/${FILE_UUID}`)));
+    expect(r.status).toBe(200);
+    expect(ranInline).toHaveLength(0);
+    expect(finished).toHaveLength(0);
   });
 });

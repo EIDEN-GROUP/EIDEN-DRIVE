@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { verifySlackRequest, logSlackVerify, appOrigin, parseDriveLink } from "@/lib/slack";
-import { enqueueSlackEvent, type SlackJob, type LinkSharedJobPayload, type AppHomeJobPayload } from "@/lib/slack-queue";
+import { enqueueSlackEvent, finishSlackEvent, failSlackEvent, type SlackJob, type LinkSharedJobPayload, type AppHomeJobPayload } from "@/lib/slack-queue";
 import { runLinkShared, runAppHome, JobFail } from "@/lib/slack-process";
 import { rateLimited, clientIp } from "@/lib/rate";
 
@@ -26,9 +26,16 @@ interface EventsPayload {
 
 // POST /api/slack/events — Events API (url_verification + link_shared +
 // app_home_opened). Verified first (raw body, signing secret, 5-min
-// tolerance), then ACKED FAST: the route only enqueues durable work for the
-// cron processor (/api/slack/process) and returns 200 well inside Slack's
-// ~3s deadline. No DB fan-out or Slack API call happens before the ack.
+// tolerance), then deduplicated via the event queue and processed.
+//
+// Hobby-plan note: this deployment has no frequent worker (Vercel Hobby
+// crons run at most daily), so each event is processed inline right after
+// its dedup insert — typical cost is a few bounded DB + Slack calls (~1-2s,
+// inside Slack's ~3s deadline in the normal case). If a delivery ever
+// breaches the deadline, Slack redelivers and the enqueue dedups it; the
+// daily /api/slack/process sweep retries anything left pending/failed and
+// prunes finished rows. (On Pro: tighten vercel.json to "*/5 * * * *" and
+// return 200 right after enqueue instead of running inline.)
 //
 // link_shared fires only for USER-authored messages — Slack never sends it
 // for bot/app messages, so our own share cards can't self-unfurl (and we
@@ -96,9 +103,13 @@ export async function POST(req: Request) {
   return new Response(null, { status: 200 });
 }
 
-// Enqueue for the cron worker; pre-migration (0022 schema only) the queue
-// degrades to the legacy bare-event insert + synchronous processing here —
-// today's behavior, unchanged.
+// Enqueue for the record, then run inline — the Hobby-plan deployment has
+// no frequent worker (cron is daily, see vercel.json), so waiting for it
+// would stall previews up to 24h. The enqueue still dedups Slack redeliveries
+// and records retries; failures are marked failed-with-backoff for the daily
+// sweep (or the next redelivery) instead of being lost.
+// Pre-migration (0022 schema only) this is the legacy bare-event insert +
+// synchronous processing — today's behavior, unchanged.
 async function dispatch(job: { event_id: string; team_id: string; kind: "link_shared"; payload: LinkSharedJobPayload } | { event_id: string; team_id: string; kind: "app_home"; payload: AppHomeJobPayload }) {
   const verdict = await enqueueSlackEvent(job);
   if (verdict === "dropped") {
@@ -107,25 +118,33 @@ async function dispatch(job: { event_id: string; team_id: string; kind: "link_sh
     console.warn(`[slack-events] ${job.kind} ${job.event_id} dropped (database unavailable)`);
     return;
   }
-  if (verdict !== "inline") return;
+  if (verdict === "duplicate") return;
   const full: SlackJob = {
     event_id: job.event_id, team_id: job.team_id, kind: job.kind,
     attempts: 0, payload: job.payload, prompt_sent: false, unfurled: false,
   };
   try {
-    if (job.kind === "link_shared") await runLinkShared({ ...full, payload: job.payload });
-    else await runAppHome({ ...full, payload: job.payload });
+    const patch = job.kind === "link_shared"
+      ? await runLinkShared({ ...full, payload: job.payload })
+      : await runAppHome({ ...full, payload: job.payload });
+    // Queue schema present: record completion so retries skip finished work.
+    // Legacy schema: finish/fail would warn on missing columns — skip it
+    // (the bare-event insert already dedups).
+    if (verdict === "queued") await finishSlackEvent(job.event_id, patch);
   } catch (e) {
-    const code = e instanceof JobFail ? e.code : "unknown";
-    console.warn(`[slack-events] inline ${job.kind} failed (${code})`);
+    const fail = e instanceof JobFail ? e : new JobFail("unknown");
+    if (verdict === "queued") await failSlackEvent(job.event_id, fail.code, { permanent: fail.permanent });
+    else console.warn(`[slack-events] inline ${job.kind} failed (${fail.code})`);
   }
-  // Legacy-schema prune (0022 rows have no status columns, so the worker's
-  // status-scoped prune can't see them). Fire-and-forget — never delays the
-  // ack; the worker owns pruning once 0023 is applied.
-  try {
-    const { adminClient } = await import("@/lib/supabase-admin");
-    adminClient().from("slack_event_log").delete()
-      .lt("created_at", new Date(Date.now() - 7 * 86400_000).toISOString())
-      .then(() => {}, () => {});
-  } catch { /* ignore */ }
+  if (verdict !== "queued") {
+    // Legacy-schema prune (0022 rows have no status columns, so the worker's
+    // status-scoped prune can't see them). Fire-and-forget — never delays the
+    // ack; the worker owns pruning once 0023 is applied.
+    try {
+      const { adminClient } = await import("@/lib/supabase-admin");
+      adminClient().from("slack_event_log").delete()
+        .lt("created_at", new Date(Date.now() - 7 * 86400_000).toISOString())
+        .then(() => {}, () => {});
+    } catch { /* ignore */ }
+  }
 }
