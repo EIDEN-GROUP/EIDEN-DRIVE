@@ -13,6 +13,10 @@ import Menu from "../ui/Menu";
 import { Ring, Dots, SparkleLoader, UploadPanel, type UploadItem, type UploadStatus } from "../ui/Loaders";
 import { uploadResumable, cancelResumableSession, UploadCancelled } from "@/lib/upload-resumable-client";
 import { RESUMABLE_MAX } from "@/lib/resumable";
+
+// Largest single PUT Supabase Storage accepts by default (project "upload file
+// size limit"; also the Free-plan ceiling). Bigger files route to Google.
+const STORAGE_PUT_MAX = 50 * 1024 * 1024;
 import FileThumb from "./FileThumb";
 import FileViewer, { type ViewFile } from "./FileViewer";
 import FileEditor from "./FileEditor";
@@ -243,7 +247,10 @@ export default function Explorer() {
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) setItem(key, { pct: (e.loaded / e.total) * 100 });
       };
-      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error("byte upload failed")));
+      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve()
+        : reject(new Error(xhr.status === 413 || /maximum allowed size|too large/i.test(xhr.responseText)
+          ? "too big for Supabase Storage (project upload limit)"
+          : `byte upload failed (HTTP ${xhr.status})`)));
       xhr.onerror = () => reject(new Error("byte upload failed"));
       xhr.onabort = () => reject(new Error("cancelled"));
       xhr.ontimeout = () => reject(new Error("byte upload timed out"));
@@ -1077,13 +1084,20 @@ export default function Explorer() {
       try {
         // Size gate BEFORE hashing: sha256 buffers the whole file — rejecting
         // a huge pick after a long hash is the OOM/timeout the cap exists to prevent.
-        if (supaOff && file.size > RESUMABLE_MAX) throw new Error("over 2 GB — Drive uploads top out at 2 GB");
-        if (!supaOff && file.size > 100 * 1024 * 1000) throw new Error("over 100 MB — the server refuses it (Storage cap)");
+        // Supabase Storage refuses objects over its project upload limit (50 MB
+        // by default, and the Free plan's ceiling), so bigger files skip Storage
+        // and go straight to Google — the same resumable path as "Supabase off".
+        const viaGoogle = supaOff || file.size > STORAGE_PUT_MAX;
+        if (viaGoogle && file.size > RESUMABLE_MAX) throw new Error("over 2 GB — Drive uploads top out at 2 GB");
+        if (viaGoogle && !supaOff && !accounts.some((a) => a.status === "active")) {
+          throw new Error(`over ${Math.round(STORAGE_PUT_MAX / 1048576)} MB — too big for Supabase Storage, and no Google drive is connected to take it`);
+        }
         // Supabase off: resumable direct-to-Google for EVERY size (one
         // consistent path — no Supabase bytes at any stage, small or large).
         // Hashing a multi-GB file would buffer it all in the tab, so the
         // hash is best-effort here (advisory only: versions accept "").
-        if (supaOff) {
+        if (viaGoogle) {
+          if (!supaOff) setItem(key, { dest: "Drive" });
           let hash: string | null = null;
           try { hash = await sha256(file); } catch { hash = null; }
           if (upCancelAll.current) throw new Error("cancelled");
