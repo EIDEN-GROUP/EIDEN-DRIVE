@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase-server";
 import { adminClient, hasAdminClient } from "@/lib/supabase-admin";
 import { getProfile, can } from "@/lib/roles";
 import { avatarUrlFor } from "@/lib/storage";
+import { Card } from "@/components/ui/primitives";
 import UsersClient, { type DirectoryUser } from "@/components/users/UsersClient";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +20,17 @@ async function withAvatars<T extends { avatar_path?: string | null }>(rows: T[])
 
 export default async function UsersPage() {
   const me = await getProfile();
+  // Directory is administrators + managers only (unchanged contract).
+  if (!me || !can(me.role, "manage-users")) {
+    return (
+      <section className="px-0 sm:px-1 pt-1 max-w-[1600px] mx-auto">
+        <h1 className="page-title mb-4">All Users</h1>
+        <Card label="Restricted">
+          <p className="text-sm text-muted">The user directory is visible to admins and managers only.</p>
+        </Card>
+      </section>
+    );
+  }
   const supa = createClient();
   // slack_user_id rides along when migration 0021 is applied; pre-migration
   // the directory still loads (everyone reads "not linked").
@@ -42,9 +54,18 @@ export default async function UsersPage() {
     try {
       const { data: users } = await adminClient().auth.admin.listUsers();
       const byId = new Map((users?.users ?? []).map((u) => [u.id, u]));
+      let linkById = new Map<string, { workspace_id: string; linked_at: string | null }>();
+      try {
+        const { data: links } = await adminClient().from("slack_links").select("eiden_user_id,workspace_id,linked_at").not("eiden_user_id", "is", null).limit(500);
+        if (links) {
+          for (const r of links as { eiden_user_id: string; workspace_id: string; linked_at: string | null }[]) {
+            linkById.set(r.eiden_user_id, { workspace_id: r.workspace_id, linked_at: r.linked_at });
+          }
+        }
+      } catch { /* pre-0022 */ }
       rows = base.map((p) => {
         const u = byId.get(p.id) as { email?: string; created_at?: string; last_sign_in_at?: string } | undefined;
-        return { ...p, email: u?.email ?? null, created_at: u?.created_at ?? null, last_sign_in_at: u?.last_sign_in_at ?? null };
+        return { ...p, slack_link: linkById.get(p.id) ?? null, email: u?.email ?? null, created_at: u?.created_at ?? null, last_sign_in_at: u?.last_sign_in_at ?? null };
       });
     } catch { /* directory still renders without auth metadata */ }
   }

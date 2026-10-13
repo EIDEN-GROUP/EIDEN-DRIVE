@@ -52,7 +52,10 @@ export async function notifyUpload(db: Db, req: Request, args: {
         body: `${where}${sizeTxt} · ${link}`
       });
     }
-    postSlack(`:outbox_tray: File uploaded\n\n${args.name}\nUploaded by ${byline}\n\n:file_folder: Location: ${where} :page_facing_up: Type: ${typeTxt} :floppy_disk: Size: ${args.size ? formatBytes(args.size) : "unknown"}\n:link: <${link}|View file in Drive>`).then((r) => {
+    // Upload alerts stay preview-free: Slack must not expand the Eiden link
+    // into a file preview in the notification channel (scoped to these
+    // messages only — user-shared links unfurl normally elsewhere).
+    postSlack(`:outbox_tray: File uploaded\n\n${args.name}\nUploaded by ${byline}\n\n:file_folder: Location: ${where} :page_facing_up: Type: ${typeTxt} :floppy_disk: Size: ${args.size ? formatBytes(args.size) : "unknown"}\n:link: <${link}|View file in Drive>`, { unfurl_links: false, unfurl_media: false }).then((r) => {
       if (!r.ok) console.error("[slack-upload]", r.error);
     });
   } catch { /* fan-out never fails the upload */ }

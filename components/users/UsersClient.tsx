@@ -13,6 +13,7 @@ export interface DirectoryUser {
   id: string; username: string; role: string; department_tag: string | null;
   email?: string | null; created_at?: string | null; last_sign_in_at?: string | null;
   avatarUrl?: string | null; slack_user_id?: string | null;
+  slack_link?: { workspace_id: string; linked_at: string | null } | null;
 }
 
 function Avatar({ u, size }: { u: { username: string; avatarUrl?: string | null }; size: string }) {
@@ -328,7 +329,7 @@ function UserModal({ u, me, isAdmin, canManage, depts, onClose }: {
                         <input value={slackId} onChange={(e) => setSlackId(e.target.value)} maxLength={32} spellCheck={false} autoComplete="off" placeholder="U012ABC34"
                           aria-label="Slack user ID" className="min-h-[40px] w-36 rounded-md border border-line bg-surface px-2 text-[13px] font-mono" />
                       ) : u.slack_user_id
-                        ? <span className="inline-flex items-center gap-1.5 text-[12px] text-green-700"><span className="size-1.5 rounded-full bg-green-600" />Linked · <span className="font-mono">{u.slack_user_id}</span></span>
+                        ? <span className="inline-flex items-center gap-1.5 text-[12px] text-green-700"><span className="size-1.5 rounded-full bg-green-600" />Linked · <span className="font-mono">{u.slack_user_id}</span>{u.slack_link ? <span className="text-muted">· {u.slack_link.linked_at ? new Date(u.slack_link.linked_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "pending"}</span> : null}</span>
                         : <span className="text-muted">Not linked</span>}</dd>
                     </div>
                   )}

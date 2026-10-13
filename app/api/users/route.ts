@@ -18,11 +18,21 @@ export async function GET() {
   const { data: profiles } = await db.from("profiles").select("id,username,role,department_tag,avatar_path").order("username").limit(200);
   // Slack links ride along when migration 0021 is applied; pre-migration the
   // directory still loads (linked status just reads "not linked" everywhere).
+  // Workspace link rows (migration 0022) add workspace + timestamp when present.
   let slackById = new Map<string, string | null>();
+  let linkById = new Map<string, { workspace_id: string; linked_at: string | null }>();
   try {
     const { data: links, error } = await db.from("profiles").select("id,slack_user_id").limit(500);
     if (!error && links) slackById = new Map(((links ?? []) as { id: string; slack_user_id: string | null }[]).map((r) => [r.id, r.slack_user_id]));
   } catch { /* pre-0021: no links */ }
+  try {
+    const { data: rows, error } = await db.from("slack_links").select("eiden_user_id,workspace_id,linked_at").not("eiden_user_id", "is", null).limit(500);
+    if (!error && rows) {
+      for (const r of rows as { eiden_user_id: string; workspace_id: string; linked_at: string | null }[]) {
+        linkById.set(r.eiden_user_id, { workspace_id: r.workspace_id, linked_at: r.linked_at });
+      }
+    }
+  } catch { /* pre-0022: no workspace rows */ }
   const { data: users } = await db.auth.admin.listUsers();
   const byId = new Map((users?.users ?? []).map((u) => [u.id, u]));
   const results = [];
@@ -32,7 +42,7 @@ export async function GET() {
     if (p.avatar_path) {
       avatarUrl = await avatarUrlFor(p.avatar_path);
     }
-    results.push({ ...p, slack_user_id: slackById.get(p.id) ?? null, avatar_path: undefined, avatarUrl, email: u?.email ?? null, created_at: u?.created_at ?? null, last_sign_in_at: u?.last_sign_in_at ?? null });
+    results.push({ ...p, slack_user_id: slackById.get(p.id) ?? null, slack_link: linkById.get(p.id) ?? null, avatar_path: undefined, avatarUrl, email: u?.email ?? null, created_at: u?.created_at ?? null, last_sign_in_at: u?.last_sign_in_at ?? null });
   }
   return Response.json({ results });
 }

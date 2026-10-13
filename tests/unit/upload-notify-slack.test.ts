@@ -128,6 +128,13 @@ describe("upload notify identity", () => {
     expect(webhookText().split("Uploaded by `@alex` / alex.m").length - 1).toBe(2);
   });
 
+  it("sends unfurl suppression flags on the webhook payload (scoped to upload alerts)", async () => {
+    await notifyUpload(db as never, req, args);
+    const hook = calls.find((c) => c.url.startsWith("https://hooks.slack"));
+    expect(hook).toBeTruthy();
+    expect(hook!.body).toMatchObject({ unfurl_links: false, unfurl_media: false });
+  });
+
   it("sanitizes hostile display names (no mention smuggling, no mrkdwn breakage)", async () => {
     (globalThis as any).fetch = async (url: string, init?: { body?: string }) => {
       calls.push({ url, body: init?.body ? JSON.parse(init.body as string) : null });
