@@ -11,6 +11,10 @@ export function useTags() {
   const [tags, setTags] = useState<Tag[]>([]);
   const [files, setFiles] = useState<Record<string, string[]>>({});
   const [folders, setFolders] = useState<Record<string, string[]>>({});
+  // Inheritance supply (complete ancestor inputs from GET /api/tags):
+  // workspace folder parents + google-folder rows for Drive chains.
+  const [folderParents, setFolderParents] = useState<Record<string, string | null>>({});
+  const [googleFolders, setGoogleFolders] = useState<{ id: string; google_id: string; parent: string | null; account: string | null }[]>([]);
   const [ready, setReady] = useState(false);
 
   const load = useCallback(async () => {
@@ -19,6 +23,7 @@ export function useTags() {
       if (!r.ok) return; // tables not migrated yet (0013) or signed out — tagging UI simply stays empty
       const d = await r.json();
       setTags(d.tags ?? []); setFiles(d.files ?? {}); setFolders(d.folders ?? {});
+      setFolderParents(d.folderParents ?? {}); setGoogleFolders(d.googleFolders ?? []);
     } catch { /* offline */ } finally { setReady(true); }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -63,13 +68,22 @@ export function useTags() {
     });
     apply(on);
     const r = await fetch("/api/tags/assign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind, id, tag_id: tagId, on }) });
+    const d = await r.json().catch(() => ({}));
     if (!r.ok) {
       apply(!on);
-      const d = await r.json().catch(() => ({}));
       toast({ text: d.error ?? "Couldn't update tags.", tone: "err" });
+    } else if (on && d.affected) {
+      // Folder (or google-folder row) tags inherit to every descendant at
+      // read time — confirm scope.
+      const a = d.affected as { folders?: number; files?: number };
+      const bits = [a.folders ? `${a.folders} folder${a.folders === 1 ? "" : "s"}` : "", a.files ? `${a.files} file${a.files === 1 ? "" : "s"}` : ""].filter(Boolean).join(" + ");
+      if (bits) toast({ text: `Tag applied — inherits to ${bits} inside.`, tone: "ok" });
+    } else if (!on && d.affected) {
+      const a = d.affected as { folders?: number; files?: number };
+      if ((a.folders ?? 0) + (a.files ?? 0) > 0) toast({ text: "Tag removed — descendants no longer inherit it.", tone: "ok" });
     }
   }
 
-  return { tags, byId, counts, ready, idsOf, load, create, update, remove, assign };
+  return { tags, byId, counts, ready, idsOf, load, create, update, remove, assign, files, folders, folderParents, googleFolders };
 }
 export type TagsApi = ReturnType<typeof useTags>;

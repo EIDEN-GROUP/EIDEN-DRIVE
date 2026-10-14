@@ -57,5 +57,64 @@ export async function POST(req: Request) {
   if (error) return Response.json({ error: error.message }, { status: 500 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "edit", req, file_id: kind === "file" ? id : null,
     detail: { tag: (tag as { name: string }).name, [kind]: (item as { name: string }).name, tagged: on } });
-  return Response.json({ ok: true });
+  // Folder tags inherit to every descendant at read time — report the scope
+  // so the UI can confirm it (bounded, best-effort; never fails the request).
+  const affected = await descendantImpact(db, kind, id, item).catch(() => null);
+  return Response.json({ ok: true, ...(affected ? { affected } : {}) });
+}
+
+// How many folders/files inherit from this item (caps keep it cheap on huge
+// trees; counts are exact head-counts, not fetched rows).
+async function descendantImpact(
+  db: ReturnType<typeof adminClient>, kind: "file" | "folder", id: string, item: unknown
+): Promise<{ folders: number; files: number } | null> {
+  if (kind === "folder") {
+    const { data: all } = await db.from("folders").select("id,parent").limit(2000);
+    const rows = ((all ?? []) as { id: string; parent: string | null }[]);
+    const kids = new Map<string, string[]>();
+    for (const f of rows) {
+      if (!f.parent) continue;
+      const l = kids.get(f.parent) ?? [];
+      l.push(f.id);
+      kids.set(f.parent, l);
+    }
+    const under = new Set<string>();
+    const stack = [id];
+    while (stack.length && under.size < 2000) {
+      const cur = stack.pop()!;
+      for (const c of kids.get(cur) ?? []) {
+        if (c !== id && !under.has(c)) { under.add(c); stack.push(c); }
+      }
+    }
+    let files = 0;
+    const scope = [...under];
+    for (let off = 0; off < scope.length; off += 500) {
+      const { count } = await db.from("file_index").select("id", { count: "exact", head: true }).in("folder", scope.slice(off, off + 500));
+      files += count ?? 0;
+    }
+    if (!under.size && !files) return null;
+    return { folders: under.size, files };
+  }
+  const row = item as { google_file_id?: string | null; drive_account_id?: string | null };
+  if (!row.google_file_id) return null;
+  // Google-folder row: walk the indexed same-account subtree (visited set
+  // breaks cycles; node cap bounds huge drives).
+  let folders = 0, files = 0;
+  let frontier = [row.google_file_id];
+  const seen = new Set<string>(frontier);
+  for (let depth = 0; depth < 25 && frontier.length && folders + files < 2000; depth++) {
+    let q = db.from("file_index").select("google_file_id,mime").in("google_parent_id", frontier.slice(0, 500));
+    if (row.drive_account_id) q = q.eq("drive_account_id", row.drive_account_id);
+    const { data } = await q.limit(2000);
+    frontier = [];
+    for (const r of ((data ?? []) as { google_file_id: string | null; mime: string | null }[])) {
+      if (!r.google_file_id || seen.has(r.google_file_id)) continue;
+      seen.add(r.google_file_id);
+      if (r.mime === "application/vnd.google-apps.folder") folders++;
+      else files++;
+      frontier.push(r.google_file_id);
+    }
+  }
+  if (!folders && !files) return null;
+  return { folders, files };
 }

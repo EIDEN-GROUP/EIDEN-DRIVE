@@ -27,6 +27,8 @@ import { useTags } from "../tags/useTags";
 import { TagChip, TagDot, TagDots, TagEditor, TagPicker } from "../tags/TagUI";
 import type { Tag, TagKind } from "../tags/useTags";
 import { badge, classify, displayKind, fmtDateTime, formatBytes, isGoogleForestRoot } from "@/lib/files";
+import { computeEffectiveTags, inheritedFrom } from "@/lib/tag-inheritance";
+import { readSupaOff, writeSupaOff, shouldUploadViaGoogle, usbAllowed } from "@/lib/storage-prefs";
 
 export interface Folder { id: string; name: string; parent: string | null; dept: string | null; created_at?: string | null; created_by_name?: string | null }
 export interface FileRow {
@@ -127,25 +129,30 @@ export default function Explorer() {
   const [mirrorOff, setMirrorOff] = useState(false);
   // Supabase intake toggle (persisted): off = bytes go straight to Google
   // Drive, Storage is never touched. USB copies need Supabase, so they switch
-  // off too while this is off.
-  const [supaOff, setSupaOff] = useState(false);
+  // off too while this is off. DEFAULT OFF: new users and missing preferences
+  // start disabled; only an explicitly saved "1" enables it.
+  const [supaOff, setSupaOff] = useState(true);
   useEffect(() => {
     try {
       const usb = localStorage.getItem("eiden-usb") === "1";
       if (localStorage.getItem("eiden-mirror") === "0") setMirrorOff(true);
-      const supa = localStorage.getItem("eiden-supabase") === "0";
-      if (supa) {
-        setSupaOff(true);
-        // Persisted conflict (USB on + Supabase off) used to silently drop the
-        // USB copy: resolve it at load — USB off, Supabase stays off.
-        if (usb) { try { localStorage.setItem("eiden-usb", "0"); } catch { /* ignore */ } }
+      // Explicit opt-in only: readSupaOff is true for fresh installs, missing
+      // keys, "0", and anything that isn't exactly "1".
+      if (!readSupaOff(localStorage)) {
+        // Explicit opt-in: respect the saved choice (and its USB companion).
+        setSupaOff(false);
+        if (usb) setUsbTarget(true);
       } else if (usb) {
-        setUsbTarget(true);
+        // Persisted conflict (USB on + Supabase off/missing) used to silently
+        // drop the USB copy: resolve it at load — USB off, Supabase stays off.
+        // The Supabase preference itself is never written here (no silent
+        // migration to enabled).
+        try { localStorage.setItem("eiden-usb", "0"); } catch { /* ignore */ }
       }
     } catch { /* ignore */ }
   }, []);
   function toggleUsb() {
-    if (supaOff) {
+    if (!usbAllowed(supaOff)) {
       toast({ text: "USB copies pull from Supabase — turn Supabase on first.", tone: "err" });
       return;
     }
@@ -164,7 +171,7 @@ export default function Explorer() {
   }
   function toggleSupa() {
     setSupaOff((v) => {
-      try { localStorage.setItem("eiden-supabase", v ? "1" : "0"); } catch { /* ignore */ }
+      writeSupaOff(localStorage, !v);
       if (v) {
         // Turning Supabase back on changes nothing else.
       } else {
@@ -632,6 +639,25 @@ export default function Explorer() {
   }
 
   // ── rows ──
+  // Effective tags (direct ∪ inherited from tagged ancestors, both
+  // hierarchies). Recomputed from tag maps + current listing — descendants
+  // inherit at read time, so tagging a folder needs no fan-out writes and
+  // moves/copies/uploads pick up their destination's tags automatically.
+  // Declared before the rows memo (the tag filter below reads it).
+  const eff = useMemo(() => computeEffectiveTags({
+    fileDirect: tg.files,
+    folderDirect: tg.folders,
+    folderParent: tg.folderParents,
+    googleFolders: tg.googleFolders,
+    files: files.map((f) => ({
+      id: f.id, folder: f.folder ?? null,
+      google_parent_id: f.google_parent_id ?? null, drive_account_id: f.drive_account_id ?? null,
+    })),
+  }), [tg.files, tg.folders, tg.folderParents, tg.googleFolders, files]);
+  const effIdsOf = (kind: TagKind, id: string): string[] => {
+    const rec = kind === "file" ? eff.files[id] : eff.folders[id];
+    return rec ?? [];
+  };
   const rows: Row[] = useMemo(() => {
     const dir = sort.dir;
     const fval = (f: FileRow): string | number => {
@@ -681,7 +707,7 @@ export default function Explorer() {
     }
     if (tagSel.length) {
       const n = q.trim().toLowerCase();
-      const has = (kind: TagKind, id: string) => tagSel.every((t) => tg.idsOf(kind, id).includes(t));
+      const has = (kind: TagKind, id: string) => tagSel.every((t) => effIdsOf(kind, id).includes(t));
       return [...sortFolders(folders.filter((f) => has("folder", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => folderRowOf(f, 0)),
         ...sortFiles(files.filter((f) => !f.id.startsWith("g:") && !isGFolder(f) && has("file", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => fileRowOf(f, 0)),
         ...sortFiles(files.filter((f) => !f.id.startsWith("g:") && isGFolder(f) && has("file", f.id) && (!n || f.name.toLowerCase().includes(n)))).map((f) => gFolderRowOf(f, 0))];
@@ -743,7 +769,7 @@ export default function Explorer() {
       }
     }
     return out;
-  }, [nav.kind, files, folders, q, tagFilter, tagSel, tg.idsOf, sort, expanded, curFolder, deptOf, driveView, tree, treeRoot, accounts]);
+  }, [nav.kind, files, folders, q, tagFilter, tagSel, eff, sort, expanded, curFolder, deptOf, driveView, tree, treeRoot, accounts]);
 
   // Pagination: files/folders (list + grid) and the Recovery Bin page independently; any navigation/filter/sort resets to page 1.
   const pg = usePagination(rows, { defaultSize: 50, sizes: [25, 50, 100, 200], storageKey: "files",
@@ -1092,6 +1118,15 @@ export default function Explorer() {
         return;
       }
     }
+    // Supabase off + Auto destination + zero active drives: fail the batch
+    // BEFORE hashing/transferring with a clear error — never silently fall
+    // back to Supabase Storage (the server would 502 at init; this saves the
+    // wasted work and says exactly what to fix).
+    if (supaOff && !inDriveView && !driveSel && !accounts.some((a) => a.status === "active")) {
+      toast({ text: "Supabase is off and no Google Drive is connected — connect a drive in Storage first.", tone: "err" });
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     const batch = files.map((f) => ({
       key: ++upSeq.current, name: f.name, size: f.size, mime: f.type || "application/octet-stream",
       status: "hashing" as UploadStatus, pct: null as number | null, dest,
@@ -1110,7 +1145,7 @@ export default function Explorer() {
         // Supabase Storage refuses objects over its project upload limit (50 MB
         // by default, and the Free plan's ceiling), so bigger files skip Storage
         // and go straight to Google — the same resumable path as "Supabase off".
-        const viaGoogle = supaOff || file.size > STORAGE_PUT_MAX;
+        const viaGoogle = shouldUploadViaGoogle(supaOff, file.size, STORAGE_PUT_MAX);
         if (viaGoogle && file.size > RESUMABLE_MAX) throw new Error("over 2 GB — Drive uploads top out at 2 GB");
         if (viaGoogle && !supaOff && !accounts.some((a) => a.status === "active")) {
           throw new Error(`over ${Math.round(STORAGE_PUT_MAX / 1048576)} MB — too big for Supabase Storage, and no Google drive is connected to take it`);
@@ -1388,8 +1423,23 @@ export default function Explorer() {
   const taggable = (r: Row) => tagTarget(r) !== null;
   const rowTags = (r: Row): Tag[] => {
     const t = tagTarget(r);
-    return t ? tg.idsOf(t.kind, t.id).map((id) => tg.byId.get(id)).filter(Boolean) as Tag[] : [];
+    return t ? effIdsOf(t.kind, t.id).map((id) => tg.byId.get(id)).filter(Boolean) as Tag[] : [];
   };
+  // Direct vs inherited, for the Details panel: inherited chips name their
+  // source folder(s) and offer no local remove (removing there would
+  // silently do nothing — the tag must go at its source).
+  function tagOrigin(r: Row, tagId: string): { direct: boolean; sourceNames: string[] } {
+    const t = tagTarget(r);
+    const direct = t ? (t.kind === "file" ? tg.files[t.id] : tg.folders[t.id])?.includes(tagId) ?? false : false;
+    const fromIds = t ? inheritedFrom(t.id, tagId, eff) : [];
+    const names: string[] = [];
+    for (const fid of fromIds.slice(0, 3)) {
+      const fl = folderById.get(fid)?.name ?? files.find((x) => x.id === fid)?.name;
+      names.push(fl ? `“${fl}”` : "a parent folder");
+    }
+    if (fromIds.length > 3) names.push(`${fromIds.length - 3} more`);
+    return { direct, sourceNames: names };
+  }
   function toggleTagFilter(id: string) {
     closePaneOnPhone();
     setDriveView(null);
@@ -1571,6 +1621,25 @@ export default function Explorer() {
   }, [showInfo, sel?.key]);
 
   function sortBy(key: SortKey) { setSort((s) => (s.key === key ? { key, dir: (s.dir * -1) as 1 | -1 } : { key, dir: 1 })); }
+  // Sidebar tag counts reflect EFFECTIVE tags (direct + inherited) over the
+  // loaded rows — tagging a folder visibly grows its descendants' counts.
+  const effCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    const seen = new Set<string>();
+    for (const r of rows) {
+      const t = tagTarget(r);
+      if (!t) continue;
+      for (const tid of effIdsOf(t.kind, t.id)) {
+        const k = `${r.key} ${tid}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        m.set(tid, (m.get(tid) ?? 0) + 1);
+      }
+    }
+    return m;
+    // effIdsOf is an unmemoized closure over `eff` — depend on eff directly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, eff]);
   const arrow = (key: SortKey) => sort.key === key ? (sort.dir === 1 ? <ChevronUp size={13} /> : <ChevronDown size={13} />) : null;
   const ariaSort = (key: SortKey) => sort.key === key ? (sort.dir === 1 ? "ascending" : "descending") : "none";
 
@@ -1671,7 +1740,7 @@ export default function Explorer() {
                     className={`w-full min-h-[44px] pl-3 pr-9 rounded-md flex items-center gap-3 text-[14.5px] text-left transition-colors ${on ? "bg-tint text-brand font-medium" : "text-ink/85 hover:bg-tint/60"}`}>
                     <span className="size-3 rounded-full shrink-0 grid place-items-center" style={{ background: t.color }}>{on && <Check size={9} className="text-white" strokeWidth={4} />}</span>
                     <span className="flex-1 truncate">{t.name}</span>
-                    <span className="text-[11px] text-muted tabular-nums group-hover:opacity-0 group-focus-within:opacity-0">{tg.counts.get(t.id) ?? 0}</span>
+                    <span className="text-[11px] text-muted tabular-nums group-hover:opacity-0 group-focus-within:opacity-0">{effCounts.get(t.id) ?? 0}</span>
                   </button>
                   <span className="absolute right-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
                     <Menu label={`Tag options for ${t.name}`} align="right" trigger={<MoreHorizontal size={16} className="text-muted" />}
@@ -2108,7 +2177,20 @@ export default function Explorer() {
                 <div className="mt-1 flex gap-1.5 flex-wrap">
                   {rowTags(sel).map((t) => {
                     const tt = tagTarget(sel);
-                    return <TagChip key={t.id} tag={t} onRemove={nav.kind === "bin" || !tt ? undefined : () => tg.assign(tt.kind, tt.id, t.id, false)} />;
+                    if (!tt || nav.kind === "bin") return <TagChip key={t.id} tag={t} />;
+                    const origin = tagOrigin(sel, t.id);
+                    // Inherited-only tags name their source and offer no local
+                    // remove: deleting here would silently do nothing — the tag
+                    // must be removed at its source folder.
+                    if (!origin.direct && origin.sourceNames.length) {
+                      return (
+                        <span key={t.id} className="inline-flex flex-col gap-0.5" title={`Inherited from ${origin.sourceNames.join(", ")} — remove it there`}>
+                          <TagChip tag={t} />
+                          <span className="text-[10px] text-muted">↳ from {origin.sourceNames[0]}{origin.sourceNames.length > 1 ? ` +${origin.sourceNames.length - 1}` : ""}</span>
+                        </span>
+                      );
+                    }
+                    return <TagChip key={t.id} tag={t} onRemove={() => tg.assign(tt.kind, tt.id, t.id, false)} />;
                   })}
                   {rowTags(sel).length === 0 && <span className="text-[11.5px] text-muted">{taggable(sel) ? "No tags yet" : "Tags apply to indexed files"}</span>}
                 </div>
