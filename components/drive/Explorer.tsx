@@ -4,7 +4,8 @@ import { useRouter } from "next/navigation";
 import {
   Menu as MenuIcon, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, LayoutList, LayoutGrid, Rows3, CircleEllipsis,
   Clock, FileText, Trash2, House, Info, Download, Link2, Search, Upload, FolderPlus, RefreshCw, X, Undo2, ExternalLink, Pencil, CloudDownload,
-  Eye, Copy, Scissors, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon
+  Eye, Copy, Scissors, ClipboardPaste, HardDrive, Plus, Check, MoreHorizontal, Tag as TagIcon,
+  BellOff, FolderUp
 } from "lucide-react";
 import { toast } from "../ui/Toast";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -25,6 +26,7 @@ import { FileGlyph, FileIcon, FolderIcon, kindOf } from "../ui/Glyphs";
 import Pagination, { usePagination } from "../ui/Pagination";
 import { useTags } from "../tags/useTags";
 import { TagChip, TagDot, TagDots, TagEditor, TagPicker } from "../tags/TagUI";
+import SlackMuteDialog, { type MuteTarget } from "../folders/SlackMuteDialog";
 import type { Tag, TagKind } from "../tags/useTags";
 import { badge, classify, displayKind, fmtDateTime, formatBytes, isGoogleForestRoot } from "@/lib/files";
 import { computeEffectiveTags, inheritedFrom } from "@/lib/tag-inheritance";
@@ -98,6 +100,10 @@ export default function Explorer() {
   const [tagEditor, setTagEditor] = useState<{ tag?: Tag } | null>(null);
   const [tagPicker, setTagPicker] = useState<{ kind: TagKind; id: string; name: string } | null>(null);
   const [confirmTagDel, setConfirmTagDel] = useState<Tag | null>(null);
+  // Per-folder Slack mute dialog target + lazily-loaded mute states (row key
+  // → state). One cheap state request per opened Details item or dialog.
+  const [muteTarget, setMuteTarget] = useState<MuteTarget | null>(null);
+  const [muteMeta, setMuteMeta] = useState<Record<string, { muted: boolean; effective: boolean }>>({});
   const [drivesOpen, setDrivesOpen] = useState(true);
   const [deptOpen, setDeptOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -222,6 +228,12 @@ export default function Explorer() {
   // the stale closure, so overlapping pages can never double a file.
   const filesRef = useRef<FileRow[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
+  // Directory picker: webkitdirectory isn't in React's input types, so the
+  // attribute is set directly once the input mounts.
+  useEffect(() => {
+    folderRef.current?.setAttribute("webkitdirectory", "");
+  }, []);
   // Drive-style upload queue: every picked file becomes a panel row with its
   // own state (hashing → uploading w/ % → indexing → done/error), cancellable
   // mid-flight. Sequential — one active transfer, so one abort controller.
@@ -1075,6 +1087,13 @@ export default function Explorer() {
     }
   }
 
+  // Per-file destination override for folder uploads (null = current view).
+  // Workspace files land in the given workspace folder; Drive files land in
+  // the given account + Google parent. Upload guards still apply per file.
+  type DestOverride =
+    | { kind: "workspace"; folder: string | null }
+    | { kind: "drive"; accountId: string; googleParent: string | null };
+
   async function uploadPicked(list: FileList | null) {
     const files = list ? Array.from(list) : [];
     if (!files.length) return;
@@ -1134,11 +1153,192 @@ export default function Explorer() {
     setUploadItems(batch);
     setUploadPanelMin(false);
     upCancelAll.current = false;
-    let ok = 0;
     for (let bi = 0; bi < files.length; bi++) {
-      const file = files[bi];
-      const key = batch[bi].key;
-      if (upCancelAll.current) { setItem(key, { status: "error", error: "cancelled" }); continue; }
+      await uploadOneFile(files[bi], batch[bi].key, null, false);
+    }
+    upAbort.current = null;
+    if (fileRef.current) fileRef.current.value = "";
+    // The panel is the summary now (its header is a live region) — no
+    // end-of-batch toast to double-announce it.
+    load(q);
+  }
+
+  // Bulk folder upload (full structure preserved): a directory picker yields
+  // files with webkitRelativePath ("Top/a/b/file.pdf"). Missing subfolders
+  // are created first (sequentially — parents before children), then every
+  // file uploads into its own destination through the normal pipeline.
+  // Caps keep huge trees honest: 500 files, 20 levels deep.
+  async function uploadFolderPicked(list: FileList | null) {
+    const picked = list ? Array.from(list) : [];
+    if (folderRef.current) folderRef.current.value = "";
+    if (!picked.length) return;
+    if (uploadActive) {
+      toast({ text: "An upload is already running — wait for it to finish.", tone: "err" });
+      return;
+    }
+    if (supaOff && mirrorOff && !inDriveView) {
+      toast({ text: "No upload destination — turn on Supabase or the Google mirror first.", tone: "err" });
+      return;
+    }
+    if (supaOff && !inDriveView && !driveSel && !accounts.some((a) => a.status === "active")) {
+      toast({ text: "Supabase is off and no Google Drive is connected — connect a drive in Storage first.", tone: "err" });
+      return;
+    }
+    const relOf = (f: File): string[] => {
+      const w = f as File & { webkitRelativePath?: unknown };
+      const rel = typeof w.webkitRelativePath === "string" && w.webkitRelativePath ? w.webkitRelativePath : f.name;
+      return rel.split("/").filter((p: string) => p && p !== "." && p !== "..");
+    };
+    interface FolderEntry { file: File; parts: string[] }
+    const entries: FolderEntry[] = picked.map((file: File): FolderEntry => ({ file, parts: relOf(file) }))
+      .filter((e: FolderEntry) => e.parts.length > 0);
+    if (!entries.length) return;
+    if (entries.length > 500) {
+      toast({ text: `That folder holds ${entries.length} files — the limit is 500 per batch. Split it and retry.`, tone: "err" });
+      return;
+    }
+    if (entries.some((e) => e.parts.length > 21)) {
+      toast({ text: "That folder nests deeper than 20 levels — flatten it and retry.", tone: "err" });
+      return;
+    }
+    const inDrive = !!(inDriveView && driveView);
+    const driveAccountId: string | null = inDrive && driveView ? driveView.accountId : null;
+    const driveRootFolder: string | null = inDrive && driveView ? driveView.folderId : null;
+    if (inDrive && !driveAccountId) {
+      toast({ text: "The open drive is unavailable — pick another drive.", tone: "err" });
+      return;
+    }
+    // Unique directory paths first (parents before children).
+    const dirSet = new Set<string>();
+    for (const e of entries) {
+      for (let i = 1; i < e.parts.length; i++) dirSet.add(e.parts.slice(0, i).join("/"));
+    }
+    const dirs = [...dirSet].sort((a, b) => a.split("/").length - b.split("/").length);
+    // Resolve-or-create every directory. Workspace: folder uuids.
+    // Drive: { accountId, googleId } pairs.
+    const wsDirs = new Map<string, string>();
+    const gDirs = new Map<string, { accountId: string; googleId: string }>();
+    let made = 0;
+    try {
+      if (!inDrive) {
+        for (const d of dirs) {
+          const parentPath = d.split("/").slice(0, -1).join("/");
+          const parent = parentPath ? wsDirs.get(parentPath) ?? null : curFolder;
+          const nameParts = d.split("/");
+          const name: string = nameParts[nameParts.length - 1] ?? d;
+          const r = await fetch("/api/folders", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name, parent }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !j.id) throw new Error(j.error ?? `couldn't create folder “${name}”`);
+          wsDirs.set(d, j.id as string);
+          made++;
+        }
+      } else {
+        if (!driveAccountId) {
+          toast({ text: "The open drive is unavailable — pick another drive.", tone: "err" });
+          return;
+        }
+        const accountId: string = driveAccountId;
+        const rootParent: string | null = driveRootFolder;
+        for (const d of dirs) {
+          const parentPath = d.split("/").slice(0, -1).join("/");
+          const parentId: string | null = parentPath ? gDirs.get(parentPath)?.googleId ?? null : rootParent;
+          const pathParts = d.split("/");
+          const name: string = pathParts[pathParts.length - 1] ?? d;
+          const r = await fetch("/api/drive/google-folder", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ accountId, parentId, name }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !j.googleId) throw new Error(j.error ?? `couldn't create folder “${name}”`);
+          gDirs.set(d, { accountId, googleId: j.googleId as string });
+          made++;
+        }
+      }
+    } catch (e) {
+      toast({ text: e instanceof Error ? e.message : "Couldn't create the folder structure.", tone: "err" });
+      load(q);
+      return;
+    }
+    // One panel row per file (relative path as the label so the batch reads
+    // like the folder), each with its own destination override.
+    interface BatchRow {
+      key: number; name: string; size: number; mime: string;
+      status: UploadStatus; pct: number | null; dest: string; ov: DestOverride;
+    }
+    const batch: BatchRow[] = entries.map((e: FolderEntry): BatchRow => {
+      const dirPath = e.parts.slice(0, -1).join("/");
+      let ov: DestOverride;
+      if (inDrive && driveAccountId) {
+        if (dirPath) {
+          const g = gDirs.get(dirPath);
+          if (!g) throw new Error(`couldn't resolve folder “${dirPath}”`);
+          ov = { kind: "drive", accountId: g.accountId, googleParent: g.googleId };
+        } else {
+          ov = { kind: "drive", accountId: driveAccountId, googleParent: driveRootFolder };
+        }
+      } else {
+        ov = { kind: "workspace", folder: dirPath ? wsDirs.get(dirPath) ?? curFolder : curFolder };
+      }
+      const dl = ov.kind === "drive"
+        ? (accounts.find((a) => a.id === ov.accountId)?.label ?? "Drive")
+        : supaOff ? "Drive" : "Supabase";
+      return {
+        key: ++upSeq.current, name: e.parts.join("/"), size: e.file.size,
+        mime: e.file.type || "application/octet-stream",
+        status: "hashing" as UploadStatus, pct: null as number | null, dest: dl,
+        ov,
+      };
+    });
+    setUploadItems(batch.map((b) => ({
+      key: b.key, name: b.name, size: b.size, mime: b.mime,
+      status: b.status, pct: b.pct, dest: b.dest,
+    })));
+    setUploadPanelMin(false);
+    upCancelAll.current = false;
+    let failed = 0;
+    for (let i = 0; i < entries.length; i++) {
+      if (upCancelAll.current) {
+        setItem(batch[i].key, { status: "error", error: "cancelled" });
+        failed++;
+        continue;
+      }
+      if (!(await uploadOneFile(entries[i].file, batch[i].key, batch[i].ov, true))) failed++;
+    }
+    upAbort.current = null;
+    if (inDrive && driveAccountId) await loadTree(driveAccountId);
+    load(q);
+    const done = entries.length - failed;
+    toast({
+      text: `Folder upload finished: ${done} file${done === 1 ? "" : "s"} uploaded${made ? `, ${made} folder${made === 1 ? "" : "s"} created` : ""}${failed ? `, ${failed} failed — see the upload panel.` : "."}`,
+      tone: failed ? "err" : "ok",
+    });
+  }
+
+  // One file through the full pipeline (hash → transfer → index), honoring a
+  // folder-upload destination override. deferReload skips per-file tree
+  // refreshes when the caller reloads once at the end of a batch.
+  // Resolves true when the file indexed successfully.
+  async function uploadOneFile(file: File, key: number, ov: DestOverride | null, deferReload: boolean): Promise<boolean> {
+    // Drive destination for this file: explicit override wins, else the open
+    // drive view, else none (workspace rules apply).
+    const dv = ov?.kind === "drive"
+      ? { accountId: ov.accountId, folderId: ov.googleParent }
+      : inDriveView && driveView
+        ? driveView
+        : null;
+    const wsFolder = ov?.kind === "workspace" ? ov.folder : (!dv ? curFolder : null);
+    // Fast availability pre-check for this file's drive (the backend
+    // re-validates fresh anyway).
+    const pinnedDrive = dv ? dv.accountId : (!supaOff && !mirrorOff ? driveSel || null : null);
+    if (pinnedDrive && !accounts.some((a) => a.id === pinnedDrive && a.status === "active")) {
+      const tgt = accounts.find((a) => a.id === pinnedDrive);
+      setItem(key, { status: "error", error: `The chosen drive${tgt?.label ? ` (“${tgt.label}”)` : ""} isn't available — pick another drive or use Auto.` });
+      return false;
+    }
+    if (upCancelAll.current) { setItem(key, { status: "error", error: "cancelled" }); return false; }
       try {
         // Size gate BEFORE hashing: sha256 buffers the whole file — rejecting
         // a huge pick after a long hash is the OOM/timeout the cap exists to prevent.
@@ -1165,10 +1365,13 @@ export default function Explorer() {
             name: file.name, mime: file.type || "application/octet-stream", size: file.size,
           };
           if (hash) initBody.hash = hash;
-          if (inDriveView && driveView) {
-            initBody.drive_account = driveView.accountId;
-            if (driveView.folderId) initBody.google_parent = driveView.folderId;
+          if (dv) {
+            initBody.drive_account = dv.accountId;
+            if (dv.folderId) initBody.google_parent = dv.folderId;
             initBody.folder = null;
+          } else if (ov?.kind === "workspace") {
+            if (ov.folder) initBody.folder = ov.folder;
+            if (driveSel) initBody.drive_account = driveSel;
           } else {
             if (curFolder) initBody.folder = curFolder;
             if (driveSel) initBody.drive_account = driveSel;
@@ -1232,8 +1435,8 @@ export default function Explorer() {
           const dj = await done.json().catch(() => ({}));
           if (!done.ok) throw new Error(dj.error ?? "couldn't register the upload");
           setItem(key, { status: "done", pct: 100 });
-          if (inDriveView && driveView) await loadTree(driveView.accountId);
-          continue;
+          if (!deferReload && dv) await loadTree(dv.accountId);
+          return true;
         }
         const hash = await sha256(file);
         if (upCancelAll.current) throw new Error("cancelled");
@@ -1241,7 +1444,7 @@ export default function Explorer() {
         // refuse an unavailable drive BEFORE bytes move (register re-checks).
         // Local-only uploads (mirror off) pin nothing — validating the unused
         // picker drive would wrongly fail them.
-        const initDrive = inDriveView && driveView ? driveView.accountId : (!mirrorOff ? (driveSel || undefined) : undefined);
+        const initDrive = dv ? dv.accountId : (!mirrorOff ? (driveSel || undefined) : undefined);
         const init = await fetch("/api/drive/upload-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, ...(initDrive ? { drive_account: initDrive } : {}) }) });
         const dj = await init.json();
         if (!init.ok) throw new Error(dj.error ?? "upload init failed");
@@ -1252,32 +1455,29 @@ export default function Explorer() {
         setItem(key, { status: "indexing", pct: null });
         const meta = await fetch("/api/drive/upload", {
           method: "POST", headers: { "content-type": "application/json" },
-          // Inside a drive view the bytes mirror into THAT drive folder (the
-          // mirror is forced on: uploading "here" means Google). folder stays
-          // null — the file lives in the drive tree, not a workspace folder.
-          body: JSON.stringify(inDriveView && driveView
-            ? { name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: null, drive_account: driveView.accountId, google_parent: driveView.folderId, usb: usbTarget || undefined }
-            : { name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: curFolder, drive_account: mirrorOff ? null : (driveSel || undefined), usb: usbTarget || undefined })
+          // Inside a drive destination the bytes mirror into THAT drive folder
+          // (the mirror is forced on: uploading "here" means Google). folder
+          // stays null — the file lives in the drive tree, not a workspace
+          // folder. Folder-upload overrides to a workspace folder keep the
+          // normal mirror/USB behavior of the current toggles.
+          body: JSON.stringify(dv
+            ? { name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: null, drive_account: dv.accountId, google_parent: dv.folderId, usb: undefined }
+            : { name: file.name, mime: file.type || "application/octet-stream", size: file.size, hash, backends: ["local"], storage_path: dj.path, folder: wsFolder, drive_account: mirrorOff ? null : (driveSel || undefined), usb: usbTarget || undefined })
         });
         const mj = await meta.json().catch(() => ({}));
         if (!meta.ok) throw new Error(mj.error ?? "indexing failed");
-        if (inDriveView && driveView) await loadTree(driveView.accountId);
+        if (!deferReload && dv) await loadTree(dv.accountId);
         if (mj.push_error) toast({ text: `"${file.name}" saved locally — Google mirror skipped: ${mj.push_error}`, tone: "err" });
         if (mj.usb_queued === true) toast({ text: `"${file.name}" queued for office-USB copy (agent picks it up).`, tone: "ok" });
         else if (typeof mj.usb_queued === "string") toast({ text: `"${file.name}" USB queue failed: ${mj.usb_queued}`, tone: "err" });
         setItem(key, { status: "done", pct: 100 });
-        ok++;
+        return true;
       } catch (e) {
         // Aborts surface as DOMExceptions — report the honest word instead.
         const msg = upCancelAll.current ? "cancelled" : e instanceof Error ? e.message : "upload failed.";
         setItem(key, { status: "error", error: msg });
+        return false;
       }
-    }
-    upAbort.current = null;
-    if (fileRef.current) fileRef.current.value = "";
-    // The panel is the summary now (its header is a live region) — no
-    // end-of-batch toast to double-announce it.
-    load(q);
   }
 
   function copyLink(r: Row) {
@@ -1421,6 +1621,24 @@ export default function Explorer() {
     return null;
   }
   const taggable = (r: Row) => tagTarget(r) !== null;
+  // Slack-mute target for a folder row: Workspace folders by uuid, indexed
+  // Google folders by index row + account. Live unindexed rows return null
+  // (sync first — same rule as Tags).
+  function muteTargetOf(r: Row): MuteTarget | null {
+    if (r.kind !== "folder" || nav.kind === "bin") return null;
+    if (r.folder) return { scope: "workspace", id: r.folder.id, name: r.name };
+    if (r.googleFolder && r.file?.drive_account_id) {
+      return { scope: "drive", id: r.file.id, account: r.file.drive_account_id, name: r.name };
+    }
+    return null;
+  }
+  function muteLabelFor(key: string): string {
+    const m = muteMeta[key];
+    if (!m) return "…";
+    if (m.muted) return "Muted";
+    if (m.effective) return "Muted via parent";
+    return "On";
+  }
   const rowTags = (r: Row): Tag[] => {
     const t = tagTarget(r);
     return t ? effIdsOf(t.kind, t.id).map((id) => tg.byId.get(id)).filter(Boolean) as Tag[] : [];
@@ -1617,6 +1835,24 @@ export default function Explorer() {
     }).catch(() => {});
     // infoMeta intentionally excluded — the functional update + cached-key
     // guard make re-runs no-ops; listing it would refetch on every resolve.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showInfo, sel?.key]);
+
+  // Slack-mute state: one cheap state request per opened folder Details item
+  // (no descendant tree — the dialog fetches that). Cached by row key.
+  useEffect(() => {
+    if (!showInfo || !sel || nav.kind === "bin") return;
+    const t = muteTargetOf(sel);
+    if (!t || muteMeta[sel.key]) return;
+    const key = sel.key;
+    const q = t.scope === "workspace"
+      ? `scope=workspace&id=${encodeURIComponent(t.id)}`
+      : `scope=drive&id=${encodeURIComponent(t.id)}&account=${encodeURIComponent(t.account ?? "")}`;
+    fetch(`/api/folders/slack-mute?${q}`).then((r) => r.json().catch(() => null)).then((d) => {
+      if (d && typeof d === "object" && d.ok) {
+        setMuteMeta((m) => (m[key] ? m : { ...m, [key]: { muted: !!d.muted, effective: !!d.effectiveMuted } }));
+      }
+    }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showInfo, sel?.key]);
 
@@ -1850,6 +2086,7 @@ export default function Explorer() {
               trigger={<span className="flex items-center gap-0.5 text-ink/80"><CircleEllipsis size={21} strokeWidth={1.5} /><ChevronDown size={12} /></span>}
               items={[
                 { label: "New folder", icon: <FolderPlus size={14} />, onSelect: () => setShowNewFolder(true), hidden: nav.kind !== "root" },
+                { label: "Upload folder", icon: <FolderUp size={14} />, onSelect: () => folderRef.current?.click(), hidden: nav.kind !== "root" },
                 "sep",
                 { label: syncing ? "Syncing from Google…" : "Sync from Google", icon: syncing ? <Ring className="size-3.5" /> : <CloudDownload size={14} />, disabled: syncing, onSelect: syncGoogle },
                 { label: "Refresh", icon: <RefreshCw size={14} />, onSelect: () => load(q) },
@@ -1857,6 +2094,7 @@ export default function Explorer() {
                 { label: "Also copy uploads to office USB", hint: supaOff ? "Needs Supabase on" : undefined, icon: usbTarget ? <Check size={14} /> : undefined, disabled: supaOff, onSelect: toggleUsb }
               ]} />
             <input ref={fileRef} type="file" multiple className="hidden" aria-label="Choose files to upload" onChange={(e) => uploadPicked(e.target.files)} />
+            <input ref={folderRef} type="file" multiple className="hidden" aria-label="Choose a folder to upload" onChange={(e) => uploadFolderPicked(e.target.files)} />
           </div>
         </div>
 
@@ -2195,6 +2433,20 @@ export default function Explorer() {
                   {rowTags(sel).length === 0 && <span className="text-[11.5px] text-muted">{taggable(sel) ? "No tags yet" : "Tags apply to indexed files"}</span>}
                 </div>
                 {sel.dept && <p className="mt-2 text-[11.5px] text-muted">Department: <span className="text-ink/80">{sel.dept}</span></p>}
+                {(() => {
+                  const t = muteTargetOf(sel);
+                  return t && nav.kind !== "bin" ? (
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <p className="text-[12px] text-ink/80">
+                        Slack notifications: <span className="text-ink font-medium">{muteLabelFor(sel.key)}</span>
+                      </p>
+                      <button onClick={() => setMuteTarget(t)}
+                        className="min-h-[36px] px-2 -mr-2 text-[12px] text-brand font-medium inline-flex items-center gap-1 hover:underline">
+                        <BellOff size={13} /> Change
+                      </button>
+                    </div>
+                  ) : null;
+                })()}
               </div>
               <div className="mt-auto pt-6 flex items-center justify-center divide-x divide-line text-ink/80">
                 {sel.kind === "file" && !sel.id.startsWith("g:") && nav.kind !== "bin" && (
@@ -2276,6 +2528,13 @@ export default function Explorer() {
                 disabled: !tagTarget(r),
                 why: !tagTarget(r) ? needSync : undefined,
                 show: (r.kind === "file" || r.kind === "folder") && nav.kind !== "bin" },
+              // Per-folder Slack mute (Slack posts only — in-app + audit stay).
+              // Unindexed Drive rows need a sync first, like Tags.
+              { label: "Mute Slack notifications…", icon: <BellOff size={14} />,
+                on: (() => { const t = muteTargetOf(r); return t ? () => setMuteTarget(t) : undefined; })(),
+                disabled: !muteTargetOf(r),
+                why: !muteTargetOf(r) ? needSync : undefined,
+                show: r.kind === "folder" && nav.kind !== "bin" },
               { label: "Rename", icon: <Pencil size={14} />,
                 on: r.kind === "folder" && r.folder ? () => openRename("folder", r.folder!.id, r.folder!.name)
                   : r.kind === "folder" && r.indexId ? () => openRename("file", r.indexId!, r.name)
@@ -2351,6 +2610,7 @@ export default function Explorer() {
 
       {tagEditor && <TagEditor tag={tagEditor.tag} api={tg} onClose={() => setTagEditor(null)} />}
       {tagPicker && <TagPicker target={tagPicker} api={tg} onClose={() => setTagPicker(null)} />}
+      {muteTarget && <SlackMuteDialog target={muteTarget} onClose={() => setMuteTarget(null)} onSaved={() => setMuteMeta({})} />}
       <ConfirmDialog open={!!confirmTagDel} title={`Delete tag “${confirmTagDel?.name}”?`}
         body="It is removed from every file and folder. The files themselves are not touched."
         confirmLabel="Delete tag" onClose={() => setConfirmTagDel(null)}

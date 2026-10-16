@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { postSlack, slackDisplayName } from "@/lib/slack";
+import { fileSlackMuted } from "@/lib/folder-slack-mute";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Db = SupabaseClient<any, "public", any>;
@@ -8,6 +9,9 @@ type Db = SupabaseClient<any, "public", any>;
 // managers/admins + Slack channel post, both with who/where/what details.
 // Shared by the Supabase-intake upload and the direct-to-Google upload so
 // both paths announce identically.
+//
+// Per-folder Slack mutes: an effectively-muted destination suppresses ONLY
+// the Slack post — in-app notifications and audit logging continue.
 export async function notifyUpload(db: Db, req: Request, args: {
   fileId: string; name: string; size?: number | null; folderId?: string | null;
   userId: string; username: string; origin?: string;
@@ -55,9 +59,21 @@ export async function notifyUpload(db: Db, req: Request, args: {
     // Upload alerts stay preview-free: Slack must not expand the Eiden link
     // into a file preview in the notification channel (scoped to these
     // messages only — user-shared links unfurl normally elsewhere).
-    postSlack(`:outbox_tray: File uploaded\n\n${args.name}\nUploaded by ${byline}\n\n:file_folder: Location: ${where} :page_facing_up: Type: ${typeTxt} :floppy_disk: Size: ${args.size ? formatBytes(args.size) : "unknown"}\n:link: <${link}|View file in Drive>`, { unfurl_links: false, unfurl_media: false }).then((r) => {
-      if (!r.ok) console.error("[slack-upload]", r.error);
-    });
+    // Folder Slack mutes suppress this post only (in-app + audit continue).
+    let slackMuted = false;
+    try {
+      const { data: fr } = await db.from("file_index")
+        .select("folder,google_parent_id,drive_account_id").eq("id", args.fileId).maybeSingle();
+      const frow = (fr ?? null) as { folder: string | null; google_parent_id?: string | null; drive_account_id?: string | null } | null;
+      if (frow) slackMuted = await fileSlackMuted(db, frow);
+    } catch (e) {
+      console.warn(`[upload-notify] mute check failed, posting anyway: ${e instanceof Error ? e.message : e}`);
+    }
+    if (!slackMuted) {
+      postSlack(`:outbox_tray: File uploaded\n\n${args.name}\nUploaded by ${byline}\n\n:file_folder: Location: ${where} :page_facing_up: Type: ${typeTxt} :floppy_disk: Size: ${args.size ? formatBytes(args.size) : "unknown"}\n:link: <${link}|View file in Drive>`, { unfurl_links: false, unfurl_media: false }).then((r) => {
+        if (!r.ok) console.error("[slack-upload]", r.error);
+      });
+    }
   } catch { /* fan-out never fails the upload */ }
 }
 
