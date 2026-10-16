@@ -239,6 +239,11 @@ function LoginForm() {
           No account yet? <button onClick={() => { setStep("request"); setReqName(""); setReqMsg(""); setReqState("idle"); }} className="text-[var(--login)] border-b border-[var(--login)] min-h-[44px]">Request access</button>
         </p>
       )}
+      <p className="text-center text-[12.5px] text-muted mt-6">
+        <a href="/privacy" className="underline">Privacy Policy</a>
+        <span aria-hidden="true"> · </span>
+        <a href="/terms" className="underline">Terms of Service</a>
+      </p>
     </div>
   );
 }

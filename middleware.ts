@@ -6,6 +6,9 @@ import { createMiddlewareClient } from "@supabase/auth-helpers-nextjs";
 // Machine endpoints (agent, Google webhook) have no browser session — they authenticate
 // themselves INSIDE the route with a shared secret and fail closed if it is not configured.
 const PUBLIC = [
+  "/",
+  "/privacy",
+  "/terms",
   "/login",
   "/welcome",                  // invite landing; reads the session from the URL hash in the browser
   "/api/access-requests",      // public "request access" form on the login page

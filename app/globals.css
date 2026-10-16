@@ -99,6 +99,22 @@ body { font-family: var(--font-poppins), system-ui, sans-serif; -webkit-font-smo
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 
+html { scroll-behavior: auto; }
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+  /* Scroll-triggered reveal (added client-side by <Reveal/> — SSR/no-JS stays visible). */
+  .reveal { opacity: 0; transition: opacity .65s ease, transform .65s cubic-bezier(.2, .7, .2, 1); will-change: opacity, transform; }
+  .reveal-up { transform: translateY(22px); }
+  .reveal-fade { transform: none; }
+  .reveal-scale { transform: scale(.96); }
+  .reveal.is-visible { opacity: 1; transform: none; }
+  /* Gentle hero entrance + hover lift for cards. */
+  @keyframes hero-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  .hero-in { animation: hero-in .7s cubic-bezier(.2, .7, .2, 1) both; }
+  .lift { transition: transform .25s ease, box-shadow .25s ease; }
+  .lift:hover { transform: translateY(-3px); }
+}
+
 /* File viewer + editor: code, markdown, overlay editing. */
 .code-view { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--soft); color: var(--ink); overflow: auto; margin: 0; }
 .code-view .cl { display: flex; min-width: max-content; }
