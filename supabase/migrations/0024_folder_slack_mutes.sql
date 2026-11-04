@@ -25,13 +25,13 @@ create table if not exists folder_slack_mutes (
   )
 );
 
-create unique index if not exists folder_slack_mutes_ws_uidx
-  on folder_slack_mutes (workspace_folder_id)
-  where workspace_folder_id is not null;
-
-create unique index if not exists folder_slack_mutes_drive_uidx
-  on folder_slack_mutes (drive_account_id, google_folder_id)
-  where drive_account_id is not null;
+-- Plain UNIQUE constraints (not partial indexes): Postgres ON CONFLICT
+-- (columns) only matches a real constraint or full unique index. NULLs are
+-- distinct under UNIQUE, which is exactly the one-target-kind rule — many
+-- drive rows may share NULL workspace_folder_id and vice versa.
+alter table public.folder_slack_mutes
+  add constraint folder_slack_mutes_ws_uniq unique (workspace_folder_id),
+  add constraint folder_slack_mutes_drive_uniq unique (drive_account_id, google_folder_id);
 
 create index if not exists folder_slack_mutes_drive_idx
   on folder_slack_mutes (drive_account_id);
