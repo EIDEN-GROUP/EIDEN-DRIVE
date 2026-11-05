@@ -3,6 +3,7 @@ import { bucketFor } from "@/lib/storage";
 import { isBinned, googleInScope } from "@/lib/visibility";
 import { driveCtxFor, accountAccessToken, getAccounts, driveGoneReason } from "@/lib/drive-accounts";
 import { resolveShare, throttled } from "@/lib/share";
+import { listSharedFolderChildren, resolveSharedChildFile } from "@/lib/shared-folder";
 
 export const dynamic = "force-dynamic";
 
@@ -50,23 +51,47 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
   const ip = (req.headers.get("x-forwarded-for") ?? "").split(",")[0].trim() || "unknown";
   const r = await load(token, ip);
   if ("error" in r) return r.error;
-  const { file } = r.shared;
-  // A trashed file's public link dies with it (restore revives the link too).
-  if (await isBinned(adminClient(), file.id)) return denied();
-  // Links are minted in-scope but rows outlive listings: re-scope must kill
-  // the bytes too, not just the Workspace row. Revalidate on every serve.
-  if (file.google_file_id && file.drive_account_id) {
-    try {
-      if (!(await googleInScope(adminClient(), await getAccounts(), file.drive_account_id, file.google_file_id))) return denied();
-    } catch { return denied(); }
+  const shared = r.shared;
+  const url = new URL(req.url);
+  const requestedFile = url.searchParams.get("file");
+
+  let file = shared.kind === "file" ? shared.file : null;
+  const targetFolder = shared.kind === "folder" ? shared.folder : null;
+
+  if (targetFolder && !requestedFile && kind !== "meta") return denied();
+
+  if (targetFolder && requestedFile) {
+    const ch = await resolveSharedChildFile(targetFolder, requestedFile);
+    if (!ch) return denied();
+    file = ch as typeof file;
+  }
+  // checks/trashed etc
+  if (file) {
+    if (await isBinned(adminClient(), file.id)) return denied();
+    if (file.google_file_id && file.drive_account_id) {
+      try {
+        if (!(await googleInScope(adminClient(), await getAccounts(), file.drive_account_id, file.google_file_id))) return denied();
+      } catch { return denied(); }
+    }
   }
 
   if (kind === "meta") {
-    return Response.json({
-      name: file.name, mime: file.mime, size: file.size, backends: file.backends,
-      hasCover: !!file.google_file_id || file.mime.startsWith("image/") || file.mime.startsWith("video/")
-    });
+    if (targetFolder && !requestedFile) {
+      const kids = await listSharedFolderChildren(targetFolder);
+      return Response.json({ kind: "folder", name: targetFolder.name, mime: "application/vnd.google-apps.folder", size: 0, backends: targetFolder.backends, hasCover: false, children: kids.slice(0, 120), hasMore: kids.length > 120 });
+    }
+    if (requestedFile && file) {
+      return Response.json({ kind: "file", name: file.name, mime: file.mime, size: file.size, backends: file.backends, hasCover: !!file.google_file_id || file.mime.startsWith("image/") || file.mime.startsWith("video/") });
+    }
+    if (file) {
+      return Response.json({ name: file.name, mime: file.mime, size: file.size, backends: file.backends, hasCover: !!file.google_file_id || file.mime.startsWith("image/") || file.mime.startsWith("video/") });
+    }
+    return denied();
   }
+
+  if (!file) return denied();
+  // raw/thumb continue uses non-null file from guard ... but TS may not narrow until checked.
+  if (!file) return denied();
 
   // Thumb: Google's server render when the file lives there, else nothing
   // (the share page falls back to its generic tile — never a broken image).

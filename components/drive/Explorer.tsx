@@ -100,6 +100,8 @@ export default function Explorer() {
   const [tagEditor, setTagEditor] = useState<{ tag?: Tag } | null>(null);
   const [tagPicker, setTagPicker] = useState<{ kind: TagKind; id: string; name: string } | null>(null);
   const [confirmTagDel, setConfirmTagDel] = useState<Tag | null>(null);
+  // Ephemeral public links, surfaced one at a time from the folder context menu.
+  const [freshShareUrl, setFreshShareUrl] = useState<string | null>(null);
   // Per-folder Slack mute dialog target + lazily-loaded mute states (row key
   // → state). One cheap state request per opened Details item or dialog.
   const [muteTarget, setMuteTarget] = useState<MuteTarget | null>(null);
@@ -1482,7 +1484,18 @@ export default function Explorer() {
 
   function copyLink(r: Row) {
     const url = `${window.location.origin}/drive/${r.id}`;
-    navigator.clipboard?.writeText(url).then(() => toast({ text: "Link copied.", tone: "ok" }), () => toast({ text: "Couldn't copy link.", tone: "err" }));
+    navigator.clipboard?.writeText(url).then(() => toast({ text: "Link copied.", tone: "ok" }), () => toast({ text: "Couldn't copy — select it manually.", tone: "err" }));
+  }
+  async function shareFolder(r: Row) {
+    const body = r.folder
+      ? { folder_id: r.folder.id, days: 30 }
+      : (r.file ? { file_id: r.file.id, days: 30 } : null);
+    if (!body) return;
+    const res = await fetch("/api/share", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { toast({ text: d.error ?? "Couldn't create the link.", tone: "err" }); return; }
+    setFreshShareUrl(d.url);
+    toast({ text: "Copy the share link while it's shown.", tone: "ok" });
   }
 
   function openRename(kind: "file" | "folder", id: string, name: string) {
@@ -2554,6 +2567,9 @@ export default function Explorer() {
                 show: r.kind === "file" && indexed },
               { label: "Copy link", icon: <Link2 size={14} />, on: () => copyLink(r),
                 show: !isLive && !isGFolder && r.kind === "file" },
+{ label: "Generate share link", icon: <Link2 size={14} />, on: () => shareFolder(r),
+  show: r.kind === "folder" || (!isLive && !isGFolder && r.kind === "file"),
+  disabled: !r.folder && !r.file, why: !r.folder && !r.file ? needSync : undefined },
               { label: "Delete", icon: <Trash2 size={14} />, danger: true,
                 on: r.file && indexed ? () => setConfirmTrash(r.file!) : undefined,
                 disabled: !(r.file && indexed), why: needSync,
