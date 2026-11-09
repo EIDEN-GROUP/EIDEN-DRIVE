@@ -2125,6 +2125,19 @@ export default function Explorer() {
         {/* Body */}
         <div className="flex-1 min-h-0 flex">
           <div className="flex-1 min-w-0 flex flex-col">
+            {freshShareUrl && (
+              <div className="shrink-0 mx-3 mt-3 mb-2 rounded-lg border border-line bg-tint px-3 py-2 text-[12.5px] text-ink flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium">Share link (copy now - shown once):</span>
+                  <button onClick={() => setFreshShareUrl(null)} aria-label="Dismiss share link" className="min-h-[32px] min-w-[32px] grid place-items-center text-muted hover:text-ink"><X size={14} /></button>
+                </div>
+                <p className="font-mono break-all">{freshShareUrl}</p>
+                <button onClick={() => { navigator.clipboard?.writeText(freshShareUrl).then(() => toast({ text: "Copied.", tone: "ok" }), () => toast({ text: "Couldn't copy - select manually.", tone: "err" })); }}
+                  className="self-start min-h-[32px] px-2 rounded-md border border-line bg-surface text-[12.5px] hover:bg-tint">
+                  Copy link
+                </button>
+              </div>
+            )}
             {/* Inside a drive: breadcrumb back through its folders. */}
             {!loading && driveView && nav.kind === "root" && !q.trim() && (
               <div className="shrink-0 px-3 pt-2 flex items-center gap-1.5 text-[12.5px] overflow-x-auto whitespace-nowrap" aria-label="Drive location">
