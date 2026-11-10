@@ -1487,9 +1487,12 @@ export default function Explorer() {
     navigator.clipboard?.writeText(url).then(() => toast({ text: "Link copied.", tone: "ok" }), () => toast({ text: "Couldn't copy — select it manually.", tone: "err" }));
   }
   async function shareFolder(r: Row) {
+    // Prefer a local workspace folder target; fall back to indexed Google folders
+    // via their file row (same target id `/api/share` accepts).
     const body = r.folder
       ? { folder_id: r.folder.id, days: 30 }
-      : (r.file ? { file_id: r.file.id, days: 30 } : null);
+      : (r.file ? { file_id: r.file.id, days: 30 }
+        : (r.indexId ? { file_id: r.indexId, days: 30 } : null));
     if (!body) return;
     const res = await fetch("/api/share", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const d = await res.json().catch(() => ({}));
@@ -1640,8 +1643,14 @@ export default function Explorer() {
   function muteTargetOf(r: Row): MuteTarget | null {
     if (r.kind !== "folder" || nav.kind === "bin") return null;
     if (r.folder) return { scope: "workspace", id: r.folder.id, name: r.name };
-    if (r.googleFolder && r.file?.drive_account_id) {
-      return { scope: "drive", id: r.file.id, account: r.file.drive_account_id, name: r.name };
+    // Drive folders resolve by index row. In a drive view the account is
+    // already known, so an `indexId` alone is enough; in Workspace views
+    // the account rides on the file row.
+    const indexRowId = r.file?.id ?? r.indexId ?? null;
+    const accountId = r.file?.drive_account_id
+      ?? (r.indexId ? (driveView?.accountId ?? files.find((f) => f.id === r.indexId)?.drive_account_id ?? null) : null);
+    if (indexRowId && accountId) {
+      return { scope: "drive", id: indexRowId, account: accountId, name: r.name };
     }
     return null;
   }
@@ -2578,11 +2587,9 @@ export default function Explorer() {
                 disabled: !r.file?.storage_path || !!usbBusy,
                 why: usbBusy ? "Queuing…" : "Needs a Supabase copy first (Google-only file)",
                 show: r.kind === "file" && indexed },
-              { label: "Copy link", icon: <Link2 size={14} />, on: () => copyLink(r),
-                show: !isLive && !isGFolder && r.kind === "file" },
-{ label: "Generate share link", icon: <Link2 size={14} />, on: () => shareFolder(r),
-  show: r.kind === "folder" || (!isLive && !isGFolder && r.kind === "file"),
-  disabled: !r.folder && !r.file, why: !r.folder && !r.file ? needSync : undefined },
+              { label: "Copy link", icon: <Link2 size={14} />, on: () => shareFolder(r),
+                show: r.kind === "folder" || (!isLive && !isGFolder && r.kind === "file"),
+                disabled: !r.folder && !r.file && !r.indexId, why: !r.folder && !r.file && !r.indexId ? needSync : undefined },
               { label: "Delete", icon: <Trash2 size={14} />, danger: true,
                 on: r.file && indexed ? () => setConfirmTrash(r.file!) : undefined,
                 disabled: !(r.file && indexed), why: needSync,

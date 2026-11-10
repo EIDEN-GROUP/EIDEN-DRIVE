@@ -12,6 +12,36 @@ import { parseJson, parseQuery } from "@/lib/http";
 
 const DAYS = z.number().int().min(1).max(90).default(30);
 
+// Insert payload tolerant of the pre-0026 schema (file_id only). Newer
+// folder_id/kind columns ship with migration 0026; they are probed lazily
+// so file shares and Google-folder shares keep working everywhere, while
+// workspace-folder shares report a clear migration error instead of a
+// confusing raw Postgres message.
+async function insertShareLink(db: ReturnType<typeof adminClient>, row: {
+  token_hash: string; file_id: string | null; folder_id: string | null; kind: string;
+  created_by: string; expires_at: string;
+}): Promise<{ error: string | null; setupHint: boolean }> {
+  const withFolder = await db.from("share_links").insert(row);
+  const msg = withFolder.error?.message ?? "";
+  if (!withFolder.error) return { error: null, setupHint: false };
+  if (/folder_id|kind|does not exist|schema/i.test(msg)) {
+    // Retry with the stable pre-0026 shape when the folder target can be a
+    // plain file row anyway (file shares, Google-folder shares, indexed
+    // folders). Workspace-folder shares have no file row, so they need 0026.
+    if (row.file_id) {
+      const { error } = await db.from("share_links").insert({
+        token_hash: row.token_hash, file_id: row.file_id, created_by: row.created_by, expires_at: row.expires_at,
+      });
+      return { error: error?.message ?? null, setupHint: false };
+    }
+    return {
+      error: "Workspace-folder sharing needs migration 0026 — have an admin run it (Settings → Storage), then retry.",
+      setupHint: true,
+    };
+  }
+  return { error: msg, setupHint: false };
+}
+
 async function validateFile(db: ReturnType<typeof adminClient>, file_id: string, me: { id: string; role: string; department_tag?: string | null }) {
   const { data: f } = await db.from("file_index").select("id,name,owner,folder,google_file_id,google_parent_id,drive_account_id").eq("id", file_id).maybeSingle();
   const file = f as { id: string; name: string; owner: string; folder: string | null; google_file_id?: string | null; drive_account_id?: string | null } | null;
@@ -64,11 +94,8 @@ export async function POST(req: Request) {
     }
     const file = r.file;
     const token = newToken();
-    const { error } = await db.from("share_links").insert({
-      token_hash: tokenHash(token), file_id: file.id, folder_id: null, kind: "file", created_by: me.id,
-      expires_at: new Date(Date.now() + p.data.days * 86400_000).toISOString()
-    });
-    if (error) return Response.json({ error: error.message }, { status: 500 });
+    const ins = await insertShareLink(db, { token_hash: tokenHash(token), file_id: file.id, folder_id: null, kind: "file", created_by: me.id, expires_at: new Date(Date.now() + p.data.days * 86400_000).toISOString() });
+    if (ins.error) return Response.json({ error: ins.error }, { status: ins.setupHint ? 503 : 500 });
     await logAudit({ actor: me.id, actor_name: me.username, action: "share", file_id: file.id, req, detail: { share_days: p.data.days } });
     return Response.json({ ok: true, url: `${origin}/s/${token}`, expires_days: p.data.days }, { status: 201 });
   }
@@ -79,11 +106,8 @@ export async function POST(req: Request) {
   if (!gate.ok) return Response.json({ error: gate.reason ?? "only folders in your space can be shared" }, { status: 403 });
   if (await isFolderBinned(db, fol.id)) return binnedResponse();
   const token = newToken();
-  const { error } = await db.from("share_links").insert({
-    token_hash: tokenHash(token), file_id: null, folder_id: fol.id, kind: "folder", created_by: me.id,
-    expires_at: new Date(Date.now() + p.data.days * 86400_000).toISOString()
-  });
-  if (error) return Response.json({ error: error.message }, { status: 500 });
+  const ins = await insertShareLink(db, { token_hash: tokenHash(token), file_id: null, folder_id: fol.id, kind: "folder", created_by: me.id, expires_at: new Date(Date.now() + p.data.days * 86400_000).toISOString() });
+  if (ins.error) return Response.json({ error: ins.error }, { status: ins.setupHint ? 503 : 500 });
   await logAudit({ actor: me.id, actor_name: me.username, action: "share", file_id: null, req, detail: { share_days: p.data.days, kind: "folder" } });
   return Response.json({ ok: true, url: `${origin}/s/${token}`, expires_days: p.data.days }, { status: 201 });
 }

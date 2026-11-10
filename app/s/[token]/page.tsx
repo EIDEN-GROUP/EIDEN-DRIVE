@@ -45,6 +45,8 @@ export async function generateMetadata({ params }: { params: { token: string } }
 
 export default async function SharePage({ params }: { params: { token: string } }) {
   const s = await resolveShare(params.token).catch(() => null);
-  const initial = s && s.kind === "file" ? { name: s.file.name, mime: s.file.mime, size: s.file.size } : null;
+  const initial = s && s.kind === "file"
+    ? { name: s.file.name, mime: s.file.mime, size: s.file.size }
+    : { name: s?.kind === "folder" ? s.folder.name : "Shared item", mime: "application/vnd.google-apps.folder", size: 0 };
   return <ShareView token={params.token} initial={initial} />;
 }

@@ -48,30 +48,6 @@ export interface SharedFolder {
 
 export type SharedTarget = SharedFile | SharedFolder;
 
-export interface SharedChild {
-  id: string; name: string; mime: string; size: number;
-  account: string | null; google_file_id: string | null;
-  folder_id: string | null; created_at?: string | null;
-}
-
-// True only if `child` sits under `target` for the storage layer.
-export async function isSharedChild(token: string, childResource: string): Promise<{ ok: true; target: SharedTarget } | { ok: false }> {
-  const t = await resolveShare(token);
-  if (!t) return { ok: false };
-  const db = adminClient();
-  try {
-    if (t.kind === "folder") {
-      const f = t.folder;
-      // workspace
-      if (f.source === "workspace") {
-        const { data } = await db.from("file_index").select("id").eq("id", childResource).single();
-        void data;
-      }
-    }
-  } catch { /* ignore */ }
-  return { ok: true, target: t };
-}
-
 export async function resolveShare(token: string): Promise<SharedTarget | null> {
   if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const db = adminClient();

@@ -1,7 +1,6 @@
 import { adminClient } from "@/lib/supabase-admin";
 import { isBinned, googleInScope } from "@/lib/visibility";
 import { subtreeIds } from "@/lib/folders";
-import { driveDescendants } from "@/lib/folder-slack-mute";
 
 export interface SharedChild {
   id: string; name: string; mime: string; size: number;
