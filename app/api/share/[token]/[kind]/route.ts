@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 
 // Public bytes for a share link (the token IS the auth). Capped like the
 // in-app preview; anything bigger must open the Drive page signed in.
+// Video/images render in the browser from this endpoint (range-served).
 const RAW_MAX = 25 * 1024 * 1024;
 
 function denied(code?: string) {
@@ -78,13 +79,13 @@ export async function GET(req: Request, { params }: { params: { kind: string; to
   if (kind === "meta") {
     if (targetFolder && !requestedFile) {
       const kids = await listSharedFolderChildren(targetFolder);
-      return Response.json({ kind: "folder", name: targetFolder.name, mime: "application/vnd.google-apps.folder", size: 0, backends: targetFolder.backends, hasCover: false, children: kids.slice(0, 120), hasMore: kids.length > 120 });
+      return Response.json({ kind: "folder", name: targetFolder.name, mime: "application/vnd.google-apps.folder", size: 0, backends: targetFolder.backends, hasCover: false, children: kids.slice(0, 120).map((k) => ({ ...k, googleId: k.google_file_id ?? null })), hasMore: kids.length > 120 });
     }
     if (requestedFile && file) {
-      return Response.json({ kind: "file", name: file.name, mime: file.mime, size: file.size, backends: file.backends, hasCover: !!file.google_file_id || file.mime.startsWith("image/") || file.mime.startsWith("video/") });
+      return Response.json({ kind: "file", name: file.name, mime: file.mime, size: file.size, backends: file.backends, hasCover: !!file.google_file_id || file.mime.startsWith("image/") || file.mime.startsWith("video/"), googleId: file.google_file_id ?? null });
     }
     if (file) {
-      return Response.json({ name: file.name, mime: file.mime, size: file.size, backends: file.backends, hasCover: !!file.google_file_id || file.mime.startsWith("image/") || file.mime.startsWith("video/") });
+      return Response.json({ name: file.name, mime: file.mime, size: file.size, backends: file.backends, hasCover: !!file.google_file_id || file.mime.startsWith("image/") || file.mime.startsWith("video/"), googleId: file.google_file_id ?? null });
     }
     return denied();
   }
